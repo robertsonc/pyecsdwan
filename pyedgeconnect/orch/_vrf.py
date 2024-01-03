@@ -367,8 +367,8 @@ def delete_routing_segmentation_maps_from_source_segment(
 
 def get_routing_segmentation_security_policy(
     self,
-    source_zone: str,
-    destination_zone: str,
+    source_segment: str,
+    destination_segment: str,
 ) -> dict:
     """Get all security policies configured on Orchestrator for a
     particular pair source and destination segments
@@ -383,25 +383,25 @@ def get_routing_segmentation_security_policy(
           - GET
           - /vrf/config/securityPolicies/{map}
 
-    :param source_zone: Numeric string id of source segment, e.g. ``0``
-    :type source_zone: int
-    :param destination_zone: Numeric string id of destination segment,
+    :param source_segment: Numeric string id of source segment, e.g. ``0``
+    :type source_segment: str
+    :param destination_segment: Numeric string id of destination segment,
         e.g. ``0``
-    :type destination_zone: int
+    :type destination_segment: str
     :return: Returns dictionary of applicable maps and details
     :rtype: dict
     """
     return self._get(
         "/vrf/config/securityPolicies/{}_{}".format(
-            source_zone, destination_zone
+            source_segment, destination_segment
         )
     )
 
 
 def update_routing_segmentation_security_policy(
     self,
-    source_zone: str,
-    destination_zone: str,
+    source_segment: str,
+    destination_segment: str,
     segment_map: dict,
 ) -> bool:
     """Update security policies configured on Orchestrator for a
@@ -451,11 +451,11 @@ def update_routing_segmentation_security_policy(
             }
         }
 
-    :param source_zone: Numeric string id of source segment, e.g. ``0``
-    :type source_zone: int
-    :param destination_zone: Numeric string id of destination segment,
+    :param source_segment: Numeric string id of source segment, e.g. ``0``
+    :type source_segment: str
+    :param destination_segment: Numeric string id of destination segment,
         e.g. ``0``
-    :type destination_zone: int
+    :type destination_segment: str
     :param segment_map: Security map details, see above example. Note
         that the `<zoneFromId_zoneToId>` under the map are the firewall
         zones and not related to the segment ids.
@@ -465,7 +465,7 @@ def update_routing_segmentation_security_policy(
     """
     return self._post(
         "/vrf/config/securityPolicies/{}_{}".format(
-            source_zone, destination_zone
+            source_segment, destination_segment
         ),
         data=segment_map,
         expected_status=[204],
