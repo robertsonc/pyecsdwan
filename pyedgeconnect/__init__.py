@@ -739,9 +739,24 @@ class Orchestrator(HttpCommon):
     from .orch._broadcast_cli import broadcast_cli
     from .orch._built_in_policies import get_built_in_policies
 
-    # TODO: add cluster function imports here
     from .orch._cluster import get_cluster_state
     from .orch._cluster import get_cluster_alarm_count
+    from .orch._cluster import get_all_cluster_profiles
+    from .orch._cluster import add_cluster_profiles
+    from .orch._cluster import update_cluster_profile
+    from .orch._cluster import delete_cluster_profile
+    from .orch._cluster import get_all_cluster_profile_mappings
+    from .orch._cluster import update_cluster_profile_mapping
+    from .orch._cluster import initialize_edge_ha_cluster
+    from .orch._cluster import initialize_edge_ha_cluster
+    from .orch._cluster import add_cluster_profiles
+    from .orch._cluster import update_cluster_profile_mapping
+    from .orch._cluster import update_cluster_profile
+    from .orch._cluster import get_cluster_profiles
+    from .orch._cluster import get_cluster_state
+    from .orch._cluster import delete_cluster_profile
+    from .orch._cluster import get_cluster_alarm_count
+    from .orch._cluster import get_cluster_profile_mapping
 
     from .orch._custom_appliance_tags import get_custom_appliance_tags
     from .orch._custom_certs import (
