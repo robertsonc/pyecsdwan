@@ -741,6 +741,7 @@ class Orchestrator(HttpCommon):
 
     # TODO: add cluster function imports here
     from .orch._cluster import get_cluster_state
+    from .orch._cluster import get_cluster_alarm_count
 
     from .orch._custom_appliance_tags import get_custom_appliance_tags
     from .orch._custom_certs import (
