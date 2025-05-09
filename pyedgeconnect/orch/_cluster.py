@@ -24,25 +24,25 @@ def get_cluster_state(self, cluster_name: str, cached: bool) -> dict:
     :type cached: bool
     :return: Returns dictionary of cluster state information \n
         * keyword **<siteName>** (`dict`): Dictionary with site information \n
-            * keyword **siteName** (`str`): Name of the site/cluster
-            * keyword **inSync** (`bool`): Whether the cluster is in sync
-            * keyword **nonce** (`float`): Nonce value for the cluster
-            * keyword **siteApplianceInterfaceIps** (`dict`): Dictionary of appliance
+            * keyword **siteName** (`str`): Name of the site/cluster \n
+            * keyword **inSync** (`bool`): Whether the cluster is in sync \n
+            * keyword **nonce** (`float`): Nonce value for the cluster \n
+            * keyword **siteApplianceInterfaceIps** (`dict`): Dictionary of appliance \n
                 interface IPs keyed by network primary key (nePk) \n
                 * keyword **<nePk>** (`dict`): Dictionary with appliance information \n
-                    * keyword **applianceName** (`str`): Name of the appliance
-                    * keyword **interfaceLabel** (`str`): Label of the interface
-                    * keyword **interfaceName** (`str`): Name of the interface
+                    * keyword **applianceName** (`str`): Name of the appliance \n
+                    * keyword **interfaceLabel** (`str`): Label of the interface \n
+                    * keyword **interfaceName** (`str`): Name of the interface \n
                     * keyword **state** (`dict`): State information for the interface \n
                         * keyword **peerIPStatusList** (`list[dict]`): List of peer IP statuses \n
-                            * keyword **peerIP** (`str`): IP address of the peer
-                            * keyword **peerIPState** (`str`): State of the peer IP
-                        * keyword **cluster** (`bool`): Whether clustering is enabled
-                        * keyword **flow_redir** (`bool`): Whether flow redirection is enabled
-                        * keyword **wait_time** (`float`): Wait time value
-                        * keyword **interface** (`str`): Interface name
-                        * keyword **user_sync** (`bool`): Whether user sync is enabled
-                    * keyword **ip** (`str`): IP address of the interface
+                            * keyword **peerIP** (`str`): IP address of the peer \n
+                            * keyword **peerIPState** (`str`): State of the peer IP \n
+                        * keyword **cluster** (`bool`): Whether clustering is enabled \n
+                        * keyword **flow_redir** (`bool`): Whether flow redirection is enabled \n
+                        * keyword **wait_time** (`float`): Wait time value \n
+                        * keyword **interface** (`str`): Interface name \n
+                        * keyword **user_sync** (`bool`): Whether user sync is enabled \n
+                    * keyword **ip** (`str`): IP address of the interface \n
     :rtype: dict
     """
 
@@ -98,13 +98,13 @@ def get_all_cluster_profiles(self) -> list:
 
     :return: Returns list of cluster profiles \n
         * Each profile is a dictionary containing: \n
-            * keyword **id** (`str`): Unique identifier for the profile
-            * keyword **name** (`str`): Name of the profile
-            * keyword **interfaceLabel** (`str`): Label of the interface
-            * keyword **flowRedirection** (`str`): Flow redirection setting
-            * keyword **userSessionSync** (`str`): User session synchronization setting
-            * keyword **waitTime** (`int`): Wait time value in milliseconds
-            * keyword **isEdgeHaProfile** (`bool`): Whether the profile is an Edge HA profile
+            * keyword **id** (`str`): Unique identifier for the profile\n
+            * keyword **name** (`str`): Name of the profile\n
+            * keyword **interfaceLabel** (`str`): Label of the interface\n
+            * keyword **flowRedirection** (`str`): Flow redirection setting\n
+            * keyword **userSessionSync** (`str`): User session synchronization setting\n
+            * keyword **waitTime** (`int`): Wait time value in milliseconds\n
+            * keyword **isEdgeHaProfile** (`bool`): Whether the profile is an Edge HA profile\n
     :rtype: list
     """
 
@@ -118,42 +118,42 @@ def get_all_cluster_profiles(self) -> list:
     return self._get(path)
 
 
-# def add_cluster_profiles(self, profiles: list) -> dict:
-#     """Add one or more cluster profiles.
-#
-#     .. list-table::
-#         :header-rows: 1
-#
-#         * - Swagger Section
-#           - Method
-#           - Endpoint
-#         * - cluster
-#           - POST
-#           - /cluster/profiles
-#
-#     :param profiles: List of profile dictionaries to add
-#         Each profile dictionary should contain:
-#             * keyword **name** (`str`): Name of the profile
-#             * keyword **interfaceLabel** (`str`): Label of the interface
-#             * keyword **flowRedirection** (`str`): Flow redirection setting
-#             * keyword **userSessionSync** (`str`): User session synchronization setting
-#             * keyword **waitTime** (`int`): Wait time value in milliseconds
-#     :type profiles: list
-#     :return: Returns dictionary indicating success status
-#         * keyword **success** (`bool`): Whether the operation was successful
-#     :rtype: dict
-#     """
-#
-#     if self.orch_version < 9.5:
-#         raise ValueError(
-#             "Cluster profiles are only supported on Orchestrator 9.5 and above"
-#         )
-#     else:
-#         path = "/cluster/profiles"
-#
-#     return self._post(path, data=profiles)
-#
-#
+def add_cluster_profiles(self, profiles: list) -> dict:
+    """Add one or more cluster profiles.
+
+    .. list-table::
+        :header-rows: 1
+
+        * - Swagger Section
+          - Method
+          - Endpoint
+        * - cluster
+          - POST
+          - /cluster/profiles
+
+    :param profiles: List of profile dictionaries to add
+        Each profile dictionary should contain:
+            * keyword **name** (`str`): Name of the profile
+            * keyword **interfaceLabel** (`str`): Label of the interface
+            * keyword **flowRedirection** (`str`): Flow redirection setting
+            * keyword **userSessionSync** (`str`): User session synchronization setting
+            * keyword **waitTime** (`int`): Wait time value in milliseconds
+    :type profiles: list
+    :return: Returns dictionary indicating success status
+        * keyword **success** (`bool`): Whether the operation was successful
+    :rtype: dict
+    """
+
+    if self.orch_version < 9.5:
+        raise ValueError(
+            "Cluster profiles are only supported on Orchestrator 9.5 and above"
+        )
+    else:
+        path = "/cluster/profiles"
+
+    return self._post(path, data=profiles)
+
+
 # def update_cluster_profile(self, profile: dict) -> dict:
 #     """Update an existing cluster profile.
 #
