@@ -131,16 +131,16 @@ def add_cluster_profiles(self, profiles: list) -> dict:
           - POST
           - /cluster/profiles
 
-    :param profiles: List of profile dictionaries to add
-        Each profile dictionary should contain:
-            * keyword **name** (`str`): Name of the profile
-            * keyword **interfaceLabel** (`str`): Label of the interface
-            * keyword **flowRedirection** (`str`): Flow redirection setting
-            * keyword **userSessionSync** (`str`): User session synchronization setting
-            * keyword **waitTime** (`int`): Wait time value in milliseconds
-    :type profiles: list
-    :return: Returns dictionary indicating success status
-        * keyword **success** (`bool`): Whether the operation was successful
+    :param profiles: List of profile dictionaries to add\n
+        Each profile dictionary should contain:\n
+            * keyword **name** (`str`): Name of the profile\n
+            * keyword **interfaceLabel** (`str`): Label of the interface\n
+            * keyword **flowRedirection** (`str`): Flow redirection setting\n
+            * keyword **userSessionSync** (`str`): User session synchronization setting\n
+            * keyword **waitTime** (`int`): Wait time value in milliseconds\n
+    :type profiles: list\n
+    :return: Returns dictionary indicating success status\n
+        * keyword **success** (`bool`): Whether the operation was successful\n
     :rtype: dict
     """
 
@@ -154,43 +154,43 @@ def add_cluster_profiles(self, profiles: list) -> dict:
     return self._post(path, data=profiles)
 
 
-# def update_cluster_profile(self, profile: dict) -> dict:
-#     """Update an existing cluster profile.
-#
-#     .. list-table::
-#         :header-rows: 1
-#
-#         * - Swagger Section
-#           - Method
-#           - Endpoint
-#         * - cluster
-#           - PUT
-#           - /cluster/profiles
-#
-#     :param profile: Dictionary containing profile information to update
-#         Must contain:
-#             * keyword **id** (`str`): Unique identifier of the profile to update
-#             * keyword **name** (`str`): Updated name of the profile
-#             * keyword **interfaceLabel** (`str`): Updated label of the interface
-#             * keyword **flowRedirection** (`str`): Updated flow redirection setting
-#             * keyword **userSessionSync** (`str`): Updated user session synchronization setting
-#             * keyword **waitTime** (`int`): Updated wait time value in milliseconds
-#     :type profile: dict
-#     :return: Returns dictionary indicating success status
-#         * keyword **success** (`bool`): Whether the operation was successful
-#     :rtype: dict
-#     """
-#
-#     if self.orch_version < 9.5:
-#         raise ValueError(
-#             "Cluster profiles are only supported on Orchestrator 9.5 and above"
-#         )
-#     else:
-#         path = "/cluster/profiles"
-#
-#     return self._put(path, data=profile)
-#
-#
+def update_cluster_profile(self, profile: dict) -> dict:
+    """Update an existing cluster profile.
+
+    .. list-table::
+        :header-rows: 1
+
+        * - Swagger Section
+          - Method
+          - Endpoint
+        * - cluster
+          - PUT
+          - /cluster/profiles
+
+    :param profile: Dictionary containing profile information to update
+        Must contain:
+            * keyword **id** (`str`): Unique identifier of the profile to update
+            * keyword **name** (`str`): Updated name of the profile
+            * keyword **interfaceLabel** (`str`): Updated label of the interface
+            * keyword **flowRedirection** (`str`): Updated flow redirection setting
+            * keyword **userSessionSync** (`str`): Updated user session synchronization setting
+            * keyword **waitTime** (`int`): Updated wait time value in milliseconds
+    :type profile: dict
+    :return: Returns dictionary indicating success status
+        * keyword **success** (`bool`): Whether the operation was successful
+    :rtype: dict
+    """
+
+    if self.orch_version < 9.5:
+        raise ValueError(
+            "Cluster profiles are only supported on Orchestrator 9.5 and above"
+        )
+    else:
+        path = "/cluster/profiles"
+
+    return self._put(path, data=profile)
+
+
 # def delete_cluster_profile(self, profile_id: str) -> dict:
 #     """Delete a cluster profile.
 #
