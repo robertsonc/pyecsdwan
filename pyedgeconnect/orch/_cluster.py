@@ -216,13 +216,9 @@ def delete_cluster_profile(self, profile_id: str) -> dict:
             "Cluster profiles are only supported on Orchestrator 9.5 and above"
         )
     else:
-        path = "/cluster/profiles"
+        path = f"/cluster/profiles?profileId={profile_id}"
 
-    params = {
-        "profileId": profile_id
-    }
-
-    return self._delete(path, params=params)
+    return self._delete(path, expected_status=200)
 
 
 # def get_all_cluster_profile_mappings(self) -> dict:
