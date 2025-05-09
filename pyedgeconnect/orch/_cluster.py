@@ -83,41 +83,41 @@ def get_cluster_alarm_count(self) -> dict:
     return self._get(path)
 
 
-# def get_all_cluster_profiles(self) -> list:
-#     """Get all cluster profiles.
-#
-#     .. list-table::
-#         :header-rows: 1
-#
-#         * - Swagger Section
-#           - Method
-#           - Endpoint
-#         * - cluster
-#           - GET
-#           - /cluster/profiles
-#
-#     :return: Returns list of cluster profiles \n
-#         * Each profile is a dictionary containing: \n
-#             * keyword **id** (`str`): Unique identifier for the profile
-#             * keyword **name** (`str`): Name of the profile
-#             * keyword **interfaceLabel** (`str`): Label of the interface
-#             * keyword **flowRedirection** (`str`): Flow redirection setting
-#             * keyword **userSessionSync** (`str`): User session synchronization setting
-#             * keyword **waitTime** (`int`): Wait time value in milliseconds
-#             * keyword **isEdgeHaProfile** (`bool`): Whether the profile is an Edge HA profile
-#     :rtype: list
-#     """
-#
-#     if self.orch_version < 9.5:
-#         raise ValueError(
-#             "Cluster profiles are only supported on Orchestrator 9.5 and above"
-#         )
-#     else:
-#         path = "/cluster/profiles"
-#
-#     return self._get(path)
-#
-#
+def get_all_cluster_profiles(self) -> list:
+    """Get all cluster profiles.
+
+    .. list-table::
+        :header-rows: 1
+
+        * - Swagger Section
+          - Method
+          - Endpoint
+        * - cluster
+          - GET
+          - /cluster/profiles
+
+    :return: Returns list of cluster profiles \n
+        * Each profile is a dictionary containing: \n
+            * keyword **id** (`str`): Unique identifier for the profile
+            * keyword **name** (`str`): Name of the profile
+            * keyword **interfaceLabel** (`str`): Label of the interface
+            * keyword **flowRedirection** (`str`): Flow redirection setting
+            * keyword **userSessionSync** (`str`): User session synchronization setting
+            * keyword **waitTime** (`int`): Wait time value in milliseconds
+            * keyword **isEdgeHaProfile** (`bool`): Whether the profile is an Edge HA profile
+    :rtype: list
+    """
+
+    if self.orch_version < 9.5:
+        raise ValueError(
+            "Cluster profiles are only supported on Orchestrator 9.5 and above"
+        )
+    else:
+        path = "/cluster/profiles"
+
+    return self._get(path)
+
+
 # def add_cluster_profiles(self, profiles: list) -> dict:
 #     """Add one or more cluster profiles.
 #
