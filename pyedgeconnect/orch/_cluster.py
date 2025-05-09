@@ -191,40 +191,40 @@ def update_cluster_profile(self, profile: dict) -> dict:
     return self._put(path, data=profile)
 
 
-# def delete_cluster_profile(self, profile_id: str) -> dict:
-#     """Delete a cluster profile.
-#
-#     .. list-table::
-#         :header-rows: 1
-#
-#         * - Swagger Section
-#           - Method
-#           - Endpoint
-#         * - cluster
-#           - DELETE
-#           - /cluster/profiles
-#
-#     :param profile_id: Unique system generated Cluster Profile Id to delete
-#     :type profile_id: str
-#     :return: Returns dictionary indicating success status
-#         * keyword **success** (`bool`): Whether the operation was successful
-#     :rtype: dict
-#     """
-#
-#     if self.orch_version < 9.5:
-#         raise ValueError(
-#             "Cluster profiles are only supported on Orchestrator 9.5 and above"
-#         )
-#     else:
-#         path = "/cluster/profiles"
-#
-#     params = {
-#         "profileId": profile_id
-#     }
-#
-#     return self._delete(path, params=params)
-#
-#
+def delete_cluster_profile(self, profile_id: str) -> dict:
+    """Delete a cluster profile.
+
+    .. list-table::
+        :header-rows: 1
+
+        * - Swagger Section
+          - Method
+          - Endpoint
+        * - cluster
+          - DELETE
+          - /cluster/profiles
+
+    :param profile_id: Unique system generated Cluster Profile Id to delete
+    :type profile_id: str
+    :return: Returns dictionary indicating success status
+        * keyword **success** (`bool`): Whether the operation was successful
+    :rtype: dict
+    """
+
+    if self.orch_version < 9.5:
+        raise ValueError(
+            "Cluster profiles are only supported on Orchestrator 9.5 and above"
+        )
+    else:
+        path = "/cluster/profiles"
+
+    params = {
+        "profileId": profile_id
+    }
+
+    return self._delete(path, params=params)
+
+
 # def get_all_cluster_profile_mappings(self) -> dict:
 #     """Get all cluster profile mappings.
 #

@@ -744,7 +744,7 @@ class Orchestrator(HttpCommon):
     from .orch._cluster import get_all_cluster_profiles
     from .orch._cluster import add_cluster_profiles
     from .orch._cluster import update_cluster_profile
-    # from .orch._cluster import delete_cluster_profile
+    from .orch._cluster import delete_cluster_profile
     # from .orch._cluster import get_all_cluster_profile_mappings
     # from .orch._cluster import update_cluster_profile_mapping
     # from .orch._cluster import initialize_edge_ha_cluster
