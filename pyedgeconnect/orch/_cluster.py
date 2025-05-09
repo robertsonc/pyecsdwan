@@ -218,7 +218,11 @@ def delete_cluster_profile(self, profile_id: str) -> dict:
     else:
         path = f"/cluster/profiles?profileId={profile_id}"
 
-    return self._delete(path, expected_status=200)
+    return self._delete(
+        path,
+        expected_status=[200],
+        return_type="bool",
+    )
 
 
 # def get_all_cluster_profile_mappings(self) -> dict:
