@@ -47,6 +47,20 @@ def test_get_all_cluster_profiles():
     except Exception as e:
         pytest.fail(f"Test failed with exception: {e}")
 
+@pytest.fixture
+def setup_test_add_cluster_profile():
+    # determine if test cluster profiles exist; if so, delete them before trying to add
+    global profile_id
+    profiles = orch.get_all_cluster_profiles()
+    for profile in profiles:
+        if profile['name'] == 'ClusterProfileTest100' or profile['name'] == 'ClusterProfileTest101':
+            profile_id = profile['id']
+            # delete_cluster_profile is tested further down - if that fails, this will fail
+            delete = orch.delete_cluster_profile(profile_id)
+            assert delete == True
+    yield
+
+@pytest.mark.usefixtures("setup_test_add_cluster_profile")
 def test_add_cluster_profile():
     new_test_cluster_profiles = \
     [
@@ -67,8 +81,7 @@ def test_add_cluster_profile():
     ]
     try:
         result = orch.add_cluster_profiles(new_test_cluster_profiles)
-        #TODO: need to test for right return code here
-        print(result)
+        assert result['success'] == True
     except Exception as e:
         pytest.fail(f"Test failed with exception: {e}")
 
@@ -87,17 +100,36 @@ def test_update_cluster_profile():
     update_existing_profile =\
     {
         'id': profile_id,
-        'name': 'ClusterProfileTestUpdated100',
+        'name': 'ClusterProfileTest100',
         'interfaceLabel': 'lan0',
         'flowRedirection': 'Secure',
         'waitTime': 55,
         'userSessionSync': 'Secure'
     }
-    # orch.update_cluster_profile(update_existing_profile)
     try:
-        result = orch.update_cluster_profile(update_existing_profile)
-        print(result)
+        orch.update_cluster_profile(update_existing_profile)
+        all_cluster_profiles = orch.get_all_cluster_profiles()
+        for profile in all_cluster_profiles:
+            if profile['id'] == profile_id:
+                assert profile['waitTime'] == 55
+                break
+        # assert result['success'] == True
     except Exception as e:
         pytest.fail(f"Test failed with exception: {e}")
+
+# do not run standalone - previous tests are needed to get profile_id
+def test_delete_cluster_profile():
+    try:
+        orch.delete_cluster_profile(profile_id)
+        all_cluster_profiles = orch.get_all_cluster_profiles()
+        for profile in all_cluster_profiles:
+            if profile['id'] == profile_id:
+                pytest.fail("Test failed: Cluster profile was not deleted")
+                break
+            else:
+                assert True
+    except Exception as e:
+        pytest.fail(f"Test failed with exception: {e}")
+
 
 
