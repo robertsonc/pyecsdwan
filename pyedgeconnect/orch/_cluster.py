@@ -225,35 +225,35 @@ def delete_cluster_profile(self, profile_id: str) -> dict:
     )
 
 
-# def get_all_cluster_profile_mappings(self) -> dict:
-#     """Get all cluster profile mappings.
-#
-#     .. list-table::
-#         :header-rows: 1
-#
-#         * - Swagger Section
-#           - Method
-#           - Endpoint
-#         * - cluster
-#           - GET
-#           - /cluster/profileMapping
-#
-#     :return: Returns a dictionary where keys are cluster profile IDs and values are lists
-#              of entities (like folders, processes, etc.) mapped to that profile
-#         * key **<clusterProfileId>** (`list`): List of entity IDs mapped to the profile
-#     :rtype: dict
-#     """
-#
-#     if self.orch_version < 9.5:
-#         raise ValueError(
-#             "Cluster profile mappings are only supported on Orchestrator 9.5 and above"
-#         )
-#     else:
-#         path = "/cluster/profileMapping"
-#
-#     return self._get(path)
-#
-#
+def get_all_cluster_profile_mappings(self) -> dict:
+    """Get all cluster profile mappings.
+
+    .. list-table::
+        :header-rows: 1
+
+        * - Swagger Section
+          - Method
+          - Endpoint
+        * - cluster
+          - GET
+          - /cluster/profileMapping
+
+    :return: Returns a dictionary where keys are cluster profile IDs and values are lists
+             of entities (like folders, processes, etc.) mapped to that profile
+        * key **<clusterProfileId>** (`list`): List of entity IDs mapped to the profile
+    :rtype: dict
+    """
+
+    if self.orch_version < 9.5:
+        raise ValueError(
+            "Cluster profile mappings are only supported on Orchestrator 9.5 and above"
+        )
+    else:
+        path = "/cluster/profileMapping"
+
+    return self._get(path)
+
+
 # def update_cluster_profile_mapping(self, mappings: dict) -> dict:
 #     """Update cluster profile mappings.
 #
