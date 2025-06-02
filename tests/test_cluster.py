@@ -25,6 +25,15 @@ except ValueError as e:
 orch = Orchestrator(orch_url, api_key=orch_api_key, verify_ssl=False)
 print(orch.orch_version)
 
+@pytest.fixture(scope="module", autouse=True)
+def check_orch_version():
+    version = orch.orch_version
+    if orch.orch_version < 9.5:
+        pytest.skip("Skipping tests for Orchestrator versions < 9.5.0")
+    else:
+        print(f"Orchestrator version satisfies requirements for this module: {version}")
+        yield
+
 
 def test_get_cluster_state():
     try:
@@ -130,6 +139,15 @@ def test_delete_cluster_profile():
                 assert True
     except Exception as e:
         pytest.fail(f"Test failed with exception: {e}")
+
+def test_get_all_cluster_profile_mappings():
+    try:
+        result = orch.get_all_cluster_profile_mappings()
+        assert isinstance(result, dict)
+    except Exception as e:
+        pytest.fail(f"Test failed with exception: {e}")
+
+
 
 
 
