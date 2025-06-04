@@ -254,41 +254,41 @@ def get_all_cluster_profile_mappings(self) -> dict:
     return self._get(path)
 
 
-# def update_cluster_profile_mapping(self, mappings: dict) -> dict:
-#     """Update cluster profile mappings.
-#
-#     Updates only the site mapping in the provided data. Existing mappings not included in the
-#     request will remain unchanged.
-#
-#     .. list-table::
-#         :header-rows: 1
-#
-#         * - Swagger Section
-#           - Method
-#           - Endpoint
-#         * - cluster
-#           - PUT
-#           - /cluster/profileMapping
-#
-#     :param mappings: Dictionary where keys are cluster profile IDs and values are lists
-#                     of entity IDs to be mapped to that profile
-#         * key **<clusterProfileId>** (`list`): List of entity IDs to map to the profile
-#     :type mappings: dict
-#     :return: Returns dictionary indicating success status
-#         * keyword **success** (`bool`): Whether the operation was successful
-#     :rtype: dict
-#     """
-#
-#     if self.orch_version < 9.5:
-#         raise ValueError(
-#             "Cluster profile mappings are only supported on Orchestrator 9.5 and above"
-#         )
-#     else:
-#         path = "/cluster/profileMapping"
-#
-#     return self._put(path, data=mappings)
-#
-#
+def update_cluster_profile_mapping(self, mappings: dict) -> dict:
+    """Update cluster profile mappings.
+
+    Updates only the site mapping in the provided data. Existing mappings not included in the
+    request will remain unchanged.
+
+    .. list-table::
+        :header-rows: 1
+
+        * - Swagger Section
+          - Method
+          - Endpoint
+        * - cluster
+          - PUT
+          - /cluster/profileMapping
+
+    :param mappings: Dictionary where keys are cluster profile IDs and values are lists
+                    of entity IDs to be mapped to that profile
+        * key **<clusterProfileId>** (`list`): List of entity IDs to map to the profile
+    :type mappings: dict
+    :return: Returns dictionary indicating success status
+        * keyword **success** (`bool`): Whether the operation was successful
+    :rtype: dict
+    """
+
+    if self.orch_version < 9.5:
+        raise ValueError(
+            "Cluster profile mappings are only supported on Orchestrator 9.5 and above"
+        )
+    else:
+        path = "/cluster/profileMapping"
+
+    return self._put(path, data=mappings)
+
+
 # def initialize_edge_ha_cluster(self, appliance_ids: list) -> dict:
 #     """Initialize appliances for EdgeHA cluster.
 #
