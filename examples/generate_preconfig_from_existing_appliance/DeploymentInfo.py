@@ -111,7 +111,7 @@ class DeploymentInfo:
             server_per_segment_preconfig_yaml_support
         )
 
-        preconfig_name = f"{device_name}_AUTOMATED_PRECONFIG"
+        preconfig_name = f"{device_name}_deploymentInfo-AUTOMATED_PRECONFIG"
 
         is_preconfig_valid = self._validate_preconfig(orch, preconfig_yaml)
         if is_preconfig_valid and self.upload_to_orch is True:
