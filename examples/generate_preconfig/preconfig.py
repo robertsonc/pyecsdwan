@@ -44,68 +44,70 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-# Set Orchestrator FQDN/IP via arguments, environment variable,
-# or user input
-if vars(args)["orch"] is not None:
-    orch_url = vars(args)["orch"]
-elif os.getenv("ORCH_URL") is not None:
-    orch_url = os.getenv("ORCH_URL")
-else:
-    orch_url = input("Orchstrator IP or FQDN: ")
+if vars(args)["upload"] is True:
+    # Set Orchestrator FQDN/IP via arguments, environment variable,
+    # or user input
+    if vars(args)["orch"] is not None:
+        orch_url = vars(args)["orch"]
+    elif os.getenv("ORCH_URL") is not None:
+        orch_url = os.getenv("ORCH_URL")
+    else:
+        orch_url = input("Orchstrator IP or FQDN: ")
 
-# Set Orchestrator API Key via environment variable or user input
-if os.getenv("ORCH_API_KEY") is not None:
-    orch_api_key = os.getenv("ORCH_API_KEY")
-else:
-    orch_api_key_input = getpass.getpass(
-        "Orchstrator API Key (enter to skip): "
+    # Set Orchestrator API Key via environment variable or user input
+    if os.getenv("ORCH_API_KEY") is not None:
+        orch_api_key = os.getenv("ORCH_API_KEY")
+    else:
+        orch_api_key_input = getpass.getpass(
+            "Orchstrator API Key (enter to skip): "
+        )
+        if len(orch_api_key_input) == 0:
+            orch_api_key = None
+            # Set user and password if present in environment variable
+            orch_user = os.getenv("ORCH_USER")
+            orch_pw = os.getenv("ORCH_PASSWORD")
+        else:
+            orch_api_key = orch_api_key_input
+
+    # Instantiate Orchestrator with ``log_console`` enabled for
+    # printing log messages to terminal
+    orch = Orchestrator(
+        orch_url,
+        api_key=orch_api_key,
+        log_console=True,
+        verify_ssl=False,
     )
-    if len(orch_api_key_input) == 0:
-        orch_api_key = None
-        # Set user and password if present in environment variable
-        orch_user = os.getenv("ORCH_USER")
-        orch_pw = os.getenv("ORCH_PASSWORD")
-    else:
-        orch_api_key = orch_api_key_input
 
-# Instantiate Orchestrator with ``log_console`` enabled for
-# printing log messages to terminal
-orch = Orchestrator(
-    orch_url,
-    api_key=orch_api_key,
-    log_console=True,
-    verify_ssl=False,
-)
 
-# If not using API key, login to Orchestrator with username/password
-if orch_api_key is None:
-    # If username/password not in environment variables, prompt user
-    if orch_user is None:
-        orch_user = input("Enter Orchestrator username: ")
-        orch_pw = getpass.getpass("Enter Orchestrator password: ")
-    # Check if multi-factor authentication required
-    mfa_prompt = input("Are you using MFA for this user (y/n)?: ")
-    if mfa_prompt == "y":
-        orch.send_mfa(orch_user, orch_pw, temp_code=False)
-        token = input("Enter MFA token: ")
+    # If not using API key, login to Orchestrator with username/password
+    if orch_api_key is None:
+        # If username/password not in environment variables, prompt user
+        if orch_user is None:
+            orch_user = input("Enter Orchestrator username: ")
+            orch_pw = getpass.getpass("Enter Orchestrator password: ")
+        # Check if multi-factor authentication required
+        mfa_prompt = input("Are you using MFA for this user (y/n)?: ")
+        if mfa_prompt == "y":
+            orch.send_mfa(orch_user, orch_pw, temp_code=False)
+            token = input("Enter MFA token: ")
+        else:
+            token = ""
+        # Login to Orchestrator
+        confirm_auth = orch.login(orch_user, orch_pw, mfacode=token)
+        # Check that user/pass authentication works before proceeding
+        if confirm_auth:
+            pass
+        else:
+            print("Authentication to Orchestrator Failed")
+            exit()
+    # If API key specified, check that key is valid before proceeding
     else:
-        token = ""
-    # Login to Orchestrator
-    confirm_auth = orch.login(orch_user, orch_pw, mfacode=token)
-    # Check that user/pass authentication works before proceeding
-    if confirm_auth:
-        pass
-    else:
-        print("Authentication to Orchestrator Failed")
-        exit()
-# If API key specified, check that key is valid before proceeding
-else:
-    confirm_auth = orch.get_orchestrator_hello()
-    if confirm_auth != "There was an internal server error.":
-        pass
-    else:
-        print("Authentication to Orchestrator Failed")
-        exit()
+        confirm_auth = orch.get_orchestrator_hello()
+        if confirm_auth != "There was an internal server error.":
+            pass
+        else:
+            print("Authentication to Orchestrator Failed")
+            exit()
 
 # Specify CSV file for generating preconfigs
 # This is a mandatory runtime argument
@@ -165,61 +167,63 @@ with open(csv_filename, encoding="utf-8-sig") as csvfile:
         else:
             pass
 
-        # Validate preconfig via Orchestrator
-        validate = orch.validate_preconfig(
-            preconfig_name=row["hostname"],
-            yaml_preconfig=yaml_preconfig,
-            auto_apply=auto_apply,
-        )
-
         # Write local YAML file to see resulting YAML file locally
         # whether validate passes or fails
         yaml_filename = f'{row["hostname"]}_preconfig.yml'
         with open(output_directory + yaml_filename, "w") as preconfig_file:
             write_data = preconfig_file.write(yaml_preconfig)
 
-        # If the validate function passes on Orchestrator, move on
-        # to check if uploading to Orchestrator option selected
-        if validate.status_code == 200:
-
-            # If upload option was chosen, upload preconfig to
-            # Orchestrator with selected auto-apply settings
-            if upload_to_orch is True:
-
-                # In this example the appliance hostname from the CSV
-                # data (row["hostname"]) is used both for the name of
-                # the preconfig to appear in Orchestrator, as well as
-                # the tag on the preconfig that could be used to match
-                # against a discovered appliance
-                # Additionally a comment is added with the current
-                # date
-                comment_timestamp = datetime.date.today().strftime("%d %B %Y")
-                orch.create_preconfig(
-                    preconfig_name=row["hostname"],
-                    yaml_preconfig=yaml_preconfig,
-                    auto_apply=auto_apply,
-                    tag=row["hostname"],
-                    serial_number=appliance_serial,
-                    comment=f"Created/Uploaded @ {comment_timestamp}",
-                )
-                print(f'Posted EC Preconfig {row["hostname"]}')
-            else:
-                pass
-        else:
-            print(
-                f'Preconfig for {row["hostname"]}'
-                f" failed validation | error: {validate.text}"
+        if vars(args)["upload"] is True:
+            # Validate preconfig via Orchestrator
+            validate = orch.validate_preconfig(
+                preconfig_name=row["hostname"],
+                yaml_preconfig=yaml_preconfig,
+                auto_apply=auto_apply,
             )
-            # Write local YAML file of failed config for reference
-            yaml_filename = f'{row["hostname"]}_preconfig-FAILED.yml'
-            with open(output_directory + yaml_filename, "w") as preconfig_file:
-                write_data = preconfig_file.write(yaml_preconfig)
+
+            # If the validate function passes on Orchestrator, move on
+            # to check if uploading to Orchestrator option selected
+            if validate.status_code == 200:
+
+                # If upload option was chosen, upload preconfig to
+                # Orchestrator with selected auto-apply settings
+                if upload_to_orch is True:
+
+                    # In this example the appliance hostname from the CSV
+                    # data (row["hostname"]) is used both for the name of
+                    # the preconfig to appear in Orchestrator, as well as
+                    # the tag on the preconfig that could be used to match
+                    # against a discovered appliance
+                    # Additionally a comment is added with the current
+                    # date
+                    comment_timestamp = datetime.date.today().strftime("%d %B %Y")
+                    orch.create_preconfig(
+                        preconfig_name=row["hostname"],
+                        yaml_preconfig=yaml_preconfig,
+                        auto_apply=auto_apply,
+                        tag=row["hostname"],
+                        serial_number=appliance_serial,
+                        comment=f"Created/Uploaded @ {comment_timestamp}",
+                    )
+                    print(f'Posted EC Preconfig {row["hostname"]}')
+                else:
+                    pass
+            else:
+                print(
+                    f'Preconfig for {row["hostname"]}'
+                    f" failed validation | error: {validate.text}"
+                )
+                # Write local YAML file of failed config for reference
+                yaml_filename = f'{row["hostname"]}_preconfig-FAILED.yml'
+                with open(output_directory + yaml_filename, "w") as preconfig_file:
+                    write_data = preconfig_file.write(yaml_preconfig)
 
         # Increment row number when iterating to next row in CSV
         row_number += 1
 
 # if not using API key, logout from Orchestrator
-if orch_api_key is None:
-    orch.logout()
+if vars(args)["upload"] is True:
+    if orch_api_key is None:
+        orch.logout()
 else:
     pass
