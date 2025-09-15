@@ -170,7 +170,7 @@ def delete_appliance(
 
     return self._delete(
         path,
-        expected_status=[204],
+        expected_status=[200],
         return_type="bool",
     )
 
