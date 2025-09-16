@@ -170,7 +170,7 @@ def delete_appliance(
 
     return self._delete(
         path,
-        expected_status=[200],
+        expected_status=[200, 204],
         return_type="bool",
     )
 
@@ -230,7 +230,7 @@ def delete_appliance_for_rediscovery(
 
     return self._delete(
         path,
-        expected_status=[204],
+        expected_status=[200, 204],
         return_type="bool",
     )
 
@@ -545,7 +545,7 @@ def delete_denied_appliances(
     return self._post(
         "/appliance/denied/delete",
         data=data,
-        expected_status=[204],
+        expected_status=[200, 204],
         return_type="bool",
     )
 
