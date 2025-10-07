@@ -923,7 +923,7 @@ class Orchestrator(HttpCommon):
     from .orch._location import get_location_coordinates_from_address
     from .orch._logging import get_appliance_syslog_config
     from .orch._login import login, logout, send_mfa
-    from .orch._loopback import get_loopback_interfaes
+    from .orch._loopback import get_loopback_interfaces
     from .orch._loopback_orch import (
         get_deleted_loopback_orchestration_ips,
         get_loopback_orchestration,
