@@ -166,11 +166,7 @@ deploymentInfo:
   totalInboundBandwidth: {{ wan_total_inbound }}
   shapeInboundTraffic: {{ data['shapeInboundTraffic'] | default("true",true) }}
   passThroughShapedTraffic:
-    {#
-    If a separate outboundMaxBandwidth is not supplied, use the total
-    WAN bandwidth specified by the interfaces
-    #}
-    outboundMaxBandwidth: {{ data['outboundMaxBandwidth'] | default(wan_total_outbound,true) }}
+    outboundMaxBandwidth: 10000000
   deploymentInterfaces:
 {% if data['lan_interface_1_name'] is defined and data['lan_interface_1_name'] != "" %}
     - interfaceName: {{ data['lan_interface_1_name'] }}
