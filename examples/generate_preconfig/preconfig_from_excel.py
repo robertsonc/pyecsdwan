@@ -11,9 +11,13 @@ from pyedgeconnect import Orchestrator
 # Parse runtime arguments
 parser = argparse.ArgumentParser()
 parser.add_argument(
-    "-c",
-    "--csv",
-    help="Specify source Excel (.xlsx) file for preconfigs",
+    "-x",
+    "--excel",
+    "--xlsx",
+    "--workbook",
+    "--csv",  # backward compatibility
+    dest="excel",
+    help="Specify source Excel workbook (.xlsx/.xlsm) for preconfigs",
     type=str,
     required=True,
 )
@@ -117,15 +121,15 @@ if vars(args)["upload"] is True:
 
 # Specify Excel file for generating preconfigs
 # This is a mandatory runtime argument
-if vars(args)["csv"] is not None:
-    csv_filename = vars(args)["csv"]
+if vars(args)["excel"] is not None:
+    excel_filename = vars(args)["excel"]
 else:
-    print("Source Excel (.xlsx) file not specified, exiting")
+    print("Source Excel (.xlsx/.xlsm) file not specified, exiting")
     exit()
 
 # Basic validation of file extension
 valid_ext = (".xlsx", ".xlsm")
-if not csv_filename.lower().endswith(valid_ext):
+if not excel_filename.lower().endswith(valid_ext):
     print(f"Input file must be an Excel workbook with one of extensions: {valid_ext}")
     exit()
 
@@ -160,7 +164,18 @@ if not os.path.exists(output_directory):
 
 # Open Excel file with configuration data
 # Expecting headers in the first row
-wb = load_workbook(csv_filename, data_only=True)
+try:
+    wb = load_workbook(excel_filename, data_only=True)
+except PermissionError:
+    print(f"Cannot open '{excel_filename}': The file appears to be in use. Please close the Excel workbook and re-run this script.")
+    exit()
+except OSError as e:
+    # On Windows, a sharing violation while the file is open by Excel often surfaces as winerror 32
+    if getattr(e, 'winerror', None) == 32:
+        print(f"Cannot open '{excel_filename}': The file is already open in another program (likely Excel). Please close it and re-run this script.")
+        exit()
+    else:
+        raise
 # Select worksheet
 sheet_name = vars(args)["sheet"]
 if sheet_name is not None:

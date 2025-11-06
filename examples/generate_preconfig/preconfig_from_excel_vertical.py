@@ -164,7 +164,18 @@ if not os.path.exists(output_directory):
 
 # Open Excel file with configuration data
 # Expecting headers in the first row
-wb = load_workbook(excel_filename, data_only=True)
+try:
+    wb = load_workbook(excel_filename, data_only=True)
+except PermissionError:
+    print(f"Cannot open '{excel_filename}': The file appears to be in use. Please close the Excel workbook and re-run this script.")
+    exit()
+except OSError as e:
+    # On Windows, a sharing violation while the file is open by Excel often surfaces as winerror 32
+    if getattr(e, 'winerror', None) == 32:
+        print(f"Cannot open '{excel_filename}': The file is already open in another program (likely Excel). Please close it and re-run this script.")
+        exit()
+    else:
+        raise
 # Select worksheet
 sheet_name = vars(args)["sheet"]
 if sheet_name is not None:
@@ -176,32 +187,53 @@ if sheet_name is not None:
 else:
     ws = wb.active
 
-rows_iter = ws.iter_rows(values_only=True)
-try:
-    headers_row = next(rows_iter)
-except StopIteration:
-    print("Excel sheet is empty, exiting")
+# Build keys from column A (excluding the first row)
+# Each non-empty cell in column A from row 2..max_row will be treated as a key
+keys_with_rows = [
+    (idx, ("" if cell_val is None else str(cell_val).strip().lstrip("\ufeff")))
+    for idx, (cell_val,) in enumerate(
+        ws.iter_rows(min_row=2, min_col=1, max_col=1, values_only=True), start=2
+    )
+]
+# If no keys discovered, exit
+if all(k == "" for _, k in keys_with_rows):
+    print("No keys found in column A (rows 2..end). Exiting")
     exit()
 
-# Normalize headers (strip whitespace and BOM)
-headers = [("" if h is None else str(h).strip().lstrip("\ufeff")) for h in headers_row]
+# Error if any blank keys exist in column A (rows 2..end)
+blank_key_rows = [row_idx for row_idx, k in keys_with_rows if k == ""]
+if len(blank_key_rows) > 0:
+    print(f"Error: Found blank key(s) in column A at row(s): {blank_key_rows}. Please fill all keys in column A.")
+    exit()
 
-# Set initial row number for row identification of data
-# First row is headers
-row_number = 2
+# Iterate over each data column (B..last)
+for col_idx in range(2, ws.max_column + 1):
+    # Gather values for this column (skip first row)
+    col_values = [
+        cell_val for (cell_val,) in ws.iter_rows(
+            min_row=2, min_col=col_idx, max_col=col_idx, max_row=ws.max_row, values_only=True
+        )
+    ]
 
-# Generate Edge Connect YAML preconfig for each data row
-for data_row in rows_iter:
-    if data_row is None:
+    # Map keys to values, skipping empty keys
+    row = {}
+    for i, (sheet_row, key) in enumerate(keys_with_rows):
+        if key == "":
+            continue
+        val = col_values[i] if i < len(col_values) else None
+        row[key] = "" if val is None else str(val).strip()
+
+    # Skip entirely empty columns (no values for any keys)
+    if all(v == "" for v in row.values()):
         continue
-    values = ["" if v is None else str(v).strip() for v in data_row]
-    # Skip completely empty rows
-    if all(v == "" for v in values):
-        row_number += 1
-        continue
 
-    # Map headers to values
-    row = dict(zip(headers, values))
+    # Determine hostname for filenames and identifiers (must be present)
+    hostname = row.get("hostname")
+    if hostname is None or str(hostname).strip() == "":
+        print(f"Skipping column {col_idx} because 'hostname' is missing or empty.")
+        continue
+    # Normalize hostname in the data passed to the template
+    row["hostname"] = str(hostname).strip()
 
     # Render values through the Jinja template
     yaml_preconfig = ec_template.render(data=row)
@@ -263,9 +295,6 @@ for data_row in rows_iter:
             yaml_filename = f'{row["hostname"]}_preconfig-FAILED.yml'
             with open(output_directory + yaml_filename, "w") as preconfig_file:
                 write_data = preconfig_file.write(yaml_preconfig)
-
-    # Increment row number when iterating to next row
-    row_number += 1
 
 # if not using API key, logout from Orchestrator
 if vars(args)["upload"] is True:
