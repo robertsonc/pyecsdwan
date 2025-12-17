@@ -1,6 +1,7 @@
 jinja2==3.0.3
 openpyxl>=3.1.2
-pyedgeconnect>=0.16.0a1
+#pyedgeconnect>=0.16.0a1
+pyedgeconnect @ git+https://github.com/aruba/pyedgeconnect.git@development
 openpyxl==3.1.5
 
 # For Jupyter Lab Notebook

@@ -172,37 +172,55 @@ deploymentInfo:
     #}
     outboundMaxBandwidth: {{ data['outboundMaxBandwidth'] | default(wan_total_outbound,true) }}
   deploymentInterfaces:
-{% if data['lan_interface_1_name'] is defined and data['lan_interface_1_name'] != "" %}
-    - interfaceName: {{ data['lan_interface_1_name'] }}
+    {% for i in range(1, 11) %}
+      {% set prefix = 'lan_interface_' ~ i ~ '_' %}
+      {% if data[prefix ~ 'name'] is defined and data[prefix ~ 'name'] != "" %}
+    - interfaceName: {{ data[prefix ~ 'name'] }}
       interfaceType: lan
-      interfaceComment: {{ data['lan_interface_1_desc'] | default("",false) }}
-      ipAddressMask: {{ data['lan_interface_1_ipmask'] }}
-    {% if data['lan_interface_1_nexthop'] is defined and data['lan_interface_1_nexthop'] != "" %}
-      nextHop: {{ data['lan_interface_1_nexthop'] }}
-    {% endif %}
-    {% if data['lan_interface_1_segment'] is defined and data['lan_interface_1_segment'] != "" %}
-      segment: {{ data['lan_interface_1_segment'] }}
-    {% endif %}
-    {% if data['lan_interface_1_zone'] is defined and data['lan_interface_1_zone'] != "" %}
-      zone: {{ data['lan_interface_1_zone'] }}
-    {% endif %}
-{% endif %}
+      interfaceComment: {{ data[prefix ~ 'desc'] | default("",false) }}
+      ipAddressMask: {{ data[prefix ~ 'ipmask'] }}
+        {% if data[prefix ~ 'nexthop'] is defined and data[prefix ~ 'nexthop'] != "" %}
+      nextHop: {{ data[prefix ~ 'nexthop'] }}
+        {% endif %}
+        {% if data[prefix ~ 'segment'] is defined and data[prefix ~ 'segment'] != "" %}
+      segment: {{ data[prefix ~ 'segment'] }}
+        {% endif %}
+        {% if data[prefix ~ 'zone'] is defined and data[prefix ~ 'zone'] != "" %}
+      zone: {{ data[prefix ~ 'zone'] }}
+        {% endif %}
+      {% endif %}
+    {% endfor %}
+{#{% if data['lan_interface_1_name'] is defined and data['lan_interface_1_name'] != "" %}#}
+{#    - interfaceName: {{ data['lan_interface_1_name'] }}#}
+{#      interfaceType: lan#}
+{#      interfaceComment: {{ data['lan_interface_1_desc'] | default("",false) }}#}
+{#      ipAddressMask: {{ data['lan_interface_1_ipmask'] }}#}
+{#    {% if data['lan_interface_1_nexthop'] is defined and data['lan_interface_1_nexthop'] != "" %}#}
+{#      nextHop: {{ data['lan_interface_1_nexthop'] }}#}
+{#    {% endif %}#}
+{#    {% if data['lan_interface_1_segment'] is defined and data['lan_interface_1_segment'] != "" %}#}
+{#      segment: {{ data['lan_interface_1_segment'] }}#}
+{#    {% endif %}#}
+{#    {% if data['lan_interface_1_zone'] is defined and data['lan_interface_1_zone'] != "" %}#}
+{#      zone: {{ data['lan_interface_1_zone'] }}#}
+{#    {% endif %}#}
+{#{% endif %}#}
 
-{% if data['lan_interface_2_name'] is defined and data['lan_interface_2_name'] != "" %}
-    - interfaceName: {{ data['lan_interface_2_name'] }}
-      interfaceType: lan
-      interfaceComment: {{ data['lan_interface_2_desc'] | default("",false) }}
-      ipAddressMask: {{ data['lan_interface_2_ipmask'] }}
-    {% if data['lan_interface_2_nexthop'] is defined and data['lan_interface_2_nexthop'] != "" %}
-      nextHop: {{ data['lan_interface_2_nexthop'] }}
-    {% endif %}
-    {% if data['lan_interface_2_segment'] is defined and data['lan_interface_2_segment'] != "" %}
-      segment: {{ data['lan_interface_2_segment'] }}
-    {% endif %}
-    {% if data['lan_interface_2_zone'] is defined and data['lan_interface_2_zone'] != "" %}
-      zone: {{ data['lan_interface_2_zone'] }}
-    {% endif %}
-{% endif %}
+{#{% if data['lan_interface_2_name'] is defined and data['lan_interface_2_name'] != "" %}#}
+{#    - interfaceName: {{ data['lan_interface_2_name'] }}#}
+{#      interfaceType: lan#}
+{#      interfaceComment: {{ data['lan_interface_2_desc'] | default("",false) }}#}
+{#      ipAddressMask: {{ data['lan_interface_2_ipmask'] }}#}
+{#    {% if data['lan_interface_2_nexthop'] is defined and data['lan_interface_2_nexthop'] != "" %}#}
+{#      nextHop: {{ data['lan_interface_2_nexthop'] }}#}
+{#    {% endif %}#}
+{#    {% if data['lan_interface_2_segment'] is defined and data['lan_interface_2_segment'] != "" %}#}
+{#      segment: {{ data['lan_interface_2_segment'] }}#}
+{#    {% endif %}#}
+{#    {% if data['lan_interface_2_zone'] is defined and data['lan_interface_2_zone'] != "" %}#}
+{#      zone: {{ data['lan_interface_2_zone'] }}#}
+{#    {% endif %}#}
+{#{% endif %}#}
 
 {#
 Conditional logic can be used on the WAN interfaces to determine
@@ -213,37 +231,56 @@ statefulSNAT, nat to auto, and zone to "UNTRUSTED" etc. which helps
 limit number of variables supplied by the user
 #}
 
-{% if data['wan_interface_1_name'] is defined and data['wan_interface_1_name'] != "" %}
-    - interfaceName: {{ data['wan_interface_1_name'] }}
+{% for i in range(1, 11) %}
+      {% set prefix = 'wan_interface_' ~ i ~ '_' %}
+      {% if data[prefix ~ 'name'] is defined and data[prefix ~ 'name'] != "" %}
+    - interfaceName: {{ data[prefix ~ 'name'] }}
       interfaceType: wan
-      interfaceComment: {{ data['wan_interface_1_desc'] | default("",false) }}
-      interfaceLabel: {{ data['wan_interface_1_label'] | default("",false) }}
-      outboundMaxBandwidth: {{ data['wan_interface_1_max_outbound_bw'] | default("0",false) }}
-      inboundMaxBandwidth: {{ data['wan_interface_1_max_inbound_bw'] | default("0",false) }}
-    {% if data['wan_interface_1_ipmask'] is defined and data['wan_interface_1_ipmask'] != "" %}
-      ipAddressMask: {{ data['wan_interface_1_ipmask'] }}
-      nextHop: {{ data['wan_interface_1_nexthop'] }}
-    {% endif %}
-      firewallMode: {{ data['wan_interface_1_firewall_mode'] | default("all",true) }}
-      behindNat: {{ data['wan_interface_1_behind_nat'] | default("none",true) }}
-      zone: {{ data['wan_interface_1_zone'] | default("",false) }}
-{% endif %}
+      interfaceComment: {{ data[prefix ~ 'desc'] | default("",false) }}
+      interfaceLabel: {{ data[prefix ~ 'label'] | default("",false) }}
+      outboundMaxBandwidth: {{ data[prefix ~ 'max_outbound_bw'] | default("0",false) }}
+      inboundMaxBandwidth: {{ data[prefix ~ 'max_inbound_bw'] | default("0",false) }}
+        {% if data[prefix ~ 'ipmask'] is defined and data[prefix ~ 'ipmask'] != "" %}
+      ipAddressMask: {{ data[prefix ~ 'ipmask'] }}
+      nextHop: {{ data[prefix ~ 'nexthop'] }}
+        {% endif %}
+      firewallMode: {{ data[prefix ~ 'firewall_mode'] | default("all",true) }}
+      behindNat: {{ data[prefix ~ 'behind_nat'] | default("none",true) }}
+      zone: {{ data[prefix ~ 'zone'] | default("",false) }}
+      {% endif %}
+    {% endfor %}
 
-{% if data['wan_interface_2_name'] is defined and data['wan_interface_2_name'] != "" %}
-    - interfaceName: {{ data['wan_interface_2_name'] }}
-      interfaceType: wan
-      interfaceComment: {{ data['wan_interface_2_desc'] | default("",false) }}
-      interfaceLabel: {{ data['wan_interface_2_label'] | default("",false) }}
-      outboundMaxBandwidth: {{ data['wan_interface_2_max_outbound_bw'] | default("0",false) }}
-      inboundMaxBandwidth: {{ data['wan_interface_2_max_inbound_bw'] | default("0",false) }}
-    {% if data['wan_interface_2_ipmask'] is defined and data['wan_interface_2_ipmask'] != "" %}
-      ipAddressMask: {{ data['wan_interface_2_ipmask'] }}
-      nextHop: {{ data['wan_interface_2_nexthop'] }}
-    {% endif %}
-      firewallMode: {{ data['wan_interface_2_firewall_mode'] | default("all",true) }}
-      behindNat: {{ data['wan_interface_2_behind_nat'] | default("none",true) }}
-      zone: {{ data['wan_interface_2_zone'] | default("",false) }}
-{% endif %}
+{#{% if data['wan_interface_1_name'] is defined and data['wan_interface_1_name'] != "" %}#}
+{#    - interfaceName: {{ data['wan_interface_1_name'] }}#}
+{#      interfaceType: wan#}
+{#      interfaceComment: {{ data['wan_interface_1_desc'] | default("",false) }}#}
+{#      interfaceLabel: {{ data['wan_interface_1_label'] | default("",false) }}#}
+{#      outboundMaxBandwidth: {{ data['wan_interface_1_max_outbound_bw'] | default("0",false) }}#}
+{#      inboundMaxBandwidth: {{ data['wan_interface_1_max_inbound_bw'] | default("0",false) }}#}
+{#    {% if data['wan_interface_1_ipmask'] is defined and data['wan_interface_1_ipmask'] != "" %}#}
+{#      ipAddressMask: {{ data['wan_interface_1_ipmask'] }}#}
+{#      nextHop: {{ data['wan_interface_1_nexthop'] }}#}
+{#    {% endif %}#}
+{#      firewallMode: {{ data['wan_interface_1_firewall_mode'] | default("all",true) }}#}
+{#      behindNat: {{ data['wan_interface_1_behind_nat'] | default("none",true) }}#}
+{#      zone: {{ data['wan_interface_1_zone'] | default("",false) }}#}
+{#{% endif %}#}
+{##}
+{#{% if data['wan_interface_2_name'] is defined and data['wan_interface_2_name'] != "" %}#}
+{#    - interfaceName: {{ data['wan_interface_2_name'] }}#}
+{#      interfaceType: wan#}
+{#      interfaceComment: {{ data['wan_interface_2_desc'] | default("",false) }}#}
+{#      interfaceLabel: {{ data['wan_interface_2_label'] | default("",false) }}#}
+{#      outboundMaxBandwidth: {{ data['wan_interface_2_max_outbound_bw'] | default("0",false) }}#}
+{#      inboundMaxBandwidth: {{ data['wan_interface_2_max_inbound_bw'] | default("0",false) }}#}
+{#    {% if data['wan_interface_2_ipmask'] is defined and data['wan_interface_2_ipmask'] != "" %}#}
+{#      ipAddressMask: {{ data['wan_interface_2_ipmask'] }}#}
+{#      nextHop: {{ data['wan_interface_2_nexthop'] }}#}
+{#    {% endif %}#}
+{#      firewallMode: {{ data['wan_interface_2_firewall_mode'] | default("all",true) }}#}
+{#      behindNat: {{ data['wan_interface_2_behind_nat'] | default("none",true) }}#}
+{#      zone: {{ data['wan_interface_2_zone'] | default("",false) }}#}
+{#{% endif %}#}
 
 {% if data['haPeerHostname'] is defined and data['haPeerHostname'] != "" %}
   haConfig:
@@ -414,7 +451,7 @@ limit number of variables supplied by the user
         maxResponseDelay: {{ data[prefix ~ 'dhcp_failover_max_response_delay'] | default("10", true) }}
         maxUnackedUpdates: {{ data[prefix ~ 'dhcp_failover_max_unacked_packets'] | default("10", true) }}
         loadBalanceMaxSeconds: {{ data[prefix ~ 'dhcp_failover_load_balance_maxed_packets'] | default("5", true) }}
-        foRelationshipName: {{ data[prefix ~ 'dhcp_failover_relationship_name'] | default (prefix[:-1], true) }}
+{#        foRelationshipName: {{ data[prefix ~ 'dhcp_failover_relationship_name'] | default (prefix[:-1], true) }}#}
       {% endif %}
   {% endif %}
 {% endfor %}
