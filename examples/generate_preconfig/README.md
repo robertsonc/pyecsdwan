@@ -14,6 +14,7 @@ What you can do here
 Directory layout
 - preconfig_from_csv.py — Generate YAML from CSV; optionally validate/upload.
 - preconfig_from_excel.py — Generate YAML from Excel; optionally validate/upload.
+- preconfig_from_excel_vertical.py - Generate YAML from vertical oriented Excel; optionally validate/upload.
 - remove-preconfig.py — Bulk delete preconfigs from Orchestrator using a CSV (by name/hostname).
 - templates/
   - ec_preconfig_template.jinja2 — Jinja2 template for rendering preconfig YAML. Column names referenced as data['...'] map to CSV/Excel headers.
@@ -22,6 +23,7 @@ Directory layout
 - preconfig-basic.csv — Example input (simple) for CSV workflow.
 - preconfig-advanced.csv — Example input (advanced) for CSV workflow.
 - preconfig-advanced.xlsx — Example Excel workbook mirroring the advanced CSV.
+- preconfig-advanced-vertical.xlsx - Example Excel workbook mirroring the advanced CSV but laid out in vertical columns.
 - preconfig_outputs/ — Generated YAML output files are written here.
 - JupyterLab_Notebook/ — Notebook version of the workflow.
 
