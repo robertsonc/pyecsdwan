@@ -13,19 +13,17 @@ What you can do here
 
 Directory layout
 - preconfig_from_csv.py — Generate YAML from CSV; optionally validate/upload.
-- preconfig_from_excel.py — Generate YAML from Excel; optionally validate/upload.
-- preconfig_from_excel_vertical.py - Generate YAML from vertical oriented Excel; optionally validate/upload.
+- preconfig_from_excel.py — Generate YAML from Excel (vertically alligned data); optionally validate/upload.
 - remove-preconfig.py — Bulk delete preconfigs from Orchestrator using a CSV (by name/hostname).
 - templates/
-  - ec_preconfig_template.jinja2 — Jinja2 template for rendering preconfig YAML. Column names referenced as data['...'] map to CSV/Excel headers.
+  - ec_preconfig_template.jinja2 — Jinja2 template for rendering preconfig YAML. Column names referenced as data['...'] map to CSV headers.
+  - ec_preconfig_template_advanced.jinja2 - Jinja2 template for rendering preconfig YAML from the advanced Excel preconfig example.
   - generate_csv_from_jinja2.py — Parses the template and produces a CSV with headers matching the template’s expected keys.
   - preconfig.csv — A template/skeleton CSV produced from the Jinja template (if present).
-- preconfig-basic.csv — Example input (simple) for CSV workflow.
-- preconfig-advanced.csv — Example input (advanced) for CSV workflow.
-- preconfig-advanced.xlsx — Example Excel workbook mirroring the advanced CSV.
-- preconfig-advanced-vertical.xlsx - Example Excel workbook mirroring the advanced CSV but laid out in vertical columns.
+- preconfig.csv — Example input (simple) for CSV workflow. 
+- preconfig-advanced.xlsx — Example Excel workbook with more options. Data is vertically alligned.
 - preconfig_outputs/ — Generated YAML output files are written here.
-- JupyterLab_Notebook/ — Notebook version of the workflow.
+- JupyterLab_Notebook/ — Notebook version of the CSV workflow. 
 
 Prerequisites
 - Python 3.9+ (tested with modern versions)
@@ -51,7 +49,7 @@ Notes
 - Upload only occurs when you pass --upload, and after Orchestrator validates your YAML. The scripts always write local YAML files to preconfig_outputs/ regardless of upload.
 
 Jinja2 template mapping
-- The template at templates/ec_preconfig_template.jinja2 references CSV/Excel headers via the Jinja variable data['header_name'].
+- The template at templates/ec_preconfig_template.jinja2 references CSV headers via the Jinja variable data['header_name'].
 - Your input CSV/Excel must include headers that match these keys. Many fields are optional or have defaults in the template.
 - You can generate a starter CSV header directly from the template using templates/generate_csv_from_jinja2.py (see below).
 
@@ -88,18 +86,18 @@ Using preconfig_from_excel.py
 Purpose: Same as the CSV workflow, but reads data from an Excel workbook.
 
 Flags
-- -c, --csv <path> (required): Path to the Excel workbook (.xlsx or .xlsm). Despite the flag name, it points to an Excel file.
-- -s, --sheet <name> (optional): Worksheet to read. If omitted, the active sheet is used.
+- -x, --excel <name> (required): Excel workbook to read.
+- -s, --sheet <name> (optional): Worksheet to read. If omitted, the active sheet is used. 
 - -u, --upload (optional flag): If present, validate (and optionally upload) to Orchestrator.
 - -aa, --autoapply (optional flag): Mark preconfigs for auto-approve/apply during upload.
-- -j, --jinja <filename> (optional): Template filename in templates/ (default: ec_preconfig_template.jinja2).
+- -j, --jinja <filename> (optional): Template filename in templates/ (default: ec_preconfig_template_advanced.jinja2).
 - -o, --orch <url> (optional): Orchestrator URL. If omitted, ORCH_URL env var or a prompt is used.
 
 Examples (PowerShell)
 - Generate local YAMLs from active sheet:
-  - python preconfig_from_excel.py -c .\preconfig-advanced.xlsx
+  - python preconfig_from_excel.py -x .\preconfig-advanced.xlsx
 - Generate from a specific worksheet and upload with auto-apply:
-  - python preconfig_from_excel.py -c .\preconfig-advanced.xlsx -s "BranchSites" --upload --autoapply -o https://orchestrator.example.com
+  - python preconfig_from_excel.py -x .\preconfig-advanced.xlsx -s "BranchSites" --upload --autoapply -o https://orchestrator.example.com
 
 Input requirements
 - First row must be headers matching the template’s data keys.

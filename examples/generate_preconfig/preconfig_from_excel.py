@@ -13,9 +13,6 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     "-x",
     "--excel",
-    "--xlsx",
-    "--workbook",
-    "--csv",  # backward compatibility
     dest="excel",
     help="Specify source Excel workbook (.xlsx/.xlsm) for preconfigs",
     type=str,
