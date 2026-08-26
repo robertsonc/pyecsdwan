@@ -34,3 +34,17 @@ proxy is down or too slow. Until that exists, direct mode stays out.
   resource schemas, multi-line YAML edit (`edit <kind> <name>` in $EDITOR).
 - **Response-cache with TTL for read-heavy show commands** (the Orchestrator is
   a low-QPS control plane; see docs/research/expert-repo.md).
+- **Action-log polling for keyless pushes.** The template-association POST is
+  fire-and-204: the real Orchestrator records per-appliance push results in the
+  action log under a guid, not in the response. `apply()` awaits an action key
+  when one is returned (correct for the key-returning appliance ops in Phase 2),
+  but for the keyless template push it currently returns after the 204 without
+  polling `GET /action` for per-appliance failures. Wire that poll (filter by
+  nePk + recent window, terminal-state check) so a push that fails on some
+  appliances fails the commit instead of being recorded CONFIRMED.
+- **Live-Orchestrator session-login test.** The CSRF/logout-verb fix
+  (`X-XSRF-TOKEN` echo, GET logout, loginType) is unit-shaped only; add a
+  cassette/integration test against a real login flow when one is available.
+- **Resolver cache projection.** `/appliance` is cached whole; project it to
+  the fields actually consumed (hostName/nePk/site/model) to avoid persisting
+  inventory/recon data. File mode is already 0o600.

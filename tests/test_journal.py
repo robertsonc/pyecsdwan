@@ -132,25 +132,42 @@ def test_orphaned_txns(state_home):
     assert {t.meta.txn_id for t in orphaned_txns()} == {orphan.meta.txn_id}
 
 
-def test_prune_history_keeps_non_terminal_and_newest_terminal(state_home, sequential_txn_ids):
-    old_confirmed = _create()
-    old_confirmed.set_state(TxnState.CONFIRMED)
-    old_failed = _create()
-    old_failed.set_state(TxnState.FAILED)
+def test_prune_history_keeps_rollback_history_and_non_terminal(state_home, sequential_txn_ids):
+    # CONFIRMED transactions form the rollback history (quota=keep); audit and
+    # failed/reverted records are pruned under a SEPARATE, larger quota so a
+    # burst of them can never evict a rollback point. Non-terminal is never
+    # pruned.
+    oldest_confirmed = _create()
+    oldest_confirmed.set_state(TxnState.CONFIRMED)
+    mid_confirmed = _create()
+    mid_confirmed.set_state(TxnState.CONFIRMED)
     in_flight = _create()
     in_flight.set_state(TxnState.APPLYING)  # non-terminal: never pruned
     reverted = _create()
     reverted.set_state(TxnState.REVERTED)
-    newest = _create()
-    newest.set_state(TxnState.CONFIRMED)
+    newest_confirmed = _create()
+    newest_confirmed.set_state(TxnState.CONFIRMED)
 
-    removed = prune_history(keep=2)
-    assert removed == 2
-    assert not old_confirmed.dir.exists()
-    assert not old_failed.dir.exists()
+    # keep=2 rollback points, audit_keep=1 audit/dead record.
+    removed = prune_history(keep=2, audit_keep=1)
+    assert removed == 1  # only the oldest CONFIRMED beyond the 2 kept
+    assert not oldest_confirmed.dir.exists()
     remaining = {t.meta.txn_id for t in list_txns()}
     assert remaining == {
+        mid_confirmed.meta.txn_id,
+        newest_confirmed.meta.txn_id,
         in_flight.meta.txn_id,
         reverted.meta.txn_id,
-        newest.meta.txn_id,
     }
+
+
+def test_prune_history_audit_burst_never_evicts_rollback_point(state_home, sequential_txn_ids):
+    confirmed = _create()
+    confirmed.set_state(TxnState.CONFIRMED)
+    for _ in range(5):
+        audit = _create()
+        audit.set_state(TxnState.AUDIT_ONLY)
+    prune_history(keep=1, audit_keep=200)
+    # The lone rollback point survives a flood of audit records.
+    assert confirmed.dir.exists()
+    assert confirmed.meta.txn_id in {t.meta.txn_id for t in list_txns()}

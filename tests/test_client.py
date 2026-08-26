@@ -84,7 +84,8 @@ def test_appliance_request_builds_proxy_params(settings):
     assert result == {"ok": True}
     url = route.calls.last.request.url
     assert url.params["nePk"] == "3.NE"
-    assert url.params["url"] == "/interface/state"
+    # The proxy url param carries the path after rest/json/ with no leading slash.
+    assert url.params["url"] == "interface/state"
 
 
 def test_validate_ne_pk():
