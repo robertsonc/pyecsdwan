@@ -12,7 +12,9 @@ reload (wired to ``ec-cli cache refresh`` and shell completion misses).
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -103,19 +105,32 @@ class Resolver:
     # -- template groups -----------------------------------------------------
 
     def template_groups(self) -> list[str]:
-        def fetch() -> list[str]:
-            raw = self.client.get("/template/templateGroups")
-            names: list[str] = []
-            if isinstance(raw, dict):
-                names = sorted(raw)
-            elif isinstance(raw, list):
-                names = sorted(
-                    str(g.get("name")) for g in raw if isinstance(g, dict) and g.get("name")
-                )
-            return names
-
-        value = self._section("template_groups", fetch)
+        value = self._section("template_groups", self._fetch_template_groups)
         return value if isinstance(value, list) else []
+
+    def template_group_exists(self, name: str) -> bool:
+        if name in self.template_groups():
+            return True
+        self.refresh("template_groups")  # refresh-on-miss: a just-created group
+        return name in self.template_groups()
+
+    def _fetch_template_groups(self) -> list[str]:
+        raw = self.client.get("/template/templateGroups")
+        if isinstance(raw, list):
+            return sorted(
+                str(g.get("name")) for g in raw if isinstance(g, dict) and g.get("name")
+            )
+        if isinstance(raw, dict):
+            # Only treat dict values that look like group objects as groups —
+            # never the field names of a single group object (which would
+            # fabricate "name"/"templates" as phantom group names).
+            names = [
+                str(v.get("name") or k)
+                for k, v in raw.items()
+                if isinstance(v, dict) and ("name" in v or "templates" in v)
+            ]
+            return sorted(names)
+        return []
 
     # -- cache plumbing ------------------------------------------------------
 
@@ -147,8 +162,18 @@ class Resolver:
 
     def _save(self) -> None:
         try:
-            tmp = self._cache_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self._data), encoding="utf-8")
-            tmp.replace(self._cache_path)
+            self._cache_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(self._cache_path.parent), prefix=self._cache_path.name + ".", suffix=".tmp"
+            )
+            tmp = Path(tmp_name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(self._data, fh)
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, self._cache_path)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
         except OSError:
             pass

@@ -58,6 +58,23 @@ def validate_ne_pk(ne_pk: str) -> str:
     return ne_pk
 
 
+def _guard_relative_path(path: str) -> None:
+    """Reject anything that could escape the ``/gms/rest`` base.
+
+    httpx leaves an absolute URL untouched (base_url is ignored), so a path
+    like ``http://evil/steal`` would ship the ``X-Auth-Token`` header to an
+    attacker host; ``../`` segments climb out of ``/gms/rest``. Both are
+    refused before the request is built.
+    """
+    url = httpx.URL(path)
+    if url.is_absolute_url:
+        raise ValueError(f"path must be relative to /gms/rest, not an absolute URL: {path!r}")
+    if path.startswith("//"):
+        raise ValueError(f"path must not start with '//' (host-relative): {path!r}")
+    if ".." in url.path.split("/"):
+        raise ValueError(f"path must not contain '..' segments: {path!r}")
+
+
 class OrchClient:
     def __init__(self, settings: Settings, transport: httpx.BaseTransport | None = None):
         self.settings = settings
@@ -67,6 +84,13 @@ class OrchClient:
         base = base.rstrip("/")
         if not base.endswith("/gms/rest"):
             base = f"{base}/gms/rest"
+        if base.startswith("http://"):
+            host = httpx.URL(base).host
+            if host not in ("127.0.0.1", "::1", "localhost"):
+                log.warning(
+                    "plaintext_orchestrator_url",
+                    hint=f"http:// sends the API key in cleartext to {host}; use https://",
+                )
         headers = {"Accept": "application/json"}
         if settings.api_key:
             headers["X-Auth-Token"] = settings.api_key
@@ -91,27 +115,52 @@ class OrchClient:
 
     # -- auth ----------------------------------------------------------------
 
-    def login(self, user: str, password: str) -> None:
-        """Interactive session login (used when no API key is configured)."""
+    def login(self, user: str, password: str, auth_mode: str = "local") -> None:
+        """Interactive session login (used when no API key is configured).
+
+        Mirrors the pyedgeconnect SDK: a successful login sets an
+        ``orchCsrfToken`` cookie, whose value must be echoed as the
+        ``X-XSRF-TOKEN`` header on every subsequent write — the Orchestrator's
+        CSRF filter rejects state-changing requests without it. A 200 without
+        that cookie is a failure, not a success.
+        """
+        login_type = {"local": 0, "radius": 1, "tacacs": 2}.get(auth_mode, 0)
         resp = self._http.post(
             "/authentication/login",
-            json={"user": user, "password": password, "token": ""},
+            json={"user": user, "password": password, "loginType": login_type},
         )
         if resp.status_code != 200:
             raise OrchApiError(
                 "POST", "/authentication/login", resp.status_code,
                 "authentication failed (check username/password)",
             )
+        csrf = resp.cookies.get("orchCsrfToken")
+        if not csrf:
+            raise OrchApiError(
+                "POST", "/authentication/login", resp.status_code,
+                "login returned 200 but no CSRF token cookie; session not established",
+            )
+        self._http.headers["X-XSRF-TOKEN"] = csrf
         self._authenticated_session = True
 
     def logout(self) -> None:
         if not self._authenticated_session:
             return
         try:
-            self._http.post("/authentication/logout")
-        except httpx.HTTPError:
+            # The Orchestrator logout endpoint is a GET (per the SDK/spec).
+            self.request("GET", "/authentication/logout", expected=(200, 204))
+        except (OrchApiError, httpx.HTTPError):
             pass
+        self._http.headers.pop("X-XSRF-TOKEN", None)
         self._authenticated_session = False
+
+    def _scrub(self, text: str) -> str:
+        """Remove the API key from any text before it is raised or journaled —
+        error pages can reflect request headers."""
+        key = self.settings.api_key
+        if key and key in text:
+            return text.replace(key, "***REDACTED***")
+        return text
 
     def close(self) -> None:
         self.logout()
@@ -135,6 +184,7 @@ class OrchClient:
         double-apply; callers re-fetch and re-diff instead.
         """
         method = method.upper()
+        _guard_relative_path(path)
         attempts = self.settings.max_retries + 1 if method == "GET" else 1
         last_error: Exception | None = None
         for attempt in range(attempts):
@@ -163,9 +213,9 @@ class OrchClient:
                 except ValueError:
                     return resp.text
             if method == "GET" and resp.status_code in _RETRYABLE_STATUS and attempt + 1 < attempts:
-                last_error = OrchApiError(method, path, resp.status_code, resp.text)
+                last_error = OrchApiError(method, path, resp.status_code, self._scrub(resp.text))
                 continue
-            raise OrchApiError(method, path, resp.status_code, resp.text)
+            raise OrchApiError(method, path, resp.status_code, self._scrub(resp.text))
         assert last_error is not None
         if isinstance(last_error, OrchApiError):
             raise last_error
@@ -202,7 +252,10 @@ class OrchClient:
     ) -> Any:
         """Call an appliance (ECOS) API through the Orchestrator proxy."""
         validate_ne_pk(ne_pk)
-        clean = "/" + ecos_path.lstrip("/")
+        # The proxy `url` param carries the path *after* rest/json/ with no
+        # leading slash (per the SDK: url="securityMaps"); a leading slash
+        # would resolve to rest/json//securityMaps on the appliance.
+        clean = ecos_path.strip("/")
         if not re.match(r"^[a-zA-Z0-9/_.?=&-]+$", clean):
             raise ValueError(f"invalid ECOS path: {ecos_path!r}")
         return self.request(

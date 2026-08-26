@@ -45,8 +45,16 @@ def cache_root() -> Path:
 
 
 def ensure_dirs() -> None:
+    # chmod after mkdir: mkdir(mode=) only applies to the leaf and is subject
+    # to umask, and a pre-existing dir (backup restore, older layout) keeps
+    # its old mode — so re-assert 0o700 on every run. These trees hold config
+    # snapshots that can embed secrets.
+    root = state_root()
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(0o700)
     for d in (journal_root(), candidate_root(), cache_root()):
-        d.mkdir(mode=0o700, parents=True, exist_ok=True)
+        d.mkdir(parents=True, exist_ok=True)
+        d.chmod(0o700)
 
 
 @dataclasses.dataclass
