@@ -9,11 +9,17 @@ import pytest
 import respx
 
 from pyecsdwan.client import OrchClient
-from pyecsdwan.jobs import save_changes, wait_for_action, wait_for_recent_action
+from pyecsdwan.jobs import (
+    save_changes,
+    wait_for_action,
+    wait_for_preconfig_apply,
+    wait_for_recent_action,
+)
 
 STATUS_URL = "https://orch.example.com/gms/rest/action/status"
 ACTION_LOG_URL = "https://orch.example.com/gms/rest/action"
 SAVE_URL = "https://orch.example.com/gms/rest/appliance/saveChanges"
+PRECONFIG_APPLY_URL = "https://orch.example.com/gms/rest/gms/appliance/preconfiguration/apply"
 
 
 @respx.mock
@@ -307,3 +313,92 @@ def test_save_changes_keyless_response_tolerated(settings):
     assert route.call_count == 1
     assert outcome.state == "SUCCESS"
     assert "not awaited" in outcome.detail
+
+
+# -- preconfig apply: numeric taskStatus channel (#23) -----------------------
+
+
+@respx.mock
+def test_preconfig_apply_success(settings, monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    respx.get(PRECONFIG_APPLY_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "taskStatus": 2,
+                "completionStatus": True,
+                "guid": "guid-precfg-1",
+                "result": [
+                    {"nePk": "1.NE", "taskStatus": 2, "completionStatus": True, "result": "ok"},
+                ],
+            },
+        )
+    )
+    outcome = wait_for_preconfig_apply(OrchClient(settings), "preconfig-1", settings)
+    assert outcome.state == "SUCCESS"
+    assert outcome.key == "preconfig-1"
+    assert outcome.per_appliance == {"1.NE": "ok"}
+
+
+@respx.mock
+def test_preconfig_apply_failure(settings, monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    respx.get(PRECONFIG_APPLY_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "taskStatus": 2,
+                "completionStatus": False,
+                "result": [
+                    {
+                        "nePk": "1.NE",
+                        "taskStatus": 2,
+                        "completionStatus": False,
+                        "result": "yaml parse error at line 4",
+                    },
+                ],
+            },
+        )
+    )
+    outcome = wait_for_preconfig_apply(OrchClient(settings), "preconfig-2", settings)
+    assert outcome.state == "FAILED"
+    assert outcome.per_appliance == {"1.NE": "yaml parse error at line 4"}
+
+
+@respx.mock
+def test_preconfig_apply_keeps_polling_while_in_progress(settings, monkeypatch):
+    """taskStatus 0/1 must not be read as terminal even if completionStatus
+    happens to be present and falsy — only taskStatus==2 is terminal (the
+    API's own 'completionStatus valid only when taskStatus==2' caveat)."""
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    responses = iter(
+        [
+            httpx.Response(200, json={"taskStatus": 0, "completionStatus": False}),
+            httpx.Response(200, json={"taskStatus": 1, "completionStatus": False}),
+            httpx.Response(
+                200,
+                json={"taskStatus": 2, "completionStatus": True, "result": []},
+            ),
+        ]
+    )
+    route = respx.get(PRECONFIG_APPLY_URL).mock(side_effect=lambda request: next(responses))
+    outcome = wait_for_preconfig_apply(OrchClient(settings), "preconfig-3", settings)
+    assert outcome.state == "SUCCESS"
+    assert route.call_count == 3
+
+
+@respx.mock
+def test_preconfig_apply_timeout(settings, monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    real_monotonic = time.monotonic
+    calls = iter([0.0, settings.job_timeout + 1])
+    monkeypatch.setattr(
+        time, "monotonic", lambda: next(calls, real_monotonic())
+    )
+    respx.get(PRECONFIG_APPLY_URL).mock(
+        return_value=httpx.Response(200, json={"taskStatus": 1})
+    )
+    outcome = wait_for_preconfig_apply(OrchClient(settings), "preconfig-4", settings)
+    assert outcome.state == "TIMEOUT"
+    assert outcome.key == "preconfig-4"
+    assert "did not finish" in outcome.detail
