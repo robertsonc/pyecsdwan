@@ -1,6 +1,7 @@
 """Built-in resource plugins. Importing this package registers them all."""
 
 from pyecsdwan.resources import (
+    appliance_zones,
     bgp,
     deployment,
     dhcp,
@@ -16,6 +17,7 @@ from pyecsdwan.resources import (
 )
 
 __all__ = [
+    "appliance_zones",
     "bgp",
     "deployment",
     "dhcp",
