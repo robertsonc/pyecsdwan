@@ -332,7 +332,7 @@ def _show_appliances(state: ShellState) -> None:
 
 
 def _show_pending(state: ShellState) -> None:
-    pending = txn.pending_rollbacks()
+    pending = txn.pending_rollbacks(host=state.settings.host)
     if not pending:
         _info(state.console, "none")
         return
@@ -358,13 +358,34 @@ def _show_coverage(state: ShellState) -> None:
 
 
 def _show_generic(args: list[str], state: ShellState) -> None:
-    """``show <kind> [<name>]`` — fetch + normalize one resource, print as YAML."""
-    if len(args) > 2:
-        raise ValueError("usage: show <kind> [<name>]")
+    """``show [appliance <name>] <kind> [<instance>]`` — fetch + normalize one
+    resource and print it as YAML. With no instance name, enumerate the kind's
+    known instances via list_refs() (a lone instance is shown directly)."""
+    appliance: str | None = None
+    if len(args) >= 2 and args[0] == "appliance":
+        appliance = args[1]
+        args = args[2:]
+    if not args or len(args) > 2:
+        raise ValueError("usage: show [appliance <name>] <kind> [<instance>]")
     kind = args[0]
-    name = args[1] if len(args) == 2 else "global"
     resource = state.registry.get(kind)
-    ref = Ref(kind=kind, name=name, appliance=None)
+
+    if len(args) == 2:
+        instance = args[1]
+    else:
+        refs = list(resource.list_refs(state.ctx))
+        if len(refs) == 1:
+            instance = refs[0].name
+            appliance = appliance or refs[0].appliance
+        elif not refs:
+            raise ValueError(f"{kind}: name required (no instances to enumerate)")
+        else:
+            names = ", ".join(r.name for r in refs)
+            raise ValueError(f"{kind}: name required; instances: {names}")
+
+    if resource.scope.value == "appliance" and appliance is None:
+        raise ValueError(f"{kind} is appliance-scoped; use 'show appliance <name> {kind} ...'")
+    ref = Ref(kind=kind, name=instance, appliance=appliance)
     canonical = resource.normalize(resource.fetch(state.ctx, ref))
     state.console.print(f"# {ref}", style="dim", markup=False, highlight=False)
     if canonical is None:
@@ -423,13 +444,35 @@ def _cmd_commit(tokens: list[str], state: ShellState) -> None:
 
     confirm_minutes, flags = _parse_commit_args(tokens)
 
-    # A bare `commit` inside a confirm window confirms the pending transaction.
+    # A bare `commit` inside a confirm window confirms the pending transaction
+    # — but only for THIS Orchestrator, and only when there's nothing new
+    # staged and no options were passed (otherwise the user meant a fresh
+    # commit and we'd silently confirm + drop their new work).
     unconfirmed = [
-        t for t in journal.list_txns() if t.meta.state == journal.TxnState.APPLIED_UNCONFIRMED
+        t
+        for t in journal.list_txns()
+        if t.meta.state == journal.TxnState.APPLIED_UNCONFIRMED
+        and t.meta.orch_host == state.settings.host
     ]
     if unconfirmed:
+        options_passed = bool(
+            confirm_minutes
+            or flags["force"]
+            or flags["override_template"]
+            or flags["allow_untransactional"]
+        )
+        if len(state.candidate) or options_passed:
+            _error(
+                state.console,
+                f"transaction {unconfirmed[0].meta.txn_id} is awaiting confirmation; "
+                f"run 'commit' with no args (or 'rollback pending') before committing new changes",
+            )
+            state.exit_code = 2
+            return
         report = txn.confirm_pending(state.settings)
         render_report(state.console, report)
+        if not report.ok:
+            state.exit_code = 2
         return
 
     plan = txn.build_plan(state.ctx, state.registry, state.candidate)
@@ -449,9 +492,12 @@ def _cmd_commit(tokens: list[str], state: ShellState) -> None:
         )
     except txn.CommitError as exc:
         _error(state.console, str(exc))
+        state.exit_code = 2
         return
     if report.ok:
         state.candidate.clear()
+    else:
+        state.exit_code = 2
     render_report(state.console, report)
     if report.ok and confirm_minutes is not None:
         _warn(state.console, f"commit within {confirm_minutes} minute(s) to keep changes")
@@ -463,7 +509,7 @@ def _cmd_rollback(tokens: list[str], state: ShellState) -> None:
     if len(tokens) != 1:
         raise ValueError(_ROLLBACK_USAGE)
     if tokens[0] == "pending":
-        pending = txn.pending_rollbacks()
+        pending = txn.pending_rollbacks(host=state.settings.host)
         if not pending:
             _info(state.console, "no pending transactions")
             return
@@ -475,10 +521,14 @@ def _cmd_rollback(tokens: list[str], state: ShellState) -> None:
                 registry=state.registry,
             )
             render_report(state.console, report)
+            if not report.ok:
+                state.exit_code = 2
         return
     if not _INT_RE.match(tokens[0]):
         raise ValueError(_ROLLBACK_USAGE)
     report = txn.rollback_history_txn(state.ctx, state.registry, state.settings, int(tokens[0]))
+    if not report.ok:
+        state.exit_code = 2
     render_report(state.console, report)
 
 

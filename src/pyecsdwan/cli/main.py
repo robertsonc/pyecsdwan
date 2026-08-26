@@ -16,6 +16,7 @@ import hashlib
 import importlib
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Annotated, Any, NoReturn, cast
@@ -28,7 +29,7 @@ from rich.table import Table
 from rich.text import Text
 
 from pyecsdwan import config, runtime, txn
-from pyecsdwan.candidate import CandidateStore
+from pyecsdwan.candidate import CandidateCorruptError, CandidateStore
 from pyecsdwan.cli import render
 from pyecsdwan.client import OrchApiError
 from pyecsdwan.contract import Ctx, Ref, Resource, Reversibility, Scope, Tier
@@ -61,6 +62,7 @@ class _State:
     orch_url: str | None = None
     insecure: bool = False
     debug: bool = False
+    mock: int | None = None
     booted: tuple[Ctx, Registry, config.Settings] | None = None
 
 
@@ -88,9 +90,9 @@ def _configure_logging(debug: bool) -> None:
     )
 
 
-def _startup_scan() -> None:
-    """Warn (never block) about orphaned unconfirmed transactions."""
-    orphans = txn.pending_rollbacks()
+def _startup_scan(host: str) -> None:
+    """Warn (never block) about orphaned unconfirmed transactions for HOST."""
+    orphans = txn.pending_rollbacks(host=host)
     if orphans:
         err_console.print(
             Text(
@@ -105,12 +107,12 @@ def _bootstrap(state: _State) -> tuple[Ctx, Registry, config.Settings]:
     if state.booted is None:
         try:
             ctx, registry, settings = runtime.bootstrap(
-                orch_url=state.orch_url, insecure=state.insecure
+                orch_url=state.orch_url, insecure=state.insecure, mock=state.mock is not None
             )
         except RuntimeError as exc:
             _fail(str(exc))
         state.booted = (ctx, registry, settings)
-        _startup_scan()
+        _startup_scan(settings.host)
     return state.booted
 
 
@@ -145,10 +147,12 @@ def _coerce_value(raw: str) -> Any:
         return True
     if lowered == "false":
         return False
-    try:
+    # Only plain base-10 integers; avoid int()'s acceptance of '1_000',
+    # surrounding whitespace, and unicode digits, so the CLI and shell coerce
+    # identically and a stored candidate value is predictable.
+    if re.fullmatch(r"[+-]?\d+", raw):
         return int(raw)
-    except ValueError:
-        return raw
+    return raw
 
 
 def _resource_for(registry: Registry, kind: str) -> Resource:
@@ -197,9 +201,10 @@ def cli(
     global _DEBUG
     _DEBUG = debug
     _configure_logging(debug)
-    state = _State(orch_url=orch_url, insecure=insecure, debug=debug)
+    state = _State(orch_url=orch_url, insecure=insecure, debug=debug, mock=mock)
     if mock is not None:
-        # Plain-http URLs pass through OrchClient untouched, so http is allowed.
+        # Plain-http to loopback; runtime.bootstrap supplies a sentinel key so
+        # the demo path works without a real credential.
         state.orch_url = f"http://127.0.0.1:{mock}"
     ctx.obj = state
     if ctx.invoked_subcommand is None:
@@ -303,6 +308,26 @@ def load(
         for key, value in data.items():
             candidate.set_path(ref, [str(key)], value)
     else:
+        # Replace mode is a full overwrite: a section the file omits will be
+        # normalized to empty and DELETED on apply. Warn if the file is a
+        # strict subset of the resource's known top-level sections so the
+        # operator isn't surprised by a silent wipe (they still see it in
+        # `show | compare`, but a heads-up here is cheap).
+        resource = _resource_for(registry, kind)
+        try:
+            template = resource.normalize(None)
+        except Exception:  # noqa: BLE001 - a normalize() that needs real state just skips the hint
+            template = None
+        if isinstance(template, dict):
+            missing = [k for k in template if k not in data]
+            if missing:
+                err_console.print(
+                    Text(
+                        f"warning: {file} omits section(s) {', '.join(missing)}; replace mode "
+                        f"will remove them. Use --merge, or add them explicitly to keep them.",
+                        style="yellow",
+                    )
+                )
         candidate.set_desired(ref, data)
     mode = "merge" if merge else "replace"
     console.print(f"loaded {ref.key()} from {file} ({mode} mode, {len(data)} top-level key(s))")
@@ -349,16 +374,28 @@ def commit(
     """Apply the candidate changeset (a bare commit inside a confirm window confirms)."""
     state = _state(ctx)
     rt_ctx, registry, settings = _bootstrap(state)
+    candidate = CandidateStore(settings.host)
     unconfirmed = [
         t
         for t in list_txns()
         if t.meta.state == TxnState.APPLIED_UNCONFIRMED and t.meta.orch_host == settings.host
     ]
     if unconfirmed:
+        # A bare commit confirms the pending window. But if the user also
+        # staged new changes or passed options, they meant a fresh commit —
+        # refuse rather than silently confirming and dropping the new work.
+        options_passed = bool(
+            confirm_minutes or force or override_template or allow_untransactional
+        )
+        if len(candidate) or options_passed:
+            _fail(
+                f"transaction {unconfirmed[0].meta.txn_id} is awaiting confirmation; "
+                f"run 'ec-cli confirm' (or 'ec-cli rollback --pending') before "
+                f"committing new changes"
+            )
         report = txn.confirm_pending(settings)
         render.render_report(console, report)
         raise typer.Exit(0 if report.ok else 2)
-    candidate = CandidateStore(settings.host)
     plan = txn.build_plan(rt_ctx, registry, candidate)
     if plan.empty:
         console.print("no changes")
@@ -417,7 +454,7 @@ def rollback(
     state = _state(ctx)
     rt_ctx, registry, settings = _bootstrap(state)
     if pending:
-        orphans = txn.pending_rollbacks()
+        orphans = txn.pending_rollbacks(host=settings.host)
         if not orphans:
             console.print("no orphaned transactions")
             return
@@ -464,9 +501,10 @@ def show_journal() -> None:
 
 
 @show_app.command("pending")
-def show_pending() -> None:
+def show_pending(ctx: typer.Context) -> None:
     """Orphaned/unconfirmed transactions needing operator attention."""
-    orphans = txn.pending_rollbacks()
+    _rt, _registry, settings = _bootstrap(_state(ctx))
+    orphans = txn.pending_rollbacks(host=settings.host)
     if not orphans:
         console.print("no pending transactions")
         return
@@ -661,7 +699,14 @@ def main() -> None:
     """Console-script entrypoint (``ec-cli``)."""
     try:
         app()
-    except (txn.CommitError, OrchApiError, ResolveError, UnknownKind) as exc:
+    except (
+        txn.CommitError,
+        OrchApiError,
+        ResolveError,
+        UnknownKind,
+        CandidateCorruptError,
+        ValueError,
+    ) as exc:
         if _DEBUG:
             raise
         message = str(exc.args[0]) if exc.args else str(exc)
