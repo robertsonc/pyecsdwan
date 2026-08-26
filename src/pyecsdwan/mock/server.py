@@ -14,6 +14,7 @@ to ``False`` to disable the check entirely (useful in tests).
 
 from __future__ import annotations
 
+import copy
 import threading
 import time
 import uuid
@@ -110,6 +111,90 @@ def _seed_zone_list_meta() -> dict[str, Any]:
     }
 
 
+# -- static routes (#15) ------------------------------------------------------
+#
+# Per-appliance ECOS state for the subnets3/* static-route endpoints, proxied
+# through /appliance/rest (see _subnets3_dispatch below). Shape matches the
+# real payload captured live against subnets3/configured (issue #15).
+
+_SUBNETS_ALL_PATH = "subnets3/all"
+_SUBNETS_CONFIGURED_PATH = "subnets3/configured"
+_SUBNETS_ADD_PATH = "subnets3/configured/addMultiple"
+_SUBNETS_DELETE_PATH = "subnets3/configured/deleteMultiple"
+
+
+def _seed_static_routes() -> dict[str, dict[str, Any]]:
+    default_route = {
+        "prefix": {
+            "0.0.0.0/0": {
+                "self": "0.0.0.0/0",
+                "advert": True,
+                "advert_bgp": False,
+                "advert_ospf": False,
+                "local": True,
+                "nhop": {
+                    "0.0.0.0": {
+                        "self": "0.0.0.0",
+                        "interface": {
+                            "default": {
+                                "self": "default",
+                                "comment": "Default route",
+                                "dest_mac": "00:00:00:00:00:00",
+                                "dir": "ANY",
+                                "gms_marked": False,
+                                "label": 1,
+                                "metric": 50,
+                                "no_subshared": False,
+                                "vni": 16777216,
+                                "vxlan": False,
+                                "zone_id": 65534,
+                            }
+                        },
+                    }
+                },
+            }
+        }
+    }
+    return {ne_pk: copy.deepcopy(default_route) for ne_pk in ("1.NE", "3.NE", "5.NE")}
+
+
+def _seed_static_routes_learned() -> dict[str, dict[str, Any]]:
+    """Extra prefixes visible only via subnets3/all — simulated OSPF-learned
+    routes, never mutated by addMultiple/deleteMultiple."""
+    learned = {
+        "prefix": {
+            "10.99.0.0/24": {
+                "self": "10.99.0.0/24",
+                "advert": False,
+                "advert_bgp": False,
+                "advert_ospf": True,
+                "local": False,
+                "nhop": {
+                    "10.1.1.1": {
+                        "self": "10.1.1.1",
+                        "interface": {
+                            "wan0": {
+                                "self": "wan0",
+                                "comment": "",
+                                "dest_mac": "aa:bb:cc:00:11:22",
+                                "dir": "ANY",
+                                "gms_marked": False,
+                                "label": 2,
+                                "metric": 110,
+                                "no_subshared": False,
+                                "vni": 16777216,
+                                "vxlan": False,
+                                "zone_id": 65534,
+                            }
+                        },
+                    }
+                },
+            }
+        }
+    }
+    return {ne_pk: copy.deepcopy(learned) for ne_pk in ("1.NE", "3.NE", "5.NE")}
+
+
 # -- state -------------------------------------------------------------------
 
 
@@ -143,6 +228,14 @@ class MockState:
     #: Read-only views: segment<->zone map and per-appliance cached zone lists.
     vrf_zones_map: dict[str, Any] = field(default_factory=_seed_vrf_zones_map)
     zone_list_meta: dict[str, Any] = field(default_factory=_seed_zone_list_meta)
+    #: Static routes (#15): per-appliance "configured" table
+    #: ({nePk: {"prefix": {cidr: {...}}}}), mutated by addMultiple/
+    #: deleteMultiple; and the extra prefixes visible only via subnets3/all
+    #: (simulated learned routes), never mutated by those two endpoints.
+    static_routes: dict[str, dict[str, Any]] = field(default_factory=_seed_static_routes)
+    static_routes_learned: dict[str, dict[str, Any]] = field(
+        default_factory=_seed_static_routes_learned
+    )
     #: Per-appliance ECOS store reached via the /appliance/rest proxy:
     #: {nePk: {ecosPath: payload}}.
     appliance_ecos: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -193,6 +286,57 @@ async def _json_body(request: Request) -> Any:
         return await request.json()
     except (ValueError, UnicodeDecodeError):
         return None
+
+
+# -- static routes (#15): real add/delete-delta semantics for subnets3/* ----
+#
+# These four ECOS paths are proxied through the generic /appliance/rest
+# handler below (appliance_proxy), like every other appliance-scope call —
+# but unlike the opaque per-url KV store it falls back to, they need real
+# merge/delta behavior so a resource's addMultiple/deleteMultiple round-trips
+# through fetch()/normalize() correctly. appliance_proxy dispatches here for
+# exactly these four (nePk, url) combinations before falling into that store.
+
+
+def _mark_unsaved(mock: MockState, ne_pk: str) -> None:
+    for appliance in mock.appliances:
+        if appliance.get("nePk") == ne_pk:
+            appliance["hasUnsavedChanges"] = True
+
+
+async def _subnets3_dispatch(request: Request, mock: MockState, ne_pk: str, url: str) -> Any:
+    configured = mock.static_routes.setdefault(ne_pk, {"prefix": {}})
+    if url == _SUBNETS_CONFIGURED_PATH and request.method == "GET":
+        return configured
+    if url == _SUBNETS_ALL_PATH and request.method == "GET":
+        learned = mock.static_routes_learned.get(ne_pk, {"prefix": {}})
+        merged = {**learned.get("prefix", {}), **configured.get("prefix", {})}
+        return {"prefix": merged}
+    if url == _SUBNETS_ADD_PATH and request.method == "POST":
+        body = await _json_body(request)
+        new_prefixes = body.get("prefix") if isinstance(body, dict) else None
+        if not isinstance(new_prefixes, dict):
+            return JSONResponse(
+                {"error": "addMultiple body must carry a 'prefix' object"}, status_code=400
+            )
+        configured.setdefault("prefix", {}).update(new_prefixes)
+        _mark_unsaved(mock, ne_pk)
+        return Response(status_code=204)
+    if url == _SUBNETS_DELETE_PATH and request.method == "POST":
+        body = await _json_body(request)
+        drop = body.get("prefixes") if isinstance(body, dict) else None
+        if not isinstance(drop, list):
+            return JSONResponse(
+                {"error": "deleteMultiple body must carry a 'prefixes' list"}, status_code=400
+            )
+        table = configured.setdefault("prefix", {})
+        for cidr in drop:
+            table.pop(str(cidr), None)
+        _mark_unsaved(mock, ne_pk)
+        return Response(status_code=204)
+    return JSONResponse(
+        {"error": f"unsupported subnets3 call: {request.method} {url}"}, status_code=400
+    )
 
 
 def _action_records(key: str, action: dict[str, Any]) -> list[dict[str, Any]]:
@@ -611,6 +755,14 @@ def create_app(state: MockState | None = None) -> FastAPI:
     async def appliance_proxy(request: Request, nePk: str, url: str) -> Any:
         """Proxy to a per-appliance ECOS store keyed by (nePk, url). Writes set
         hasUnsavedChanges on the appliance until saveChanges clears it."""
+        # -- static routes (#15): real behavior instead of the opaque store.
+        if url in (
+            _SUBNETS_ALL_PATH,
+            _SUBNETS_CONFIGURED_PATH,
+            _SUBNETS_ADD_PATH,
+            _SUBNETS_DELETE_PATH,
+        ):
+            return await _subnets3_dispatch(request, mock, nePk, url)
         store = mock.appliance_ecos.setdefault(nePk, {})
         if request.method == "GET":
             return store.get(url, {})
