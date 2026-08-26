@@ -362,6 +362,77 @@ def _validate_deployment(body: Any, force_fail: bool) -> dict[str, Any]:
     return {"err": "", "rebootRequired": False}
 
 
+# -- loopback (#18) ------------------------------------------------------------
+#
+# 1. Per-appliance loopback interfaces: served through the generic
+#    /appliance/rest proxy's opaque KV store (like vrrp, #14) — seeded via
+#    _seed_appliance_ecos() below, key "virtualif/loopback". Real shape
+#    captured live this session (resources/loopback.py module docstring).
+# 2. Loopback orchestration: its own top-level state (fabric-wide, not
+#    per-appliance), with real add/reclaim semantics for the pool endpoints
+#    so a resource's GET-then-POST full-structure-replace round-trips.
+
+_LOOPBACK_ORCH_PATH = "/loopbackOrch"
+_LOOPBACK_ORCH_POOL_PATH = "/loopbackOrch/pool"
+_LOOPBACK_ORCH_RECLAIM_PATH = "/loopbackOrch/pool/reclaim"
+
+
+def _seed_loopback_interfaces() -> dict[str, dict[str, Any]]:
+    """Per-appliance ``virtualif/loopback`` fixture — real shape captured
+    live this session against a lab Orchestrator (see resources/loopback.py).
+    Only HUB1-EC (1.NE) has a loopback configured; the others come back
+    empty, same "not every appliance has one" spread as vrrp/bgp-neighbor."""
+    return {
+        "1.NE": {
+            "lo0": {
+                "admin": True,
+                "gms_marked": False,
+                "ipaddr": "192.168.255.12",
+                "label": "",
+                "nmask": 32,
+                "role_id": 0,
+                "vrf_id": 0,
+                "zone": 0,
+            }
+        },
+        "3.NE": {},
+        "5.NE": {},
+    }
+
+
+def _seed_loopback_orch() -> dict[str, Any]:
+    """``loopbackOrch`` fixture. Not live-confirmed (the lab fabric's
+    ``loopbackOrch`` came back empty this session) — shaped from the issue
+    text + the vendored SDK's ``get_loopback_orchestration`` docstring:
+    ``{segmentId: {loopbackPool, interfaces: {interfaceId: {mgmtIP, label,
+    zone}}}}``. Deliberately seeded with the real GET casing (``mgmtIP``) so
+    the mgmtIp/mgmtIP bug is exercised by tests that *submit* the alias, not
+    silently masked by the fixture itself using the buggy casing too."""
+    return {
+        "0": {
+            "loopbackPool": "10.41.0.0/16",
+            "interfaces": {
+                "20000": {"mgmtIP": True, "label": "149", "zone": 27},
+            },
+        }
+    }
+
+
+def _seed_loopback_orch_pool() -> dict[str, Any]:
+    return {
+        "0": {
+            "segment": 0,
+            "subnet": "10.41.0.0/16",
+            "totalAddr": 65534,
+            "addrAllocated": 1,
+            "addrDeleted": 0,
+        }
+    }
+
+
+# -- end loopback (#18) seed data -----------------------------------------------
+
+
 # -- static routes (#15) ------------------------------------------------------
 #
 # Per-appliance ECOS state for the subnets3/* static-route endpoints, proxied
@@ -500,6 +571,8 @@ def _seed_appliance_ecos() -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for ne_pk, entries in _seed_vrrp().items():
         out.setdefault(ne_pk, {})["vrrp"] = entries
+    for ne_pk, interfaces in _seed_loopback_interfaces().items():
+        out.setdefault(ne_pk, {})["virtualif/loopback"] = interfaces
     return out
 
 
@@ -546,7 +619,7 @@ class MockState:
     )
     #: Per-appliance ECOS store reached via the /appliance/rest proxy:
     #: {nePk: {ecosPath: payload}}. Seeded per-resource by
-    #: _seed_appliance_ecos() (currently just vrrp, #14).
+    #: _seed_appliance_ecos() (vrrp #14, per-appliance loopback #18).
     appliance_ecos: dict[str, dict[str, Any]] = field(default_factory=_seed_appliance_ecos)
     actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     sessions: set[str] = field(default_factory=set)
@@ -561,6 +634,14 @@ class MockState:
     #: Consumed by the next POST .../url=deployment/validate call, like
     #: fail_next_action: forces one deterministic {err: ...} response.
     deployment_fail_validate: bool = False
+    # -- loopback orchestration (#18) --
+    #: Fabric-wide loopbackOrch structure ({segmentId: {loopbackPool,
+    #: interfaces}}), replaced wholesale by POST /loopbackOrch.
+    loopback_orch: dict[str, Any] = field(default_factory=_seed_loopback_orch)
+    #: Pool allocation detail ({segmentId: {segment, subnet, totalAddr,
+    #: addrAllocated, addrDeleted}}) — mutated only by the reclaim
+    #: endpoints' addrDeleted bookkeeping, never by POST /loopbackOrch.
+    loopback_orch_pool: dict[str, Any] = field(default_factory=_seed_loopback_orch_pool)
 
     def reset(self) -> None:
         """Restore every field to its seeded default (in place)."""
@@ -1140,6 +1221,51 @@ def create_app(state: MockState | None = None) -> FastAPI:
     @api.get("/bgp/config/neighbor")
     async def get_bgp_neighbor(nePk: str) -> Any:
         return mock.bgp_neighbor.get(nePk, {})
+
+    # -- loopback (#18) -------------------------------------------------------
+    #
+    # Per-appliance loopback interfaces ride the generic /appliance/rest
+    # proxy below (key "virtualif/loopback", seeded by _seed_appliance_ecos
+    # above) — no dedicated route needed. Loopback orchestration is
+    # fabric-wide (not per-appliance), so it gets its own routes here.
+
+    @api.get("/loopbackOrch")
+    async def get_loopback_orch() -> Any:
+        return mock.loopback_orch
+
+    @api.post("/loopbackOrch")
+    async def replace_loopback_orch(request: Request) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "body must map segment-id -> {loopbackPool, interfaces}"},
+                status_code=400,
+            )
+        mock.loopback_orch = {str(seg_id): seg for seg_id, seg in body.items()}
+        return Response(status_code=204)
+
+    @api.get("/loopbackOrch/pool")
+    async def get_loopback_orch_pool() -> Any:
+        return mock.loopback_orch_pool
+
+    @api.delete("/loopbackOrch/pool/reclaim/{loopback_id}")
+    async def reclaim_one_loopback_ip(loopback_id: int) -> Response:
+        # Mock bookkeeping only: decrements segment "0"'s addrDeleted count
+        # (no per-id deleted-ip history is modeled here) so the route is
+        # observably real rather than a no-op 204.
+        pool = mock.loopback_orch_pool.get("0")
+        if isinstance(pool, dict) and pool.get("addrDeleted", 0) > 0:
+            pool["addrDeleted"] -= 1
+        return Response(status_code=204)
+
+    @api.delete("/loopbackOrch/pool/reclaim")
+    async def reclaim_all_loopback_ips() -> Response:
+        for pool in mock.loopback_orch_pool.values():
+            if isinstance(pool, dict):
+                pool["addrDeleted"] = 0
+        return Response(status_code=204)
+
+    # -- end loopback (#18) ---------------------------------------------------
 
     # -- catch-all (must be registered last on this router) -----------------
 
