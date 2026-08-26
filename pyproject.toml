@@ -82,7 +82,9 @@ ignore = [
 [tool.mypy]
 python_version = "3.10"
 mypy_path = "src"
-packages = ["pyecsdwan"]
+# files instead of packages: mypy refuses to combine the two, and tools/
+# holds standalone strict-typed scripts the `make type` gate must cover too.
+files = ["src/pyecsdwan", "tools"]
 strict = true
 warn_unreachable = true
 # The vendored pyedgeconnect reference SDK and repo examples are not ours to type.

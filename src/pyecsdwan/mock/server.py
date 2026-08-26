@@ -94,6 +94,22 @@ def _seed_security_maps() -> dict[str, Any]:
     return {"mapsByVrf": {"0": {"zoneMap": {}}}}
 
 
+def _seed_zones() -> dict[str, Any]:
+    return {"0": {"name": "Default"}}
+
+
+def _seed_vrf_zones_map() -> dict[str, Any]:
+    return {"0": {"0": {"id": 0, "name": "Default"}}}
+
+
+def _seed_zone_list_meta() -> dict[str, Any]:
+    return {
+        "1.NE": {"zones": ["Default"]},
+        "3.NE": {"zones": ["Default"]},
+        "5.NE": {"zones": ["Default"]},
+    }
+
+
 # -- state -------------------------------------------------------------------
 
 
@@ -119,6 +135,14 @@ class MockState:
     security_maps: dict[str, Any] = field(default_factory=_seed_security_maps)
     #: Segment-pair keyed security policy data ("0_0" -> SecurityMaps object).
     security_policies: dict[str, Any] = field(default_factory=dict)
+    #: Orchestrator firewall zone table ({zone_id: {"name": ...}}) plus the
+    #: monotonic id allocator and the end-to-end ZBFW flag.
+    zones: dict[str, Any] = field(default_factory=_seed_zones)
+    zones_next_id: int = 1
+    zones_ee_enable: bool = False
+    #: Read-only views: segment<->zone map and per-appliance cached zone lists.
+    vrf_zones_map: dict[str, Any] = field(default_factory=_seed_vrf_zones_map)
+    zone_list_meta: dict[str, Any] = field(default_factory=_seed_zone_list_meta)
     #: Per-appliance ECOS store reached via the /appliance/rest proxy:
     #: {nePk: {ecosPath: payload}}.
     appliance_ecos: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -132,12 +156,17 @@ class MockState:
         for spec in fields(self):
             setattr(self, spec.name, getattr(fresh, spec.name))
 
-    def new_action(self, key: str | None = None, ne_pks: list[str] | None = None) -> str:
+    def new_action(
+        self, key: str | None = None, ne_pks: list[str] | None = None, name: str = ""
+    ) -> str:
         """Register an async action; it finishes after ``action_delay_polls`` polls.
 
-        A pending ``fail_next_action`` flag is consumed by the next action
-        created, which then finishes as a failure (``completionStatus`` false,
-        result ``"mock failure"``).
+        A poll is one GET that returns the action's records — via either
+        ``/action/status?key=`` or the ``/action`` listing; a single waiter
+        only ever uses one of the two, so ``action_delay_polls`` means the
+        same thing on both paths. A pending ``fail_next_action`` flag is
+        consumed by the next action created, which then finishes as a failure
+        (``completionStatus`` false, result ``"mock failure"``).
         """
         action_key = key or str(uuid.uuid4())
         self.actions[action_key] = {
@@ -145,6 +174,8 @@ class MockState:
             "delay_polls": self.action_delay_polls,
             "fail": self.fail_next_action,
             "ne_pks": list(ne_pks) if ne_pks else [],
+            "name": name,
+            "startTime": int(time.time() * 1000),
         }
         self.fail_next_action = False
         return action_key
@@ -167,12 +198,17 @@ async def _json_body(request: Request) -> Any:
 def _action_records(key: str, action: dict[str, Any]) -> list[dict[str, Any]]:
     finished = action["polls"] >= max(int(action.get("delay_polls", 1)), 1)
     failed = bool(action.get("fail"))
+    base = {
+        "guid": key,
+        "name": str(action.get("name", "")),
+        "startTime": int(action.get("startTime", 0)),
+    }
     records: list[dict[str, Any]] = []
     for ne_pk in action.get("ne_pks") or [""]:
         if not finished:
             records.append(
                 {
-                    "guid": key,
+                    **base,
                     "nepk": ne_pk,
                     "taskStatus": "In Progress",
                     "percentComplete": 50,
@@ -184,7 +220,7 @@ def _action_records(key: str, action: dict[str, Any]) -> list[dict[str, Any]]:
         elif failed:
             records.append(
                 {
-                    "guid": key,
+                    **base,
                     "nepk": ne_pk,
                     "taskStatus": "Failed",
                     "percentComplete": 100,
@@ -196,7 +232,7 @@ def _action_records(key: str, action: dict[str, Any]) -> list[dict[str, Any]]:
         else:
             records.append(
                 {
-                    "guid": key,
+                    **base,
                     "nepk": ne_pk,
                     "taskStatus": "Completed",
                     "percentComplete": 100,
@@ -370,7 +406,9 @@ def create_app(state: MockState | None = None) -> FastAPI:
         if not isinstance(template_ids, list):
             return JSONResponse({"error": "body must include templateIds list"}, status_code=400)
         mock.template_association[nePk] = [str(g) for g in template_ids]
-        mock.new_action(ne_pks=[nePk])
+        # Fire-and-204, like the real endpoint: the push's per-appliance
+        # results exist only as action-log records — no key in the response.
+        mock.new_action(ne_pks=[nePk], name="template push")
         return Response(status_code=204)
 
     @api.get("/template/history/groupList")
@@ -467,6 +505,28 @@ def create_app(state: MockState | None = None) -> FastAPI:
         action["polls"] += 1
         return _action_records(key, action)
 
+    @api.get("/action")
+    async def list_actions(
+        startTime: int,
+        endTime: int,
+        logLevel: int = 1,
+        limit: int = 100,
+        appliance: str | None = None,
+    ) -> Any:
+        """Action/audit log listing: epoch-ms window (required, like the real
+        API) plus the ``appliance`` nePk filter. Every emitted action counts
+        the call as one poll, so ``action_delay_polls`` drives the keyless
+        waiter exactly as ``/action/status`` drives the keyed one."""
+        records: list[dict[str, Any]] = []
+        for key, action in mock.actions.items():
+            if appliance is not None and appliance not in (action.get("ne_pks") or []):
+                continue
+            if not startTime <= int(action.get("startTime", 0)) <= endTime:
+                continue
+            action["polls"] += 1
+            records.extend(_action_records(key, action))
+        return records[: max(limit, 0)]
+
     # -- security maps -------------------------------------------------------
 
     @api.get("/securityMaps")
@@ -489,6 +549,61 @@ def create_app(state: MockState | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="body must carry a 'data' object")
         mock.security_policies[map] = body["data"]
         return Response(status_code=204)
+
+    # -- zones (orchestrator scope) ------------------------------------------
+
+    @api.get("/zones")
+    async def get_zones(allVRFZones: bool = False) -> Any:
+        # The mock keeps one unique-names table; allVRFZones=true would add
+        # per-segment duplicates on a real Orchestrator.
+        return mock.zones
+
+    @api.post("/zones")
+    async def replace_zones(request: Request, deleteDependencies: bool) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "body must map zone id -> zone object"}, status_code=400
+            )
+        mock.zones = {str(zone_id): zone for zone_id, zone in body.items()}
+        # Real Orchestrator behavior: the Default zone is re-added to any
+        # table posted without it.
+        mock.zones.setdefault("0", {"name": "Default"})
+        return Response(status_code=204)
+
+    @api.get("/zones/nextId")
+    async def get_zone_next_id() -> Any:
+        return {"nextId": mock.zones_next_id}
+
+    @api.post("/zones/nextId")
+    async def set_zone_next_id(request: Request) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict) or "nextId" not in body:
+            return JSONResponse({"error": "body must carry nextId"}, status_code=400)
+        mock.zones_next_id = int(body["nextId"])
+        return Response(status_code=204)
+
+    @api.get("/zones/eeEnable")
+    async def get_zones_ee_enable() -> Any:
+        return {"enable": mock.zones_ee_enable}
+
+    @api.post("/zones/eeEnable")
+    async def set_zones_ee_enable(request: Request) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict) or "enable" not in body:
+            return JSONResponse({"error": "body must carry enable"}, status_code=400)
+        mock.zones_ee_enable = bool(body["enable"])
+        return Response(status_code=204)
+
+    @api.get("/zones/vrfZonesMap")
+    async def get_vrf_zones_map() -> Any:
+        return mock.vrf_zones_map
+
+    @api.get("/appliance/zoneListMeta")
+    async def get_zone_list_meta(nePk: str | None = None) -> Any:
+        if nePk is None:
+            return mock.zone_list_meta
+        return {nePk: mock.zone_list_meta.get(nePk, {"zones": []})}
 
     # -- appliance proxy + save-changes -------------------------------------
 
@@ -513,10 +628,18 @@ def create_app(state: MockState | None = None) -> FastAPI:
     async def save_changes(request: Request, nePk: str | None = None) -> Any:
         body = await _json_body(request)
         ne_pks = [nePk] if nePk else (body.get("nePks", []) if isinstance(body, dict) else [])
-        for appliance in mock.appliances:
-            if appliance.get("nePk") in ne_pks:
-                appliance["hasUnsavedChanges"] = False
-        return {"clientKey": mock.new_action(ne_pks=[str(p) for p in ne_pks])}
+        # A save armed to fail (fail_next_action) persists nothing: the
+        # hasUnsavedChanges flag stays set, like a real failed save. Checked
+        # before new_action(), which consumes the flag.
+        if not mock.fail_next_action:
+            for appliance in mock.appliances:
+                if appliance.get("nePk") in ne_pks:
+                    appliance["hasUnsavedChanges"] = False
+        return {
+            "clientKey": mock.new_action(
+                ne_pks=[str(p) for p in ne_pks], name="save changes"
+            )
+        }
 
     # -- catch-all (must be registered last on this router) -----------------
 

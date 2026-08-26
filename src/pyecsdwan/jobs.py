@@ -1,28 +1,41 @@
-"""Async job (action key) polling.
+"""Async job (action key) polling and the save-changes persistence primitive.
 
 Template pushes, overlay changes, and several appliance operations return an
 action key (a GUID). Progress is polled via ``GET /action/status?key=<guid>``
 which returns either one task record or a list of related records (group
 pushes fan out one record per appliance, tied together by ``guid``).
 
+Some writes are keyless (the template-association POST is fire-and-204): their
+per-appliance records land only in the action log. Those are polled via the
+listing endpoint ``GET /action?startTime=&endTime=&logLevel=&appliance=``
+(epoch **milliseconds** — the vendored SDK docstring wrongly says seconds),
+picking the newest ``guid`` inside the window (``wait_for_recent_action``).
+
 Task record fields (from the actionLog Swagger section):
 ``taskStatus`` (str), ``percentComplete`` (int), ``completionStatus`` (bool),
 ``result`` (str — the Orchestrator's error/summary text), ``endTime`` (ms
-epoch; 0 while running), ``nepk`` (per-appliance records).
+epoch; 0 while running), ``startTime`` (ms epoch), ``nepk`` (per-appliance
+records).
 
 Terminal detection is deliberately tolerant of field variations across
 Orchestrator releases: a record is finished when ``endTime`` is non-zero, or
 ``percentComplete`` >= 100, or ``taskStatus`` names a done-state.
+
+``save_changes`` composes this poller with ``POST /appliance/saveChanges``:
+the one save-changes operation every appliance-proxy write must be followed
+by (docs/research/appliance-jobs.md §save-changes). Resources normally reach
+it through ``Ctx.save_changes``.
 """
 
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from typing import Any
 
 import structlog
 
-from pyecsdwan.client import OrchClient
+from pyecsdwan.client import OrchClient, validate_ne_pk
 from pyecsdwan.config import Settings
 from pyecsdwan.contract import JobOutcome
 
@@ -78,6 +91,28 @@ def _record_succeeded(rec: dict[str, Any]) -> bool:
     return True
 
 
+def _terminal_outcome(key: str, records: list[dict[str, Any]]) -> JobOutcome | None:
+    """SUCCESS/FAILED outcome once *every* record is finished, else None."""
+    if not records or not all(_record_finished(r) for r in records):
+        return None
+    per_appliance = {
+        str(r.get("nepk") or r.get("nePk") or ""):
+            str(r.get("result") or r.get("taskStatus") or "")
+        for r in records
+        if r.get("nepk") or r.get("nePk")
+    }
+    failures = [r for r in records if not _record_succeeded(r)]
+    if failures:
+        detail = "; ".join(
+            str(f.get("result") or f.get("taskStatus") or "failed") for f in failures
+        )
+        log.debug("job_failed", key=key, detail=detail)
+        return JobOutcome(key=key, state="FAILED", detail=detail, per_appliance=per_appliance)
+    detail = str(records[0].get("result") or "") if len(records) == 1 else ""
+    log.debug("job_success", key=key)
+    return JobOutcome(key=key, state="SUCCESS", detail=detail, per_appliance=per_appliance)
+
+
 def extract_action_key(response: Any) -> str | None:
     """Pull an action/client key out of a write response, if one is present.
 
@@ -112,7 +147,6 @@ def wait_for_action(
     """
     deadline = time.monotonic() + settings.job_timeout
     delay = settings.job_poll_initial
-    records: list[dict[str, Any]] = []
     while time.monotonic() < deadline:
         raw = client.get("/action/status", params={"key": action_key})
         if isinstance(raw, dict):
@@ -121,27 +155,9 @@ def wait_for_action(
             records = [r for r in raw if isinstance(r, dict)]
         else:
             records = []
-        if records and all(_record_finished(r) for r in records):
-            per_appliance = {
-                str(r.get("nepk") or r.get("nePk") or ""):
-                    str(r.get("result") or r.get("taskStatus") or "")
-                for r in records
-                if r.get("nepk") or r.get("nePk")
-            }
-            failures = [r for r in records if not _record_succeeded(r)]
-            if failures:
-                detail = "; ".join(
-                    str(f.get("result") or f.get("taskStatus") or "failed") for f in failures
-                )
-                log.debug("job_failed", key=action_key, detail=detail)
-                return JobOutcome(
-                    key=action_key, state="FAILED", detail=detail, per_appliance=per_appliance
-                )
-            detail = str(records[0].get("result") or "") if len(records) == 1 else ""
-            log.debug("job_success", key=action_key)
-            return JobOutcome(
-                key=action_key, state="SUCCESS", detail=detail, per_appliance=per_appliance
-            )
+        outcome = _terminal_outcome(action_key, records)
+        if outcome is not None:
+            return outcome
         time.sleep(delay)
         delay = min(delay * 2, settings.job_poll_max)
     detail = f"job did not finish within {settings.job_timeout}s"
@@ -149,3 +165,115 @@ def wait_for_action(
         detail = f"{description}: {detail}"
     log.debug("job_timeout", key=action_key)
     return JobOutcome(key=action_key, state="TIMEOUT", detail=detail)
+
+
+#: Backdating applied to the window start so a server clock slightly behind
+#: the client's still lists the record stamped just before our POST.
+_WINDOW_SLACK_MS = 1000
+#: 0=Debug, 1=Info, 2=Error. Push records are logged at Info.
+_ACTION_LOG_LEVEL = 1
+#: Rows per listing call — generous for one appliance's recent window.
+_ACTION_LOG_LIMIT = 100
+
+
+def wait_for_recent_action(
+    client: OrchClient,
+    settings: Settings,
+    ne_pk: str,
+    since_ms: int,
+    description: str = "",
+) -> JobOutcome:
+    """Poll the action log for a keyless push against one appliance.
+
+    For writes that return 204 without an action key (template association),
+    the per-appliance results exist only as action-log records under a guid.
+    This polls ``GET /action`` filtered by ``appliance=ne_pk`` and a time
+    window opening just before the write (``since_ms``, epoch milliseconds),
+    takes the newest guid in the window, and applies the same terminal /
+    success detection as ``wait_for_action``. An empty list keeps polling —
+    the log can lag the 204 — so "no records by the deadline" is a TIMEOUT,
+    as is a record set still in flight at the deadline.
+    """
+    deadline = time.monotonic() + settings.job_timeout
+    delay = settings.job_poll_initial
+    guid = ""
+    while time.monotonic() < deadline:
+        raw = client.get(
+            "/action",
+            params={
+                "startTime": since_ms - _WINDOW_SLACK_MS,
+                "endTime": int(time.time() * 1000),
+                "logLevel": _ACTION_LOG_LEVEL,
+                "limit": _ACTION_LOG_LIMIT,
+                "appliance": ne_pk,
+            },
+        )
+        rows = [r for r in raw if isinstance(r, dict)] if isinstance(raw, list) else []
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for rec in rows:
+            groups.setdefault(str(rec.get("guid") or ""), []).append(rec)
+        if groups:
+            # Several guids can share the window (e.g. an operator push moments
+            # earlier); ours is the newest. `>=` so an exact-ms tie resolves to
+            # the record listed last, which the mock emits in creation order.
+            best_started = -1
+            for candidate_guid, recs in groups.items():
+                started = max(int(r.get("startTime") or 0) for r in recs)
+                if started >= best_started:
+                    guid, best_started = candidate_guid, started
+            outcome = _terminal_outcome(guid, groups[guid])
+            if outcome is not None:
+                return outcome
+        time.sleep(delay)
+        delay = min(delay * 2, settings.job_poll_max)
+    if guid:
+        detail = f"job did not finish within {settings.job_timeout}s"
+    else:
+        detail = f"no action-log records appeared within {settings.job_timeout}s"
+    if description:
+        detail = f"{description}: {detail}"
+    log.debug("job_timeout", key=guid, appliance=ne_pk)
+    return JobOutcome(key=guid, state="TIMEOUT", detail=detail)
+
+
+def save_changes(
+    client: OrchClient,
+    ne_pks: Sequence[str],
+    settings: Settings,
+    description: str = "",
+) -> JobOutcome:
+    """Persist appliance running config to flash (the save-changes primitive).
+
+    Proxied appliance writes (``/appliance/rest?nePk=&url=``) mutate the
+    running config only: without this call the change is lost on reboot and
+    the appliance reports ``hasUnsavedChanges``. One batched
+    ``POST /appliance/saveChanges {"nePks": [...]}`` (9.3+ form) covers every
+    appliance in ``ne_pks`` — callers pass all appliances an operation wrote
+    to, so a multi-appliance changeset costs one save, not one per write.
+    The returned ``clientKey`` is polled to terminal via ``wait_for_action``;
+    a FAILED or TIMEOUT outcome means the change is NOT persisted and must
+    fail the calling ``apply()``/``rollback()``.
+
+    An empty ``ne_pks`` is a successful no-op (no API call), so callers can
+    invoke this unconditionally. Duplicates collapse; nePks are validated
+    before any request. Should the Orchestrator ever answer without a client
+    key (off-spec for 9.3+), the accepted-but-unawaited save is reported as
+    SUCCESS with an explanatory detail rather than a fabricated failure —
+    a batch save spans appliances, so there is no single-appliance window
+    for ``wait_for_recent_action`` to fall back on.
+    """
+    unique = sorted({validate_ne_pk(ne_pk) for ne_pk in ne_pks})
+    if not unique:
+        return JobOutcome(key="", state="SUCCESS", detail="no appliances to save")
+    label = description or f"save changes ({', '.join(unique)})"
+    response = client.post("/appliance/saveChanges", {"nePks": unique})
+    key = extract_action_key(response)
+    if key is None:
+        log.debug("save_changes_keyless", ne_pks=unique)
+        return JobOutcome(
+            key="",
+            state="SUCCESS",
+            detail="save accepted but returned no client key; completion not awaited",
+        )
+    log.debug("save_changes_started", key=key, ne_pks=unique)
+    return wait_for_action(client, key, settings, label)

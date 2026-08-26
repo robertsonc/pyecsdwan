@@ -87,6 +87,10 @@ class SecurityPolicy(Resource):
     scope = Scope.ORCHESTRATOR
     reversibility = Reversibility.REVERSIBLE
     tier = Tier.CURATED
+    #: Policy rules address zone pairs (<fromZoneId>_<toZoneId>), so when one
+    #: changeset creates zones and policy over them, zones must apply first
+    #: (and, reversed, policy deletions apply before zone deletions).
+    dependencies = ("zones",)
     desired_state_doc = (
         "maps: {mapName: {fromZoneId_toZoneId: {prio: {priority: {match, set, misc, "
         "comment}}}}} — resource name is the segment pair, e.g. '0_0'"

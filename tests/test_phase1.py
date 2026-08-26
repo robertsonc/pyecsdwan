@@ -13,7 +13,7 @@ from pyecsdwan import config, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.client import OrchClient
 from pyecsdwan.contract import Ctx, Ref
-from pyecsdwan.journal import TxnState
+from pyecsdwan.journal import TxnJournal, TxnState
 from pyecsdwan.registry import default_registry
 from pyecsdwan.resolver import Resolver
 
@@ -113,6 +113,38 @@ def test_template_association_replaces_completely(world: dict[str, Any]) -> None
     restore = txn.rollback_history_txn(world["ctx"], default_registry, world["settings"], n=1)
     assert restore.ok
     assert world["state"].template_association["3.NE"] == ["G1"]
+
+
+def test_keyless_template_push_failure_auto_reverts(world: dict[str, Any]) -> None:
+    """#21 acceptance: the mock's association POST is fire-and-204 (no action
+    key); the injected per-appliance failure exists only in the action log.
+    apply() must surface it via GET /action window polling, fail the commit,
+    and auto-revert the association to the pre-commit snapshot."""
+    world["state"].template_groups["G1"] = {"name": "G1", "templates": []}
+    world["state"].template_groups["G2"] = {"name": "G2", "templates": []}
+    world["state"].template_association["3.NE"] = ["G1"]
+    world["state"].fail_next_action = True
+
+    ref = Ref("template-association", "BR1-EC")
+    world["candidate"].set_desired(ref, {"template_groups": ["G1", "G2"]})
+    report = _commit(world)
+
+    assert not report.ok
+    assert report.state == TxnState.REVERTED
+    assert report.reverted == ["template-association:BR1-EC"]
+    assert world["state"].template_association["3.NE"] == ["G1"]
+    assert any("FAILED" in m for m in report.messages), report.messages
+
+    # The journal's APPLY_RESULT carries the per-appliance job outcome.
+    assert report.txn_id is not None
+    journal = TxnJournal.open(config.journal_root() / report.txn_id)
+    apply_results = [e for e in journal.events() if e.get("event") == "APPLY_RESULT"]
+    assert len(apply_results) == 1
+    assert apply_results[0]["ok"] is False
+    job_outcomes = apply_results[0]["jobs"]
+    assert len(job_outcomes) == 1
+    assert job_outcomes[0]["state"] == "FAILED"
+    assert job_outcomes[0]["per_appliance"] == {"3.NE": "mock failure"}
 
 
 def test_bio_and_association_dependency_order(world: dict[str, Any]) -> None:
