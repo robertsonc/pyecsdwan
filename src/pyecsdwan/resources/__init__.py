@@ -1,5 +1,33 @@
 """Built-in resource plugins. Importing this package registers them all."""
 
-from pyecsdwan.resources import interface_labels, overlays, security_policy, templates, zones
+from pyecsdwan.resources import (
+    appliance_zones,
+    bgp,
+    deployment,
+    dhcp,
+    interface_labels,
+    loopback,
+    ospf,
+    overlays,
+    routes,
+    security_policy,
+    templates,
+    vrrp,
+    zones,
+)
 
-__all__ = ["interface_labels", "overlays", "security_policy", "templates", "zones"]
+__all__ = [
+    "appliance_zones",
+    "bgp",
+    "deployment",
+    "dhcp",
+    "interface_labels",
+    "loopback",
+    "ospf",
+    "overlays",
+    "routes",
+    "security_policy",
+    "templates",
+    "vrrp",
+    "zones",
+]

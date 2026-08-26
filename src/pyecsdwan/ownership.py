@@ -35,6 +35,24 @@ KIND_TO_TEMPLATE_SECTIONS: dict[str, tuple[str, ...]] = {
     "appliance/dhcp": ("dhcpd", "dhcpFailover"),
     "appliance/shaper": ("shaper",),
     "appliance/nat": ("natMaps",),
+    # UNVERIFIED — not confirmed against a live Default Template Group's
+    # section list (that group didn't select an obvious interfaces/deployment
+    # section this session). "deployment"/"interfaces" are the section-name
+    # candidates the Orchestrator UI groups this config under; revisit once a
+    # live group with an interfaces template selected is available (#12).
+    "appliance/deployment": ("deployment", "interfaces"),
+    # Appliance-scope zones + security maps (#19). The resource kind here is
+    # deliberately "appliance/security-maps", not the pre-seeded
+    # "appliance/security-policy" above (left untouched — some other
+    # resource may still claim it) nor the orchestrator-scope
+    # "security-policy" kind, to keep all three names unambiguous. Section
+    # name CONFIRMED real (matches the ECOS path itself, "securityMaps").
+    "appliance/security-maps": ("securityMaps",),
+    # UNVERIFIED — no live Default Template Group with a zones-only section
+    # selected was available this session; "zones" is the natural section-
+    # name candidate (matches the ECOS path), same UNVERIFIED convention as
+    # appliance/deployment above.
+    "appliance/zones": ("zones",),
 }
 
 

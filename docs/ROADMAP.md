@@ -18,6 +18,25 @@ passthrough, bundled mock Orchestrator. Trivial resource: `interface-labels`.
 (`ownership.py`). Plus an adversarial hardening pass (host-scoped recovery,
 URL-escape guard, confirm-vs-revert atomicity, default-fill idempotency, …).
 
+**Phase 2 — appliance-scope config, first pass (#3).** Save-changes primitive
+(#11); `appliance/deployment` (#12, interfaces/IP/VLANs, validate-then-apply);
+`appliance/dhcp` (#13, composes over the deployment object); `appliance/vrrp`
+(#14); `appliance/routes` (#15, add/delete-delta `COMPENSABLE` rollback);
+`appliance/bgp` and `appliance/ospf` (#16, #17 — read+write, code-complete
+against a spec-confirmed appliance-proxy endpoint but not yet live-write-
+tested); `appliance/loopback` (#18, read+diff) + `loopback-orch`
+(#18, fabric-wide pool, full read-modify-write); `appliance/zones` +
+`appliance/security-maps` (#19). Template-ownership detection (#20) partially
+grounded — `dns`/`routes`/`shaper` section names confirmed live, the rest
+stay unverified placeholders.
+
+**Phase 3 — orchestrator-scope breadth, first item.** Orchestrator firewall
+zones (#30).
+
+**Tier-1 spec pipeline, first tool.** `tools/spec_sync.py` — fetch + diff the
+published OpenAPI spec against the `specs/` baseline (#25). Codegen
+(pydantic models, plugin stubs, `show coverage`) is still ahead (#26–29).
+
 `make check` gate: ruff + mypy `--strict` + tests, all green.
 
 ## Coverage model (why parity is incremental but safe from day one)
@@ -57,10 +76,11 @@ sharded into issues when their phase starts.
 | Business Intent Overlays (config + appliance association) | ✅ shipped (Phase 1) |
 | Firewall / security policy (orchestrator scope) | ✅ shipped (Phase 1) |
 | Interface labels | ✅ shipped (Phase 0; advanced constraints #39) |
-| Appliance interfaces / IP / DHCP / VRRP / routes | 🔷 Phase 2 (#12–#15) |
-| BGP / OSPF (read+diff → write) | 🔷 Phase 2 (#16, #17) |
-| Loopbacks / loopback orchestration | 🔷 Phase 2 (#18) |
+| Appliance interfaces / IP / DHCP / VRRP / routes | ✅ shipped (Phase 2, #12–#15) |
+| BGP / OSPF (read+diff → write) | ✅ shipped (#16, #17); write path is code-complete against a spec-confirmed endpoint but not yet live-write-tested (see docs/futures/README.md) |
+| Loopbacks / loopback orchestration | ✅ shipped (Phase 2, #18; per-appliance loopback is read+diff only, no write endpoint documented) |
 | Firewall zones (orchestrator scope + segment↔zone map) | ✅ shipped (Phase 3, #30) |
+| Firewall zones + security policy (appliance scope) | ✅ shipped (Phase 2, #19) |
 | ACLs / NAT / route-opt-QoS policy | 🔶 Phase 3 (#31–#33) |
 | Service orchestration associations | 🔶 Phase 3 (#34) |
 | Regions / regional overlays / priorities | 🔶 Phase 3 (#35, #36) |
