@@ -1,0 +1,97 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Orchestrator REST APIs (spec_sync fixture)",
+    "version": "0.9.0"
+  },
+  "servers": [
+    {
+      "url": "https://orch-fixture.lab.invalid/gms/rest",
+      "description": "lab Orchestrator (must never leak into specs/)"
+    }
+  ],
+  "basePath": "https://orch-fixture.lab.invalid:/gms/rest",
+  "paths": {
+    "/appliance": {
+      "get": {
+        "tags": ["appliance"],
+        "summary": "Get all appliances",
+        "operationId": "getAllAppliances",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {"$ref": "#/components/schemas/Appliance"}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gms/group": {
+      "parameters": [
+        {
+          "name": "cached",
+          "in": "query",
+          "required": false,
+          "schema": {"type": "boolean"}
+        }
+      ],
+      "get": {
+        "tags": ["group"],
+        "summary": "Get all appliance groups",
+        "operationId": "getAllGroups",
+        "responses": {
+          "200": {"description": "OK"}
+        }
+      },
+      "post": {
+        "tags": ["group"],
+        "summary": "Create appliance group",
+        "operationId": "createGroup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "#/components/schemas/Group"}
+            }
+          }
+        },
+        "responses": {
+          "204": {"description": "Created"}
+        }
+      }
+    },
+    "/gms/specSync/probe": {
+      "get": {
+        "tags": ["specSync"],
+        "summary": "New endpoint added in this fixture to prove --diff detection",
+        "operationId": "getSpecSyncProbe",
+        "responses": {
+          "200": {"description": "OK"}
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Appliance": {
+        "type": "object",
+        "properties": {
+          "nePk": {"type": "string"},
+          "hostName": {"type": "string"}
+        }
+      },
+      "Group": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "parentId": {"type": "integer"}
+        }
+      }
+    }
+  }
+}
