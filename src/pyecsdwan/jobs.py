@@ -167,6 +167,76 @@ def wait_for_action(
     return JobOutcome(key=action_key, state="TIMEOUT", detail=detail)
 
 
+#: Preconfig apply's own numeric taskStatus values (docs/research/
+#: appliance-jobs.md §Preconfig apply) — distinct from the string taskStatus
+#: (e.g. "Completed", "In Progress") the action-log channel above uses.
+_PRECONFIG_NOT_STARTED = 0
+_PRECONFIG_IN_PROGRESS = 1
+_PRECONFIG_FINISHED = 2
+
+_PRECONFIG_APPLY_PATH = "/gms/appliance/preconfiguration/apply"
+
+
+def wait_for_preconfig_apply(
+    client: OrchClient,
+    preconfig_id: str,
+    settings: Settings,
+    description: str = "",
+) -> JobOutcome:
+    """Poll a preconfig apply to terminal state on its own numeric-taskStatus
+    channel (issue #23) — ``GET /gms/appliance/preconfiguration/apply?
+    preconfigId=`` returns ``{taskStatus: 0 NotStarted | 1 InProgress |
+    2 Finished, completionStatus (valid only once taskStatus==2), guid
+    (actionlog bridge, unused here), result: [{taskStatus, completionStatus,
+    name, result, nePk, data}]}`` — a completely separate shape and terminal
+    signal from the string-``taskStatus`` action-log channel
+    ``wait_for_action``/``wait_for_recent_action`` poll above. Only
+    ``taskStatus == 2`` is terminal; 0 and 1 keep polling regardless of what
+    ``completionStatus`` happens to hold (per the API's own "valid only when
+    taskStatus==2" caveat — checking it early would misread a still-running
+    apply as failed).
+
+    A per-appliance breakdown is built from the ``result[]`` list when
+    present, matching :class:`JobOutcome`'s ``per_appliance`` shape used
+    elsewhere. No resource calls this yet — the preconfiguration lifecycle
+    resource that will (epic #7) doesn't exist yet; this is the polling
+    primitive it will build on.
+    """
+    deadline = time.monotonic() + settings.job_timeout
+    delay = settings.job_poll_initial
+    while time.monotonic() < deadline:
+        raw = client.get(_PRECONFIG_APPLY_PATH, params={"preconfigId": preconfig_id})
+        if isinstance(raw, dict) and raw.get("taskStatus") == _PRECONFIG_FINISHED:
+            return _preconfig_terminal_outcome(preconfig_id, raw)
+        time.sleep(delay)
+        delay = min(delay * 2, settings.job_poll_max)
+    detail = f"preconfig apply did not finish within {settings.job_timeout}s"
+    if description:
+        detail = f"{description}: {detail}"
+    log.debug("preconfig_apply_timeout", preconfig_id=preconfig_id)
+    return JobOutcome(key=preconfig_id, state="TIMEOUT", detail=detail)
+
+
+def _preconfig_terminal_outcome(preconfig_id: str, raw: dict[str, Any]) -> JobOutcome:
+    per_appliance: dict[str, str] = {}
+    results = raw.get("result")
+    if isinstance(results, list):
+        for entry in results:
+            if not isinstance(entry, dict):
+                continue
+            ne_pk = str(entry.get("nePk") or "")
+            if ne_pk:
+                per_appliance[ne_pk] = str(entry.get("result") or entry.get("taskStatus") or "")
+    if not raw.get("completionStatus"):
+        detail = str(raw.get("result") or "preconfig apply failed")
+        log.debug("preconfig_apply_failed", preconfig_id=preconfig_id, detail=detail)
+        return JobOutcome(
+            key=preconfig_id, state="FAILED", detail=detail, per_appliance=per_appliance
+        )
+    log.debug("preconfig_apply_success", preconfig_id=preconfig_id)
+    return JobOutcome(key=preconfig_id, state="SUCCESS", per_appliance=per_appliance)
+
+
 #: Backdating applied to the window start so a server clock slightly behind
 #: the client's still lists the record stamped just before our POST.
 _WINDOW_SLACK_MS = 1000
