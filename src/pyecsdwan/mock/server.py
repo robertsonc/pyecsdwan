@@ -137,6 +137,27 @@ def _seed_bgp_system() -> dict[str, dict[str, Any]]:
 # -- end bgp (#16) seed data -----------------------------------------------------
 
 
+# -- ospf (#17) -----------------------------------------------------------------
+
+
+def _seed_ospf_system() -> dict[str, dict[str, Any]]:
+    """Per-appliance OSPF system config, keyed by nePk. Shape is the real
+    payload captured live against a lab Orchestrator's ``ospf/config/system``
+    (see resources/ospf.py module docstring) — same defaults for every seeded
+    appliance since the lab sample had OSPF disabled/unconfigured on all of
+    them."""
+    default = {
+        "redistMapToOSPF": "default_rtmap_to_ospf",
+        "enable": False,
+        "routerId": "0.0.0.0",
+        "opaque_enable": True,
+    }
+    return {"1.NE": dict(default), "3.NE": dict(default), "5.NE": dict(default)}
+
+
+# -- end ospf (#17) seed data -----------------------------------------------------
+
+
 # -- deployment (#12) ---------------------------------------------------------
 #
 # Genericized capture of a real GET /appliance/rest?...&url=deployment
@@ -557,6 +578,12 @@ class MockState:
     #: Per-appliance BGP neighbor table, keyed by nePk -> {neighborKey: {...}}.
     #: Empty for every seeded appliance (matches the live lab sample).
     bgp_neighbor: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # -- ospf (#17) -------------------------------------------------------
+    #: Per-appliance OSPF system config, keyed by nePk (see resources/ospf.py).
+    ospf_system: dict[str, dict[str, Any]] = field(default_factory=_seed_ospf_system)
+    #: Per-appliance OSPF interfaces table, keyed by nePk -> {ifKey: {...}}.
+    #: Empty for every seeded appliance (matches the live lab sample).
+    ospf_interfaces: dict[str, dict[str, Any]] = field(default_factory=dict)
     # -- deployment (#12) --
     #: Consumed by the next POST .../url=deployment/validate call, like
     #: fail_next_action: forces one deterministic {err: ...} response.
@@ -1140,6 +1167,16 @@ def create_app(state: MockState | None = None) -> FastAPI:
     @api.get("/bgp/config/neighbor")
     async def get_bgp_neighbor(nePk: str) -> Any:
         return mock.bgp_neighbor.get(nePk, {})
+
+    # -- ospf (#17) — orchestrator-proxied views, queried by nePk -----------
+
+    @api.get("/ospf/config/system")
+    async def get_ospf_system(nePk: str) -> Any:
+        return mock.ospf_system.get(nePk, {})
+
+    @api.get("/ospf/config/interfaces")
+    async def get_ospf_interfaces(nePk: str) -> Any:
+        return mock.ospf_interfaces.get(nePk, {})
 
     # -- catch-all (must be registered last on this router) -----------------
 
