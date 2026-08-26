@@ -117,6 +117,23 @@ class Ctx:
     resolver: Resolver
     dry_run: bool = False
 
+    def save_changes(self, ne_pks: str | Sequence[str], description: str = "") -> JobOutcome:
+        """Persist appliance running config after proxy writes (issue #11).
+
+        Appliance-scope resources call this at the end of ``apply()`` /
+        ``rollback()``, passing every nePk the operation wrote to through the
+        appliance proxy — one batched save per operation, never one per
+        write. Returns the terminal :class:`JobOutcome`; anything but SUCCESS
+        means the running-config change is unpersisted (lost on reboot) and
+        the operation must report failure. ``dry_run`` skips the API call.
+        """
+        from pyecsdwan import jobs
+
+        if self.dry_run:
+            return JobOutcome(key="", state="SUCCESS", detail="dry-run: save-changes skipped")
+        pks = [ne_pks] if isinstance(ne_pks, str) else list(ne_pks)
+        return jobs.save_changes(self.client, pks, self.client.settings, description)
+
 
 class DiffOp(str, enum.Enum):
     ADD = "add"

@@ -628,10 +628,18 @@ def create_app(state: MockState | None = None) -> FastAPI:
     async def save_changes(request: Request, nePk: str | None = None) -> Any:
         body = await _json_body(request)
         ne_pks = [nePk] if nePk else (body.get("nePks", []) if isinstance(body, dict) else [])
-        for appliance in mock.appliances:
-            if appliance.get("nePk") in ne_pks:
-                appliance["hasUnsavedChanges"] = False
-        return {"clientKey": mock.new_action(ne_pks=[str(p) for p in ne_pks])}
+        # A save armed to fail (fail_next_action) persists nothing: the
+        # hasUnsavedChanges flag stays set, like a real failed save. Checked
+        # before new_action(), which consumes the flag.
+        if not mock.fail_next_action:
+            for appliance in mock.appliances:
+                if appliance.get("nePk") in ne_pks:
+                    appliance["hasUnsavedChanges"] = False
+        return {
+            "clientKey": mock.new_action(
+                ne_pks=[str(p) for p in ne_pks], name="save changes"
+            )
+        }
 
     # -- catch-all (must be registered last on this router) -----------------
 

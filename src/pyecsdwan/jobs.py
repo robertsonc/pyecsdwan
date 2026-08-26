@@ -1,4 +1,4 @@
-"""Async job (action key) polling.
+"""Async job (action key) polling and the save-changes persistence primitive.
 
 Template pushes, overlay changes, and several appliance operations return an
 action key (a GUID). Progress is polled via ``GET /action/status?key=<guid>``
@@ -20,16 +20,22 @@ records).
 Terminal detection is deliberately tolerant of field variations across
 Orchestrator releases: a record is finished when ``endTime`` is non-zero, or
 ``percentComplete`` >= 100, or ``taskStatus`` names a done-state.
+
+``save_changes`` composes this poller with ``POST /appliance/saveChanges``:
+the one save-changes operation every appliance-proxy write must be followed
+by (docs/research/appliance-jobs.md §save-changes). Resources normally reach
+it through ``Ctx.save_changes``.
 """
 
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from typing import Any
 
 import structlog
 
-from pyecsdwan.client import OrchClient
+from pyecsdwan.client import OrchClient, validate_ne_pk
 from pyecsdwan.config import Settings
 from pyecsdwan.contract import JobOutcome
 
@@ -228,3 +234,46 @@ def wait_for_recent_action(
         detail = f"{description}: {detail}"
     log.debug("job_timeout", key=guid, appliance=ne_pk)
     return JobOutcome(key=guid, state="TIMEOUT", detail=detail)
+
+
+def save_changes(
+    client: OrchClient,
+    ne_pks: Sequence[str],
+    settings: Settings,
+    description: str = "",
+) -> JobOutcome:
+    """Persist appliance running config to flash (the save-changes primitive).
+
+    Proxied appliance writes (``/appliance/rest?nePk=&url=``) mutate the
+    running config only: without this call the change is lost on reboot and
+    the appliance reports ``hasUnsavedChanges``. One batched
+    ``POST /appliance/saveChanges {"nePks": [...]}`` (9.3+ form) covers every
+    appliance in ``ne_pks`` — callers pass all appliances an operation wrote
+    to, so a multi-appliance changeset costs one save, not one per write.
+    The returned ``clientKey`` is polled to terminal via ``wait_for_action``;
+    a FAILED or TIMEOUT outcome means the change is NOT persisted and must
+    fail the calling ``apply()``/``rollback()``.
+
+    An empty ``ne_pks`` is a successful no-op (no API call), so callers can
+    invoke this unconditionally. Duplicates collapse; nePks are validated
+    before any request. Should the Orchestrator ever answer without a client
+    key (off-spec for 9.3+), the accepted-but-unawaited save is reported as
+    SUCCESS with an explanatory detail rather than a fabricated failure —
+    a batch save spans appliances, so there is no single-appliance window
+    for ``wait_for_recent_action`` to fall back on.
+    """
+    unique = sorted({validate_ne_pk(ne_pk) for ne_pk in ne_pks})
+    if not unique:
+        return JobOutcome(key="", state="SUCCESS", detail="no appliances to save")
+    label = description or f"save changes ({', '.join(unique)})"
+    response = client.post("/appliance/saveChanges", {"nePks": unique})
+    key = extract_action_key(response)
+    if key is None:
+        log.debug("save_changes_keyless", ne_pks=unique)
+        return JobOutcome(
+            key="",
+            state="SUCCESS",
+            detail="save accepted but returned no client key; completion not awaited",
+        )
+    log.debug("save_changes_started", key=key, ne_pks=unique)
+    return wait_for_action(client, key, settings, label)

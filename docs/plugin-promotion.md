@@ -42,7 +42,10 @@ Promotion checklist — every box, no exceptions:
       `apply()` returns only after terminal state; TIMEOUT == failure.
 - [ ] Appliance-scope resources: `managed_by()` implemented (template
       association × selection join; `gms_marked` where the API has it), and
-      appliance-proxy writes followed by save-changes.
+      appliance-proxy writes persisted via `ctx.save_changes([...])` — one
+      batched call at the end of `apply()`/`rollback()` covering every
+      appliance the operation wrote to; a non-SUCCESS outcome fails the
+      operation.
 - [ ] `dependencies` declared for ordering (e.g. group before association).
 - [ ] Docstring notes any spec-vs-live divergence; unknown fields pass through.
 - [ ] `tier = Tier.CURATED`, registered in `resources/__init__.py`,
