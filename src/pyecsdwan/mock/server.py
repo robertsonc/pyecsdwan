@@ -111,16 +111,19 @@ def _seed_zone_list_meta() -> dict[str, Any]:
     }
 
 
-# -- bgp (#16) -----------------------------------------------------------------
+# -- bgp (#16, Stage 2) --------------------------------------------------------
+#
+# Rides the generic /appliance/rest proxy (appliance_ecos store) like vrrp,
+# routes, zones, and security-maps — Stage 2 switched bgp.py's fetch()/
+# apply() off the dedicated orchestrator-level routes this block used to
+# back, onto the same proxy channel every other appliance-scope resource
+# reads and writes through. Shapes are the two real payloads captured live
+# this session (see resources/bgp.py module docstring): most appliances
+# disabled/unconfigured, one enabled with a real neighbor.
 
 
 def _seed_bgp_system() -> dict[str, dict[str, Any]]:
-    """Per-appliance BGP system config, keyed by nePk. Shape is the real
-    payload captured live against a lab Orchestrator's ``bgp/config/system``
-    (see resources/bgp.py module docstring) — same defaults for every seeded
-    appliance since the lab sample had BGP disabled/unconfigured on all of
-    them."""
-    default = {
+    disabled = {
         "stale_path_time": 150,
         "enable_gms_marked": False,
         "enable": False,
@@ -131,28 +134,110 @@ def _seed_bgp_system() -> dict[str, dict[str, Any]]:
         "max_restart_time": 120,
         "graceful_restart_en": False,
     }
-    return {"1.NE": dict(default), "3.NE": dict(default), "5.NE": dict(default)}
+    enabled = {
+        "stale_path_time": 150,
+        "enable_gms_marked": False,
+        "enable": True,
+        "remote_as_path_advertise": True,
+        "log_nbr_msgs": True,
+        "route_target": {"0": {"self": 0, "export": "0:0", "import": "0:0"}},
+        "rtr_id": "192.168.255.13",
+        "asn": 65534,
+        "max_restart_time": 120,
+        "graceful_restart_en": False,
+    }
+    return {"1.NE": dict(disabled), "3.NE": dict(enabled), "5.NE": dict(disabled)}
+
+
+def _seed_bgp_neighbor() -> dict[str, dict[str, Any]]:
+    populated = {
+        "10.127.1.1": {
+            "as_override": False,
+            "bfd_desired": False,
+            "directly_connected": False,
+            "enable": True,
+            "evpn": False,
+            "gms_marked": False,
+            "hold": 9,
+            "ka": 6,
+            "lcl_interface": "any",
+            "next_hop_self": True,
+            "password": "",
+            "remote_as": 65001,
+            "rtmap_inbound": "default_rtmap_bgp_inbound_br",
+            "rtmap_outbound": "default_rtmap_bgp_outbound_br",
+            "store_received_routes": True,
+            "type": "Branch",
+        }
+    }
+    return {"1.NE": {}, "3.NE": dict(populated), "5.NE": {}}
 
 
 # -- end bgp (#16) seed data -----------------------------------------------------
 
 
-# -- ospf (#17) -----------------------------------------------------------------
+# -- ospf (#17, Stage 2) --------------------------------------------------------
+#
+# Same Stage 2 migration as bgp above — rides the generic appliance_ecos
+# proxy store now, not a dedicated orchestrator-level route.
 
 
 def _seed_ospf_system() -> dict[str, dict[str, Any]]:
-    """Per-appliance OSPF system config, keyed by nePk. Shape is the real
-    payload captured live against a lab Orchestrator's ``ospf/config/system``
-    (see resources/ospf.py module docstring) — same defaults for every seeded
-    appliance since the lab sample had OSPF disabled/unconfigured on all of
-    them."""
-    default = {
+    disabled = {
         "redistMapToOSPF": "default_rtmap_to_ospf",
         "enable": False,
         "routerId": "0.0.0.0",
         "opaque_enable": True,
     }
-    return {"1.NE": dict(default), "3.NE": dict(default), "5.NE": dict(default)}
+    disabled_with_router_id = {
+        "redistMapToOSPF": "default_rtmap_to_ospf",
+        "enable": False,
+        "routerId": "192.168.255.13",
+        "opaque_enable": True,
+    }
+    return {
+        "1.NE": dict(disabled),
+        "3.NE": dict(disabled_with_router_id),
+        "5.NE": dict(disabled),
+    }
+
+
+def _seed_ospf_interfaces() -> dict[str, dict[str, Any]]:
+    populated = {
+        "lan0": {
+            "cost": 1,
+            "area": "0.0.0.0",
+            "authKey": "",
+            "md5Password": "",
+            "authType": "None",
+            "comment": "",
+            "priority": 1,
+            "transmitDelay": 1,
+            "retransmitInterval": 4,
+            "helloInterval": 10,
+            "deadInterval": 40,
+            "md5Key": 0,
+            "adminStatus": True,
+            "bfdDesired": False,
+        },
+        "lan1": {
+            "cost": 1,
+            "area": "1.0.0.0",
+            "authKey": "",
+            "md5Password": "",
+            "authType": "None",
+            "comment": "",
+            "priority": 1,
+            "transmitDelay": 1,
+            "retransmitInterval": 4,
+            "helloInterval": 10,
+            "deadInterval": 40,
+            "md5Key": 0,
+            "adminStatus": True,
+            "bfdDesired": False,
+        },
+    }
+    return {"1.NE": {}, "3.NE": dict(populated), "5.NE": {}}
 
 
 # -- end ospf (#17) seed data -----------------------------------------------------
@@ -671,6 +756,14 @@ def _seed_appliance_ecos() -> dict[str, dict[str, Any]]:
         out.setdefault(ne_pk, {})["zones"] = zone_table
     for ne_pk, sec_map_table in _seed_appliance_security_maps().items():
         out.setdefault(ne_pk, {})["securityMaps"] = sec_map_table
+    for ne_pk, system in _seed_bgp_system().items():
+        out.setdefault(ne_pk, {})["bgp/config/system"] = system
+    for ne_pk, neighbors in _seed_bgp_neighbor().items():
+        out.setdefault(ne_pk, {})["bgp/config/neighbor"] = neighbors
+    for ne_pk, system in _seed_ospf_system().items():
+        out.setdefault(ne_pk, {})["ospf/config/system"] = system
+    for ne_pk, interfaces in _seed_ospf_interfaces().items():
+        out.setdefault(ne_pk, {})["ospf/config/interfaces"] = interfaces
     return out
 
 
@@ -722,18 +815,10 @@ class MockState:
     actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     sessions: set[str] = field(default_factory=set)
     next_overlay_id: int = 2
-    # -- bgp (#16) -------------------------------------------------------
-    #: Per-appliance BGP system config, keyed by nePk (see resources/bgp.py).
-    bgp_system: dict[str, dict[str, Any]] = field(default_factory=_seed_bgp_system)
-    #: Per-appliance BGP neighbor table, keyed by nePk -> {neighborKey: {...}}.
-    #: Empty for every seeded appliance (matches the live lab sample).
-    bgp_neighbor: dict[str, dict[str, Any]] = field(default_factory=dict)
-    # -- ospf (#17) -------------------------------------------------------
-    #: Per-appliance OSPF system config, keyed by nePk (see resources/ospf.py).
-    ospf_system: dict[str, dict[str, Any]] = field(default_factory=_seed_ospf_system)
-    #: Per-appliance OSPF interfaces table, keyed by nePk -> {ifKey: {...}}.
-    #: Empty for every seeded appliance (matches the live lab sample).
-    ospf_interfaces: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # bgp (#16) and ospf (#17) ride the generic appliance_ecos proxy store
+    # above (Stage 2) — see _seed_bgp_system/_seed_bgp_neighbor/
+    # _seed_ospf_system/_seed_ospf_interfaces, merged in by
+    # _seed_appliance_ecos(). No dedicated MockState fields needed.
     # -- deployment (#12) --
     #: Consumed by the next POST .../url=deployment/validate call, like
     #: fail_next_action: forces one deterministic {err: ...} response.
@@ -1316,25 +1401,9 @@ def create_app(state: MockState | None = None) -> FastAPI:
             )
         }
 
-    # -- bgp (#16) — orchestrator-proxied views, queried by nePk ------------
-
-    @api.get("/bgp/config/system")
-    async def get_bgp_system(nePk: str) -> Any:
-        return mock.bgp_system.get(nePk, {})
-
-    @api.get("/bgp/config/neighbor")
-    async def get_bgp_neighbor(nePk: str) -> Any:
-        return mock.bgp_neighbor.get(nePk, {})
-
-    # -- ospf (#17) — orchestrator-proxied views, queried by nePk -----------
-
-    @api.get("/ospf/config/system")
-    async def get_ospf_system(nePk: str) -> Any:
-        return mock.ospf_system.get(nePk, {})
-
-    @api.get("/ospf/config/interfaces")
-    async def get_ospf_interfaces(nePk: str) -> Any:
-        return mock.ospf_interfaces.get(nePk, {})
+    # bgp (#16) and ospf (#17) Stage 2 moved to the generic /appliance/rest
+    # proxy below (appliance_ecos store) — no dedicated orchestrator-level
+    # routes needed any more, matching vrrp/routes/zones/security-maps.
 
     # -- loopback (#18) -------------------------------------------------------
     #

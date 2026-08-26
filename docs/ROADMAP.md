@@ -22,8 +22,9 @@ URL-escape guard, confirm-vs-revert atomicity, default-fill idempotency, …).
 (#11); `appliance/deployment` (#12, interfaces/IP/VLANs, validate-then-apply);
 `appliance/dhcp` (#13, composes over the deployment object); `appliance/vrrp`
 (#14); `appliance/routes` (#15, add/delete-delta `COMPENSABLE` rollback);
-`appliance/bgp` and `appliance/ospf` (#16, #17, Stage 1 read+diff — no write
-endpoint exists yet); `appliance/loopback` (#18, read+diff) + `loopback-orch`
+`appliance/bgp` and `appliance/ospf` (#16, #17 — read+write, code-complete
+against a spec-confirmed appliance-proxy endpoint but not yet live-write-
+tested); `appliance/loopback` (#18, read+diff) + `loopback-orch`
 (#18, fabric-wide pool, full read-modify-write); `appliance/zones` +
 `appliance/security-maps` (#19). Template-ownership detection (#20) partially
 grounded — `dns`/`routes`/`shaper` section names confirmed live, the rest
@@ -76,7 +77,7 @@ sharded into issues when their phase starts.
 | Firewall / security policy (orchestrator scope) | ✅ shipped (Phase 1) |
 | Interface labels | ✅ shipped (Phase 0; advanced constraints #39) |
 | Appliance interfaces / IP / DHCP / VRRP / routes | ✅ shipped (Phase 2, #12–#15) |
-| BGP / OSPF (read+diff → write) | 🔷 read+diff shipped (#16, #17); write is Stage 2, no endpoint verified yet |
+| BGP / OSPF (read+diff → write) | ✅ shipped (#16, #17); write path is code-complete against a spec-confirmed endpoint but not yet live-write-tested (see docs/futures/README.md) |
 | Loopbacks / loopback orchestration | ✅ shipped (Phase 2, #18; per-appliance loopback is read+diff only, no write endpoint documented) |
 | Firewall zones (orchestrator scope + segment↔zone map) | ✅ shipped (Phase 3, #30) |
 | Firewall zones + security policy (appliance scope) | ✅ shipped (Phase 2, #19) |

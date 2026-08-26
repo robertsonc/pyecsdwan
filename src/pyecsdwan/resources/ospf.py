@@ -1,52 +1,61 @@
-"""Per-appliance OSPF configuration (system + interfaces) — Stage 1, read+diff (#17).
+"""Per-appliance OSPF configuration (system + interfaces) — Stage 2, read+write (#17).
 
 Part of epic #3 (Phase 2 — appliance-scope config, via Orchestrator proxy).
+Mirrors ``resources/bgp.py`` (#16) closely — read that module's docstring
+for the full Stage 1 → Stage 2 rationale; this one only covers what's
+OSPF-specific.
 
-Endpoint facts (docs/research/appliance-config.md §OSPF, ``pyedgeconnect``
-``orch/_ospf.py``, and this session's live, read-only probe against a lab
-Orchestrator):
+Endpoint facts (docs/research/appliance-config.md §OSPF,
+``specs/appliance-openapi-7.2.0.json``, and two rounds of live probing
+against a lab Orchestrator this session):
 
-* ``GET /ospf/config/system?nePk=<pk>`` — system-level OSPF config. This is
-  the 9.3+ query-param form (the SDK also documents a pre-9.3
-  ``/ospf/config/system/{neId}`` path form; not used here). Confirmed live
-  shape, high confidence::
+* ECOS path ``ospf/config/system`` — system-level OSPF config, reached
+  through the appliance proxy. Confirmed live shape, high confidence — two
+  independent samples, one disabled and one still-disabled-but-with-a-real-
+  router-id::
 
       {"redistMapToOSPF": "default_rtmap_to_ospf", "enable": false,
        "routerId": "0.0.0.0", "opaque_enable": true}
 
-* ``GET /ospf/config/interfaces?nePk=<pk>`` — per-interface OSPF config. The
-  SDK's ``get_appliance_ospf_interfaces_config`` docstring gives the
-  endpoint but not the field shape. The live lab appliance probed this
-  session has no OSPF interfaces configured and returned an empty result —
-  the endpoint is reachable and returns valid JSON, but there is no
-  populated sample to ground per-interface fields against. ``normalize()``
-  therefore treats the interface table as an opaque mapping (key -> field
-  mapping, presumably keyed by interface name per the SDK's implied
-  addressing) and passes every field through unexamined, following the same
-  defensive either-keyed-mapping-or-list handling ``bgp.py`` uses for its
-  analogous "neighbor" field. This is the one part of this module NOT
-  grounded in a live populated payload — revisit if a real interface entry
-  disagrees.
+      {"redistMapToOSPF": "default_rtmap_to_ospf", "enable": false,
+       "routerId": "192.168.255.13", "opaque_enable": true}
 
-* ``GET /ospf/state/{system,interfaces,neighbors}?nePk=`` are read-only
-  informational views, never part of the diffable canonical state — exposed
-  as module-level read helpers below.
+* ECOS path ``ospf/config/interfaces`` — per-interface OSPF config, same
+  proxy pattern. **Now grounded in a real populated sample** (Stage 1 only
+  ever saw an empty table)::
 
-**No modeled write endpoint exists** on either the Orchestrator or the
-appliance API — confirmed by docs/research/appliance-config.md ("BGP and
-OSPF have NO modeled write endpoint on either side") and independently by
-this session's live, read-only probing (deliberately not probed further for
-a write path — out of scope for Stage 1). This is a deliberate,
-permanent-for-now design, not an unfinished stub: ``apply()`` raises
-``NotImplementedError`` naming the two candidate write paths issue #17
-Stage 2 must verify before this resource can accept writes (ECOS raw OSPF
-config path via the appliance proxy, or rendering to ``broadcastCli``).
-``tier`` stays ``Tier.CURATED`` — ``fetch``/``normalize``/``diff``/
-``managed_by`` are all real — but ``reversibility = IRREVERSIBLE`` so the
-transaction engine's own guard (``txn._guard``) refuses ``commit`` without
-``--force`` and refuses ``commit confirm`` outright for this kind, rather
-than ever reaching the ``NotImplementedError``. ``show``/drift work today;
-only writes are blocked.
+      {"lan0": {"cost": 1, "area": "0.0.0.0", "authKey": "",
+       "md5Password": "", "authType": "None", "comment": "", "priority": 1,
+       "transmitDelay": 1, "retransmitInterval": 4, "helloInterval": 10,
+       "deadInterval": 40, "md5Key": 0, "adminStatus": true,
+       "bfdDesired": false},
+       "lan1": {..., "area": "1.0.0.0", ...}}
+
+  Keyed by interface name, confirming the SDK's implied addressing.
+
+* ``specs/appliance-openapi-7.2.0.json`` also lists a writable
+  ``ospf/config/areas`` path (per-area stub/NSSA settings, distinct from the
+  per-interface ``area`` membership field above) — **not implemented here**.
+  Stage 1 never read it, no live sample grounds its shape, and issue #17's
+  own scope never named it. Left as a follow-up if per-area settings (as
+  opposed to per-interface area membership, which this resource does cover)
+  turn out to be needed.
+
+* ``GET /ospf/state/{system,interfaces,neighbors}?nePk=`` remain read-only
+  informational views, unchanged from Stage 1.
+
+Stage 2 — what changed from Stage 1: identical rationale to ``bgp.py`` —
+read path switched from the Orchestrator's convenience GET-only endpoint to
+the appliance proxy (which the spec confirms supports POST on both
+``ospf/config/system`` and ``ospf/config/interfaces``); ``apply()``/
+``rollback()`` now POST the full desired system object and full desired
+interface table (safe as a full replace — see ``bgp.py``'s docstring for
+why); ``reversibility`` promoted ``IRREVERSIBLE`` → ``REVERSIBLE``.
+
+**Not live-verified this session** — same caveat as ``bgp.py``: the write
+endpoints are spec-confirmed and follow the identical proxy pattern five
+other already-verified resources use, but no POST was actually issued
+against live gear before this shipped. Test with a no-op round-trip first.
 """
 
 from __future__ import annotations
@@ -73,8 +82,8 @@ from pyecsdwan.registry import register
 
 log = structlog.get_logger("pyecsdwan.resources.ospf")
 
-_SYSTEM_PATH = "/ospf/config/system"
-_INTERFACES_PATH = "/ospf/config/interfaces"
+_SYSTEM_PATH = "ospf/config/system"
+_INTERFACES_PATH = "ospf/config/interfaces"
 _STATE_SYSTEM_PATH = "/ospf/state/system"
 _STATE_INTERFACES_PATH = "/ospf/state/interfaces"
 _STATE_NEIGHBORS_PATH = "/ospf/state/neighbors"
@@ -83,17 +92,6 @@ _STATE_NEIGHBORS_PATH = "/ospf/state/neighbors"
 #: interfaces table together), like "global" for the orchestrator zone table.
 _INSTANCE_NAME = "config"
 
-_WRITE_PATH_TODO = (
-    "appliance/ospf has no modeled write endpoint on either the Orchestrator "
-    "or the appliance API (docs/research/appliance-config.md §OSPF; "
-    "confirmed independently by live read-only probing this session). "
-    "TODO(#17 Stage 2): verify a write path — either the raw appliance OSPF "
-    "config path via the appliance proxy (POST /appliance/rest?nePk=&url=...) "
-    "or rendering desired state to `broadcastCli` — against a live "
-    "appliance, then implement apply()/rollback(), wire "
-    "ctx.save_changes(...), and set reversibility off IRREVERSIBLE."
-)
-
 
 def _mapping_copy(value: Any, what: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
@@ -101,9 +99,9 @@ def _mapping_copy(value: Any, what: str) -> dict[str, Any]:
     return {str(k): v for k, v in value.items()}
 
 
-#: Field names that plausibly identify an interface if the live shape turns
-#: out to be a list of entries rather than a keyed mapping (unconfirmed —
-#: see module docstring). Falls back to the list index when none match.
+#: Field names that identify an interface if the shape is ever a list of
+#: entries rather than the confirmed keyed-by-interface-name mapping. Kept
+#: as cheap insurance against a future server version reshaping this.
 _INTERFACE_KEY_FIELDS = ("ifName", "if_name", "intf", "interface", "name")
 
 
@@ -137,34 +135,36 @@ def _interface_table(value: Any) -> dict[str, dict[str, Any]]:
 class Ospf(Resource):
     kind = "appliance/ospf"
     scope = Scope.APPLIANCE
-    # No write path exists at all (see module docstring): a confirm window
-    # would be fake safety, and there is no rollback to fall back on. This is
-    # the only honest declaration until Stage 2 verifies a write endpoint.
-    reversibility = Reversibility.IRREVERSIBLE
+    reversibility = Reversibility.REVERSIBLE
     tier = Tier.CURATED
     #: OSPF config always "exists" on an appliance (disabled is still a
-    #: configured state, per the live `enable: false` sample) — like the
-    #: orchestrator zone table, whole-resource delete is not meaningful.
+    #: configured state) — like the orchestrator zone table, whole-resource
+    #: delete is not meaningful.
     deletable = False
     desired_state_doc = (
         "system: {routerId, enable, redistMapToOSPF, opaque_enable, ...} "
-        "(unknown fields pass through). interfaces: map of interface-key -> "
-        "field mapping (shape unconfirmed — see module docstring). Read+diff "
-        "only (issue #17 Stage 1): apply() always raises NotImplementedError, "
-        "so this kind can be shown and diffed but never committed."
+        "(unknown fields pass through). interfaces: map of interface-name -> "
+        "{cost, area, authKey, md5Password, authType, comment, priority, "
+        "transmitDelay, retransmitInterval, helloInterval, deadInterval, "
+        "md5Key, adminStatus, bfdDesired}. Full-object replace: apply() "
+        "POSTs the complete system object and the complete interface table, "
+        "never a partial patch. Per-area settings (ospf/config/areas) are "
+        "not modeled by this resource — only per-interface area membership."
     )
 
-    # -- read side ------------------------------------------------------------
+    # -- appliance resolution --------------------------------------------------
 
     def _ne_pk(self, ctx: Ctx, ref: Ref) -> str:
         if ref.appliance is None:
             raise ValueError(f"{self.kind} is appliance-scoped; {ref} is missing an appliance")
         return ctx.resolver.ne_pk_for(ref.appliance)
 
+    # -- read side ------------------------------------------------------------
+
     def fetch(self, ctx: Ctx, ref: Ref) -> RawState:
         ne_pk = self._ne_pk(ctx, ref)
-        system = ctx.client.get(_SYSTEM_PATH, params={"nePk": ne_pk})
-        interfaces = ctx.client.get(_INTERFACES_PATH, params={"nePk": ne_pk})
+        system = ctx.client.appliance_request("GET", ne_pk, _SYSTEM_PATH)
+        interfaces = ctx.client.appliance_request("GET", ne_pk, _INTERFACES_PATH)
         raw: dict[str, Any] = {}
         if isinstance(system, dict):
             raw["system"] = system
@@ -187,19 +187,57 @@ class Ospf(Resource):
         ne_pk = ctx.resolver.ne_pk_for(ref.appliance)
         return owning_group(ctx, self.kind, ne_pk)
 
-    # -- write side (Stage 2, not yet available) -------------------------------
+    # -- write side -------------------------------------------------------------
+
+    def _write(self, ctx: Ctx, ref: Ref, desired: RawState, action: str) -> ApplyResult:
+        ne_pk = self._ne_pk(ctx, ref)
+        desired_dict = desired if isinstance(desired, dict) else {}
+        system = desired_dict.get("system") or {}
+        interfaces = desired_dict.get("interfaces") or {}
+
+        ctx.client.appliance_request("POST", ne_pk, _SYSTEM_PATH, json_body=system)
+        ctx.client.appliance_request("POST", ne_pk, _INTERFACES_PATH, json_body=interfaces)
+
+        save = ctx.save_changes([ne_pk], f"ospf {action}: {ref}")
+        if save.state != "SUCCESS":
+            return ApplyResult(
+                ok=False,
+                jobs=[save],
+                message=(
+                    f"ospf {action} on {ne_pk} not persisted — "
+                    f"save-changes {save.state}: {save.detail}"
+                ),
+            )
+        return ApplyResult(
+            ok=True,
+            jobs=[save],
+            message=(
+                f"ospf {action} on {ne_pk} persisted "
+                f"({len(interfaces)} interface(s), enable={system.get('enable', '?')})"
+            ),
+        )
 
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
-        raise NotImplementedError(_WRITE_PATH_TODO)
+        if diff.empty:
+            return ApplyResult.noop()
+        return self._write(ctx, diff.ref, diff.desired, "apply")
 
     def rollback(self, ctx: Ctx, ref: Ref, snapshot: RawState) -> ApplyResult:
-        # Never reached in practice: reversibility=IRREVERSIBLE means the
-        # transaction guard refuses to apply this kind without --force, and
-        # apply() itself raises before any write lands — so there is never a
-        # write to roll back. Overridden anyway (rather than inheriting the
-        # base class's generic NotImplementedError) so a forced commit that
-        # somehow gets this far fails with the same, specific explanation.
-        raise NotImplementedError(_WRITE_PATH_TODO)
+        if snapshot is None:
+            # OSPF config is never legitimately absent on a live appliance
+            # (disabled is still a configured state); a snapshot recorded as
+            # absent must never be replayed as "POST an empty config".
+            return ApplyResult(
+                ok=False,
+                message=f"no usable snapshot for {ref}; refusing to write an empty ospf config",
+            )
+        restored = self.normalize(snapshot)
+        if not isinstance(restored, dict):
+            return ApplyResult(
+                ok=False,
+                message=f"snapshot for {ref} normalized to nothing; refusing to write it back",
+            )
+        return self._write(ctx, ref, restored, "rollback")
 
     def list_refs(self, ctx: Ctx) -> list[Ref]:
         return [

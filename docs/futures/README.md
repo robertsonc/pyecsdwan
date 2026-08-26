@@ -24,14 +24,17 @@ proxy is down or too slow. Until that exists, direct mode stays out.
 - **Fabric-wide drift report** (`ec-cli drift`): every curated kind × every
   appliance, diff against declared desired-state files; CI-friendly exit codes.
   Phase 3 / epic #8, not yet sharded into an issue.
-- **BGP/OSPF write path** (issues #16, #17 Stage 2): Stage 1 (read+diff)
-  shipped for both — no modeled write endpoint exists in either API surface
-  (see docs/research/appliance-config.md), so `apply()` raises
-  `NotImplementedError` and `reversibility = IRREVERSIBLE` refuses commit via
-  the transaction guard. Candidates for Stage 2, named in each resource's
-  module docstring: the raw ECOS config path via the appliance proxy, or
-  rendering desired state to `broadcastCli`. Neither verified against live
-  gear yet.
+- **BGP/OSPF write path Stage 2 — live-write verification** (issues #16,
+  #17): `apply()`/`rollback()` are now implemented (full-object POST via the
+  appliance proxy, `reversibility = REVERSIBLE`) against endpoints confirmed
+  to exist in `specs/appliance-openapi-7.2.0.json`, following the exact
+  proxy pattern five other appliance-scope resources already use live. **Not
+  yet live-write-tested** — this environment's own safety tooling blocked
+  the in-session verification attempt before it could run a single POST.
+  Whoever tests this live should start with a true no-op round-trip (GET
+  current config, `commit` it back unchanged, confirm the replan diffs
+  empty) before trusting it with a real change — see each resource's module
+  docstring for the same recommendation.
 - **`appliance/loopback` write path** (issue #18): no documented write
   endpoint; candidate is `POST virtualif/loopback` via the appliance proxy,
   unconfirmed. `loopbackOrch`'s structure and the `mgmtIp`/`mgmtIP` casing

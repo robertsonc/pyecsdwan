@@ -1,52 +1,99 @@
-"""Per-appliance BGP configuration (system + neighbors) — Stage 1, read+diff (#16).
+"""Per-appliance BGP configuration (system + neighbors) — Stage 2, read+write (#16).
 
 Part of epic #3 (Phase 2 — appliance-scope config, via Orchestrator proxy).
 
-Endpoint facts (docs/research/appliance-config.md §BGP, ``pyedgeconnect``
-``orch/_bgp.py``, and this session's live, read-only probe against a lab
-Orchestrator):
+Endpoint facts (docs/research/appliance-config.md §BGP,
+``specs/appliance-openapi-7.2.0.json``, and two rounds of live probing
+against a lab Orchestrator this session — see the Stage 2 note below for
+what actually changed):
 
-* ``GET /bgp/config/system?nePk=<pk>`` — system-level BGP config. This is
-  the 9.3+ query-param form (the SDK also documents a pre-9.3
-  ``/bgp/config/system/{neId}`` path form; not used here). Confirmed live
-  shape, high confidence::
+* ECOS path ``bgp/config/system`` — system-level BGP config, reached through
+  the appliance proxy (``GET/POST /appliance/rest?nePk=<pk>&
+  url=bgp/config/system``). Confirmed live shape, high confidence — two
+  independent samples, one disabled and one enabled-with-a-neighbor::
 
       {"stale_path_time": 150, "enable_gms_marked": false, "enable": false,
        "remote_as_path_advertise": false, "log_nbr_msgs": true,
        "rtr_id": "0.0.0.0", "asn": 65534, "max_restart_time": 120,
        "graceful_restart_en": false}
 
-* ``GET /bgp/config/neighbor?nePk=<pk>`` — neighbor config. The SDK's
-  ``get_appliance_bgp_neighbors`` docstring gives the endpoint but not the
-  field shape ("response fields undocumented in SDK" per
-  docs/research/appliance-config.md). The live lab appliance probed this
-  session has no neighbors configured and returned ``{}`` — the endpoint is
-  reachable and returns valid JSON, but there is no populated sample to
-  ground per-neighbor fields against. ``normalize()`` therefore treats the
-  neighbor table as an opaque mapping (key -> field mapping, presumably
-  keyed by peer address per the SDK's implied addressing) and passes every
-  field through unexamined. This is the one part of this module NOT grounded
-  in a live populated payload — revisit if a real neighbor entry disagrees.
+      {"stale_path_time": 150, "enable_gms_marked": false, "enable": true,
+       "remote_as_path_advertise": true, "log_nbr_msgs": true,
+       "route_target": {"0": {"self": 0, "export": "0:0", "import": "0:0"}},
+       "rtr_id": "192.168.255.13", "asn": 65534, "neighbor": {...},
+       "max_restart_time": 120, "graceful_restart_en": false}
+
+  The enabled sample carries a ``neighbor`` sub-object mirroring the
+  standalone neighbor endpoint below, and a ``route_target`` map (EVPN route
+  targets, keyed by an index) the Stage 1 sample never showed — both are
+  unknown-passthrough here, never stripped or specially interpreted.
+
+* ECOS path ``bgp/config/neighbor`` — neighbor table, same proxy pattern.
+  **Now grounded in a real populated sample** (Stage 1 only ever saw an empty
+  table)::
+
+      {"10.127.1.1": {"as_override": false, "bfd_desired": false,
+       "directly_connected": false, "enable": true, "evpn": false,
+       "gms_marked": false, "hold": 9, "ka": 6, "lcl_interface": "any",
+       "next_hop_self": true, "password": "", "remote_as": 65001,
+       "rtmap_inbound": "default_rtmap_bgp_inbound_br",
+       "rtmap_outbound": "default_rtmap_bgp_outbound_br",
+       "store_received_routes": true, "type": "Branch"}}
+
+  Keyed by peer IP, confirming the SDK's implied addressing that Stage 1
+  could only guess at. The defensive either-keyed-mapping-or-list handling
+  from Stage 1 is kept (harmless once confirmed, and cheap insurance against
+  a future server version reshaping this), but the real key is now known:
+  peer IP, not an arbitrary identifier.
 
 * ``allVrfs`` breadth (``/bgp/config/allVrfs/{system,neighbor}?nePk=``) and
-  ``GET /bgp/state?nePk=`` are read-only informational views, never part of
-  the diffable canonical state — exposed as module-level read helpers below.
+  ``GET /bgp/state?nePk=`` remain read-only informational views, never part
+  of the diffable canonical state — exposed as module-level read helpers
+  below, unchanged from Stage 1, still read via the Orchestrator's
+  convenience endpoint (not the proxy) since nothing writes through them.
 
-**No modeled write endpoint exists** on either the Orchestrator or the
-appliance API — confirmed by docs/research/appliance-config.md ("BGP and
-OSPF have NO modeled write endpoint on either side") and independently by
-this session's live, read-only probing (deliberately not probed further for
-a write path — out of scope for Stage 1). This is a deliberate,
-permanent-for-now design, not an unfinished stub: ``apply()`` raises
-``NotImplementedError`` naming the two candidate write paths issue #16
-Stage 2 must verify before this resource can accept writes (ECOS
-``bgpConfig`` via the appliance proxy, or rendering to ``broadcastCli``).
-``tier`` stays ``Tier.CURATED`` — ``fetch``/``normalize``/``diff``/
-``managed_by`` are all real — but ``reversibility = IRREVERSIBLE`` so the
-transaction engine's own guard (``txn._guard``) refuses ``commit`` without
-``--force`` and refuses ``commit confirm`` outright for this kind, rather
-than ever reaching the ``NotImplementedError``. ``show``/drift work today;
-only writes are blocked.
+Stage 2 — what changed from Stage 1:
+
+* **Read path switched from the Orchestrator's convenience endpoint
+  (``ctx.client.get(...)``) to the appliance proxy
+  (``ctx.client.appliance_request(...)``).** Stage 1 read via the
+  Orchestrator's own ``GET /bgp/config/system?nePk=`` — confirmed real, but
+  the Orchestrator spec (``specs/orchestrator-openapi-7.2.0.json``) only
+  ever exposed GET on that path; there is no way to write through it.
+  ``specs/appliance-openapi-7.2.0.json`` — the ECOS API reached via the
+  appliance proxy, i.e. the exact same channel ``deployment``/``vrrp``/
+  ``routes`` already read and write through — lists **POST** on
+  ``bgp/config/system`` and ``bgp/config/neighbor`` (plus
+  ``neighbor/addMultiple``, ``neighbor/deleteMultiple``, and
+  ``neighbor/{IP}`` for single-entry ops, unused here — see below). Reading
+  and writing through the same channel avoids any risk of the Orchestrator's
+  convenience view lagging the appliance's own live state right after a
+  proxied write — the same reasoning ``deployment.py`` documents for why it
+  reads "a live call to the appliance, not an Orchestrator-cached view."
+* ``apply()``/``rollback()`` now perform real writes: POST the full desired
+  ``system`` object, then POST the full desired ``neighbor`` table, then
+  ``ctx.save_changes(...)``. Full-table POST rather than
+  ``addMultiple``/``deleteMultiple`` deltas is deliberate and safe here:
+  ``diff.desired`` is already the complete merged state (``txn.build_plan``
+  merges any ``set``/``delete`` onto the fetched+normalized current state
+  before this ever runs — the same guarantee ``vrrp.py``/``loopback-orch``
+  rely on), so a full POST never drops an entry the operator didn't touch.
+* ``reversibility`` promoted ``IRREVERSIBLE`` → ``REVERSIBLE``: the full
+  object is GET-then-POST, so a snapshot of the pre-change state restores
+  exactly via the same write path — see ``rollback()``.
+
+**Not live-verified this session.** Every fact above was captured with
+read-only GETs; the write endpoints are confirmed to *exist* by the vendored
+OpenAPI spec and follow the exact same proxy pattern five other
+already-verified appliance-scope resources use, but no POST was actually
+issued against live gear before this shipped — the live write test was
+blocked by this environment's own safety tooling before it could run.
+**Before trusting this with real changes, test it the way Stage 1 → 2
+verification normally would have gone**: GET an appliance's current BGP/OSPF
+config, `commit` it right back unchanged (a true no-op — `normalize()` is
+idempotent, so an unmodified re-plan should diff empty and skip the write
+entirely; if it doesn't diff empty, that's the first thing to fix), *then*
+try a real change on a low-stakes target.
 """
 
 from __future__ import annotations
@@ -73,8 +120,8 @@ from pyecsdwan.registry import register
 
 log = structlog.get_logger("pyecsdwan.resources.bgp")
 
-_SYSTEM_PATH = "/bgp/config/system"
-_NEIGHBOR_PATH = "/bgp/config/neighbor"
+_SYSTEM_PATH = "bgp/config/system"
+_NEIGHBOR_PATH = "bgp/config/neighbor"
 _STATE_PATH = "/bgp/state"
 _ALLVRFS_SYSTEM_PATH = "/bgp/config/allVrfs/system"
 _ALLVRFS_NEIGHBOR_PATH = "/bgp/config/allVrfs/neighbor"
@@ -83,17 +130,6 @@ _ALLVRFS_NEIGHBOR_PATH = "/bgp/config/allVrfs/neighbor"
 #: table together), like "global" for the orchestrator zone table.
 _INSTANCE_NAME = "config"
 
-_WRITE_PATH_TODO = (
-    "appliance/bgp has no modeled write endpoint on either the Orchestrator "
-    "or the appliance API (docs/research/appliance-config.md §BGP; "
-    "confirmed independently by live read-only probing this session). "
-    "TODO(#16 Stage 2): verify a write path — either ECOS `bgpConfig` via "
-    "the appliance proxy (POST /appliance/rest?nePk=&url=bgpConfig) or "
-    "rendering desired state to `broadcastCli` — against a live appliance, "
-    "then implement apply()/rollback(), wire ctx.save_changes(...), and set "
-    "reversibility off IRREVERSIBLE."
-)
-
 
 def _mapping_copy(value: Any, what: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
@@ -101,9 +137,9 @@ def _mapping_copy(value: Any, what: str) -> dict[str, Any]:
     return {str(k): v for k, v in value.items()}
 
 
-#: Field names that plausibly identify a neighbor if the live shape turns
-#: out to be a list of entries rather than a keyed mapping (unconfirmed —
-#: see module docstring). Falls back to the list index when none match.
+#: Field names that identify a neighbor if the shape is ever a list of
+#: entries rather than the confirmed keyed-by-peer-IP mapping. Kept as
+#: cheap insurance against a future server version reshaping this.
 _NEIGHBOR_KEY_FIELDS = ("peer_ip", "peerIp", "peerAddr", "addr", "ip", "neighbor")
 
 
@@ -135,36 +171,37 @@ def _neighbor_table(value: Any) -> dict[str, dict[str, Any]]:
 class Bgp(Resource):
     kind = "appliance/bgp"
     scope = Scope.APPLIANCE
-    # No write path exists at all (see module docstring): a confirm window
-    # would be fake safety, and there is no rollback to fall back on. This is
-    # the only honest declaration until Stage 2 verifies a write endpoint.
-    reversibility = Reversibility.IRREVERSIBLE
+    reversibility = Reversibility.REVERSIBLE
     tier = Tier.CURATED
     #: BGP config always "exists" on an appliance (disabled is still a
-    #: configured state, per the live `enable: false` sample) — like the
-    #: orchestrator zone table, whole-resource delete is not meaningful.
+    #: configured state) — like the orchestrator zone table, whole-resource
+    #: delete is not meaningful.
     deletable = False
     desired_state_doc = (
         "system: {asn, rtr_id, enable, graceful_restart_en, max_restart_time, "
         "stale_path_time, log_nbr_msgs, remote_as_path_advertise, "
-        "enable_gms_marked, ...} (unknown fields pass through). "
-        "neighbors: map of neighbor-key -> field mapping (shape unconfirmed — "
-        "see module docstring). Read+diff only (issue #16 Stage 1): apply() "
-        "always raises NotImplementedError, so this kind can be shown and "
-        "diffed but never committed."
+        "enable_gms_marked, ...} (unknown fields, e.g. route_target, pass "
+        "through). neighbors: map of peer-IP -> {as_override, bfd_desired, "
+        "directly_connected, enable, evpn, hold, ka, lcl_interface, "
+        "next_hop_self, password, remote_as, rtmap_inbound, rtmap_outbound, "
+        "store_received_routes, type, ...}. Full-object replace: apply() "
+        "POSTs the complete system object and the complete neighbor table, "
+        "never a partial patch."
     )
 
-    # -- read side ------------------------------------------------------------
+    # -- appliance resolution --------------------------------------------------
 
     def _ne_pk(self, ctx: Ctx, ref: Ref) -> str:
         if ref.appliance is None:
             raise ValueError(f"{self.kind} is appliance-scoped; {ref} is missing an appliance")
         return ctx.resolver.ne_pk_for(ref.appliance)
 
+    # -- read side ------------------------------------------------------------
+
     def fetch(self, ctx: Ctx, ref: Ref) -> RawState:
         ne_pk = self._ne_pk(ctx, ref)
-        system = ctx.client.get(_SYSTEM_PATH, params={"nePk": ne_pk})
-        neighbors = ctx.client.get(_NEIGHBOR_PATH, params={"nePk": ne_pk})
+        system = ctx.client.appliance_request("GET", ne_pk, _SYSTEM_PATH)
+        neighbors = ctx.client.appliance_request("GET", ne_pk, _NEIGHBOR_PATH)
         raw: dict[str, Any] = {}
         if isinstance(system, dict):
             raw["system"] = system
@@ -187,19 +224,57 @@ class Bgp(Resource):
         ne_pk = ctx.resolver.ne_pk_for(ref.appliance)
         return owning_group(ctx, self.kind, ne_pk)
 
-    # -- write side (Stage 2, not yet available) -------------------------------
+    # -- write side -------------------------------------------------------------
+
+    def _write(self, ctx: Ctx, ref: Ref, desired: RawState, action: str) -> ApplyResult:
+        ne_pk = self._ne_pk(ctx, ref)
+        desired_dict = desired if isinstance(desired, dict) else {}
+        system = desired_dict.get("system") or {}
+        neighbors = desired_dict.get("neighbors") or {}
+
+        ctx.client.appliance_request("POST", ne_pk, _SYSTEM_PATH, json_body=system)
+        ctx.client.appliance_request("POST", ne_pk, _NEIGHBOR_PATH, json_body=neighbors)
+
+        save = ctx.save_changes([ne_pk], f"bgp {action}: {ref}")
+        if save.state != "SUCCESS":
+            return ApplyResult(
+                ok=False,
+                jobs=[save],
+                message=(
+                    f"bgp {action} on {ne_pk} not persisted — "
+                    f"save-changes {save.state}: {save.detail}"
+                ),
+            )
+        return ApplyResult(
+            ok=True,
+            jobs=[save],
+            message=(
+                f"bgp {action} on {ne_pk} persisted "
+                f"({len(neighbors)} neighbor(s), asn={system.get('asn', '?')})"
+            ),
+        )
 
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
-        raise NotImplementedError(_WRITE_PATH_TODO)
+        if diff.empty:
+            return ApplyResult.noop()
+        return self._write(ctx, diff.ref, diff.desired, "apply")
 
     def rollback(self, ctx: Ctx, ref: Ref, snapshot: RawState) -> ApplyResult:
-        # Never reached in practice: reversibility=IRREVERSIBLE means the
-        # transaction guard refuses to apply this kind without --force, and
-        # apply() itself raises before any write lands — so there is never a
-        # write to roll back. Overridden anyway (rather than inheriting the
-        # base class's generic NotImplementedError) so a forced commit that
-        # somehow gets this far fails with the same, specific explanation.
-        raise NotImplementedError(_WRITE_PATH_TODO)
+        if snapshot is None:
+            # BGP config is never legitimately absent on a live appliance
+            # (disabled is still a configured state); a snapshot recorded as
+            # absent must never be replayed as "POST an empty config".
+            return ApplyResult(
+                ok=False,
+                message=f"no usable snapshot for {ref}; refusing to write an empty bgp config",
+            )
+        restored = self.normalize(snapshot)
+        if not isinstance(restored, dict):
+            return ApplyResult(
+                ok=False,
+                message=f"snapshot for {ref} normalized to nothing; refusing to write it back",
+            )
+        return self._write(ctx, ref, restored, "rollback")
 
     def list_refs(self, ctx: Ctx) -> list[Ref]:
         return [
