@@ -3,6 +3,7 @@
 from pyecsdwan.resources import (
     bgp,
     deployment,
+    dhcp,
     interface_labels,
     ospf,
     overlays,
@@ -16,6 +17,7 @@ from pyecsdwan.resources import (
 __all__ = [
     "bgp",
     "deployment",
+    "dhcp",
     "interface_labels",
     "ospf",
     "overlays",
