@@ -132,12 +132,17 @@ class MockState:
         for spec in fields(self):
             setattr(self, spec.name, getattr(fresh, spec.name))
 
-    def new_action(self, key: str | None = None, ne_pks: list[str] | None = None) -> str:
+    def new_action(
+        self, key: str | None = None, ne_pks: list[str] | None = None, name: str = ""
+    ) -> str:
         """Register an async action; it finishes after ``action_delay_polls`` polls.
 
-        A pending ``fail_next_action`` flag is consumed by the next action
-        created, which then finishes as a failure (``completionStatus`` false,
-        result ``"mock failure"``).
+        A poll is one GET that returns the action's records — via either
+        ``/action/status?key=`` or the ``/action`` listing; a single waiter
+        only ever uses one of the two, so ``action_delay_polls`` means the
+        same thing on both paths. A pending ``fail_next_action`` flag is
+        consumed by the next action created, which then finishes as a failure
+        (``completionStatus`` false, result ``"mock failure"``).
         """
         action_key = key or str(uuid.uuid4())
         self.actions[action_key] = {
@@ -145,6 +150,8 @@ class MockState:
             "delay_polls": self.action_delay_polls,
             "fail": self.fail_next_action,
             "ne_pks": list(ne_pks) if ne_pks else [],
+            "name": name,
+            "startTime": int(time.time() * 1000),
         }
         self.fail_next_action = False
         return action_key
@@ -167,12 +174,17 @@ async def _json_body(request: Request) -> Any:
 def _action_records(key: str, action: dict[str, Any]) -> list[dict[str, Any]]:
     finished = action["polls"] >= max(int(action.get("delay_polls", 1)), 1)
     failed = bool(action.get("fail"))
+    base = {
+        "guid": key,
+        "name": str(action.get("name", "")),
+        "startTime": int(action.get("startTime", 0)),
+    }
     records: list[dict[str, Any]] = []
     for ne_pk in action.get("ne_pks") or [""]:
         if not finished:
             records.append(
                 {
-                    "guid": key,
+                    **base,
                     "nepk": ne_pk,
                     "taskStatus": "In Progress",
                     "percentComplete": 50,
@@ -184,7 +196,7 @@ def _action_records(key: str, action: dict[str, Any]) -> list[dict[str, Any]]:
         elif failed:
             records.append(
                 {
-                    "guid": key,
+                    **base,
                     "nepk": ne_pk,
                     "taskStatus": "Failed",
                     "percentComplete": 100,
@@ -196,7 +208,7 @@ def _action_records(key: str, action: dict[str, Any]) -> list[dict[str, Any]]:
         else:
             records.append(
                 {
-                    "guid": key,
+                    **base,
                     "nepk": ne_pk,
                     "taskStatus": "Completed",
                     "percentComplete": 100,
@@ -370,7 +382,9 @@ def create_app(state: MockState | None = None) -> FastAPI:
         if not isinstance(template_ids, list):
             return JSONResponse({"error": "body must include templateIds list"}, status_code=400)
         mock.template_association[nePk] = [str(g) for g in template_ids]
-        mock.new_action(ne_pks=[nePk])
+        # Fire-and-204, like the real endpoint: the push's per-appliance
+        # results exist only as action-log records — no key in the response.
+        mock.new_action(ne_pks=[nePk], name="template push")
         return Response(status_code=204)
 
     @api.get("/template/history/groupList")
@@ -466,6 +480,28 @@ def create_app(state: MockState | None = None) -> FastAPI:
         action = mock.actions[key]
         action["polls"] += 1
         return _action_records(key, action)
+
+    @api.get("/action")
+    async def list_actions(
+        startTime: int,
+        endTime: int,
+        logLevel: int = 1,
+        limit: int = 100,
+        appliance: str | None = None,
+    ) -> Any:
+        """Action/audit log listing: epoch-ms window (required, like the real
+        API) plus the ``appliance`` nePk filter. Every emitted action counts
+        the call as one poll, so ``action_delay_polls`` drives the keyless
+        waiter exactly as ``/action/status`` drives the keyed one."""
+        records: list[dict[str, Any]] = []
+        for key, action in mock.actions.items():
+            if appliance is not None and appliance not in (action.get("ne_pks") or []):
+                continue
+            if not startTime <= int(action.get("startTime", 0)) <= endTime:
+                continue
+            action["polls"] += 1
+            records.extend(_action_records(key, action))
+        return records[: max(limit, 0)]
 
     # -- security maps -------------------------------------------------------
 

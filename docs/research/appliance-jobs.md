@@ -68,6 +68,12 @@ Operations returning keys: save-changes (`clientKey`), appliance backup/restore
 (`clientKey`), `upgrade_appliances` (`clientKey`), `appliance_resync`
 (**bare string** body, not JSON), `delete_ecos_image` (bare string).
 
+Keyless pushes (template association's fire-and-204) are confirmed via the
+listing `GET /action?startTime=&endTime=&logLevel=&appliance={nePk}` —
+startTime/endTime are epoch **milliseconds** (the SDK docstring wrongly says
+seconds), logLevel 0=Debug/1=Info/2=Error; `jobs.wait_for_recent_action` polls
+it and picks the newest `guid` in the window.
+
 Preconfig apply is async on a **separate channel**:
 `GET /gms/appliance/preconfiguration/apply?preconfigId=` → `{taskStatus: 0|1|2,
 completionStatus (valid only when taskStatus==2), guid (actionlog bridge),
