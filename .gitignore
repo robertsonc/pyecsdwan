@@ -67,3 +67,5 @@ logging/
 
 #IDE
 .idea/
+ec-cli
+shell_history

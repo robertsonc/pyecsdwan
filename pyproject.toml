@@ -1,45 +1,101 @@
-[tool.black]
-line-length = 79
-include = '\.pyi?$'
-exclude = '''
-/(
-    \.git
-  | \.hg
-  | \.mypy_cache
-  | \.tox
-  | \.venv
-  | _build
-  | buck-out
-  | build
-  | dist
-)/
-'''
-
-[tool.isort]
-multi_line_output = 3
-include_trailing_comma = true
-force_grid_wrap = 0
-line_length = 79
-profile = "black"
-
-[tool.tox]
-legacy_tox_ini = """
-
-[tox]
-envlist = py37, py38, py39, py310
-
-[testenv]
-deps = .[dev]
-commands =
-  pytest
-
-[testenv:format]
-commands =
-  isort pyedgeconnect/. --check-only
-  flake8 pyedgeconnect/.
-"""
-
 [build-system]
-requires = ["setuptools>=42", "wheel", "setuptools_scm[toml]>=3.4"]
-[tool.setuptools_scm]
-write_to= "_version.py"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyecsdwan"
+version = "0.1.0"
+description = "Transactional CLI abstraction layer for HPE Aruba EdgeConnect SD-WAN (Orchestrator)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Corey Robertson" }]
+keywords = ["sd-wan", "edgeconnect", "aruba", "orchestrator", "cli", "network-automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Telecommunications Industry",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Networking",
+]
+
+# Pinned with compatible-release specifiers: reproducible enough for a CLI
+# deployment target while allowing security patch releases.
+dependencies = [
+    "httpx~=0.28.1",
+    "pydantic~=2.13",
+    "typer~=0.27.1",
+    "rich~=15.0",
+    "prompt_toolkit~=3.0.52",
+    "structlog~=26.1",
+    "PyYAML~=6.0.3",
+    "keyring~=25.7",
+]
+
+[project.optional-dependencies]
+mock = [
+    "fastapi~=0.141.1",
+    "uvicorn~=0.52.4",
+]
+dev = [
+    "pytest~=9.1",
+    "respx~=0.23.1",
+    "mypy~=2.3",
+    "ruff~=0.16.4",
+    "types-PyYAML~=6.0.12",
+    "fastapi~=0.141.1",
+    "uvicorn~=0.52.4",
+]
+
+[project.scripts]
+ec-cli = "pyecsdwan.cli.main:main"
+sase-cli = "pyecsdwan.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/robertsonc/pyecsdwan"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["pyecsdwan*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "tests"]
+extend-exclude = ["pyedgeconnect", "mcp_server", "examples", "docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "S", "BLE", "RUF"]
+ignore = [
+    "S101", # assert use — fine in tests, and we exclude prod asserts by review
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B017"]
+"src/pyecsdwan/mock/*" = ["S104"]
+
+[tool.mypy]
+python_version = "3.10"
+mypy_path = "src"
+packages = ["pyecsdwan"]
+strict = true
+warn_unreachable = true
+# The vendored pyedgeconnect reference SDK and repo examples are not ours to type.
+exclude = "(pyedgeconnect|mcp_server|examples|build)/"
+
+[[tool.mypy.overrides]]
+module = ["keyring.*", "respx.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "slow: end-to-end tests with real detached processes and sleeps",
+]
+filterwarnings = ["error::DeprecationWarning:pyecsdwan.*"]
