@@ -99,6 +99,6 @@ testpaths = ["tests"]
 addopts = "-q"
 markers = [
     "slow: end-to-end tests with real detached processes and sleeps",
-    "live: optional smoke tests against a real Orchestrator (ECSDWAN_ORCH_URL)",
+    "live: optional smoke tests against a real Orchestrator (needs ECSDWAN_ORCH_URL)",
 ]
 filterwarnings = ["error::DeprecationWarning:pyecsdwan.*"]

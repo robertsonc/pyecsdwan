@@ -446,6 +446,63 @@ def _seed_static_routes_learned() -> dict[str, dict[str, Any]]:
     return {ne_pk: copy.deepcopy(learned) for ne_pk in ("1.NE", "3.NE", "5.NE")}
 
 
+# -- vrrp (#14) ----------------------------------------------------------
+
+
+def _seed_vrrp() -> dict[str, list[dict[str, Any]]]:
+    """Realistic ``vrrp`` ECOS fixture: a two-appliance HA pair peered over
+    wan0 (1.NE master, 3.NE backup, groupId 1), with each entry's server-
+    reported fields (mode/master_transitions/uptime/vmac/...) present too so
+    a resource's normalize() is exercised stripping them.
+
+    5.NE is left with no entries: a live-appliance probe this dev cycle
+    found the ``vrrp`` endpoint reachable but returned no VRRP config on any
+    appliance it was run against, so "nothing configured" is the one shape
+    actually confirmed live — worth keeping represented here.
+    """
+    common = {
+        "pkt_trace": False,
+        "adv_timer": 1,
+        "preempt": True,
+        "holddown": 10,
+        "auth": "",
+        "desc": "HQ-Branch1 HA",
+        "interface": "wan0",
+        "vipaddr": "10.0.0.1",
+        "groupId": 1,
+    }
+    master = {
+        **common,
+        "enable": "Up",
+        "priority": 200,
+        "mode": "Master",
+        "master_transitions": 3,
+        "uptime": "12 days 4 hrs 0 mins 0 secs",
+        "vmac": "00-00-5E-00-01-01",
+    }
+    backup = {
+        **common,
+        "enable": "Up",
+        "priority": 100,
+        "mode": "Backup",
+        "master_transitions": 3,
+        "uptime": "12 days 3 hrs 58 mins 12 secs",
+        "vmac": "00-00-5E-00-01-01",
+    }
+    return {"1.NE": [master], "3.NE": [backup], "5.NE": []}
+
+
+def _seed_appliance_ecos() -> dict[str, dict[str, Any]]:
+    """Seed for the generic per-appliance ECOS store (``appliance_ecos``
+    below). Extend with more ``{ecosPath: payload}`` entries as further
+    appliance-scope resources land (Phase 2, #3) — one ``dict.setdefault``
+    block per resource keeps additions merge-friendly."""
+    out: dict[str, dict[str, Any]] = {}
+    for ne_pk, entries in _seed_vrrp().items():
+        out.setdefault(ne_pk, {})["vrrp"] = entries
+    return out
+
+
 # -- state -------------------------------------------------------------------
 
 
@@ -488,8 +545,9 @@ class MockState:
         default_factory=_seed_static_routes_learned
     )
     #: Per-appliance ECOS store reached via the /appliance/rest proxy:
-    #: {nePk: {ecosPath: payload}}.
-    appliance_ecos: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: {nePk: {ecosPath: payload}}. Seeded per-resource by
+    #: _seed_appliance_ecos() (currently just vrrp, #14).
+    appliance_ecos: dict[str, dict[str, Any]] = field(default_factory=_seed_appliance_ecos)
     actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     sessions: set[str] = field(default_factory=set)
     next_overlay_id: int = 2
@@ -1012,6 +1070,11 @@ def create_app(state: MockState | None = None) -> FastAPI:
 
     # -- appliance proxy + save-changes -------------------------------------
 
+    # vrrp (#14) is served through this generic proxy too: GET/POST
+    # /appliance/rest?nePk=<pk>&url=vrrp reads/replaces
+    # mock.appliance_ecos[nePk]["vrrp"], seeded by _seed_appliance_ecos()
+    # above. No vrrp-specific route is needed — every appliance-scope
+    # resource this proxy is generic over addresses it the same way.
     @api.api_route("/appliance/rest", methods=["GET", "POST", "PUT", "DELETE"])
     async def appliance_proxy(request: Request, nePk: str, url: str) -> Any:
         """Proxy to a per-appliance ECOS store keyed by (nePk, url). Writes set

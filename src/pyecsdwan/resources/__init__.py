@@ -8,6 +8,7 @@ from pyecsdwan.resources import (
     routes,
     security_policy,
     templates,
+    vrrp,
     zones,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "routes",
     "security_policy",
     "templates",
+    "vrrp",
     "zones",
 ]
