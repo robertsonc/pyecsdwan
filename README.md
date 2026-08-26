@@ -1,262 +1,123 @@
-# Aruba Edge Connect Python SDK
+# pyecsdwan
 
-[![Downloads](https://static.pepy.tech/personalized-badge/pyedgeconnect?period=total&units=none&left_color=grey&right_color=orange&left_text=PyPI%20Downloads)](https://pepy.tech/project/pyedgeconnect)
+A transactional CLI abstraction layer for HPE Aruba EdgeConnect SD-WAN.
+Everything you do in the Orchestrator UI — orchestrator-level (Business Intent
+Overlays, security policy, templates and template groups, associations) and
+appliance-level (interfaces, BGP, OSPF, DHCP, VRRP, routes) — expressible from
+a Junos-flavored CLI, with the transactional semantics the Orchestrator API
+never had:
 
-This package is a python wrapper for leveraging the API for Aruba
-Orchestrator and Edge Connect SDWAN systems.
+- **Candidate config**: `set`/`delete` accumulate locally; nothing touches the
+  Orchestrator until `commit`.
+- **`show | compare`**: a canonical diff of exactly what commit will send.
+- **`commit confirm <minutes>`**: auto-rollback by a detached watchdog that
+  survives SSH death, unless you confirm in time.
+- **`rollback <n>`**: Junos-style history from crash-safe journaled snapshots.
+- **Template-ownership detection**: direct appliance changes on
+  template-managed sections are refused without `--override-template`, because
+  the next template push would silently revert them.
+- **Tier-0 raw passthrough**: `ec-cli api get|post|put|delete <path>` reaches
+  *any* Orchestrator or appliance-proxy endpoint from day one — journaled for
+  audit, loudly outside the transaction guarantees.
 
-API's are documented via Swagger directly on Orchestrator and
-Edge Connect web interfaces under "Support > Rest API"
-
-Many, but not all API functions have been implemented yet. Development
-is underway to continue to add further functions.
-
-**THERE IS NOW PRELIMINARY SUPPORT FOR API CHANGES INTRODUCED IN
-ORCHESTRATOR 9.3+**
+The repo also vendors the upstream
+[pyedgeconnect SDK](docs/pyedgeconnect-README.md) as the endpoint reference the
+plugins are built from, and OpenAPI 7.2.0 specs under `specs/` as the
+spec-ingestion baseline.
 
 ## Install
 
-### Python Version
-
-> **Note:** Requires Python 3.7+
-
-Once Python 3.7+ is installed on the system, it's recommended to use a
-virtual environment to install the package to.
-
-In the directory you'd like to write your project/script, setup a python
-virtual environment with the desired python version and activate it. This
-is important if you have other versions of python installed on your
-system.
+Target: a Linux server you SSH into. No sudo needed.
 
 ```bash
-
-    :~$ python3.9 -m venv my_new_project
-    :~$ source my_new_project/bin/activate
-    (my_new_project) :~$ python --version
-    Python 3.9.13
+git clone https://github.com/robertsonc/pyecsdwan
+cd pyecsdwan
+make install          # creates .venv, installs, symlinks ./ec-cli
+./ec-cli --help
+# or as a uv tool:
+uv tool install .     # installs `ec-cli` and the `sase-cli` alias
 ```
 
-Now you are ready to install the package and run your python code.
-
-> **Note:** Going forward, these commands assume you're within a Python 3.7+ venv, or Python 3.7+ is the exclusive Python version installed in regard to referencing the use of ``pip``. If that is not the case, you can specifically append ``python3.x -m`` ahead of the ``pip install ...``
-
-### Install from PyPI
+## Connect
 
 ```bash
-    $ pip install pyedgeconnect
-    ...
-    $ pip list
-    Package                       Version
-    ----------------------------- --------------------------------
-    ...                           ...
-    pyedgeconnect                 x.y.z
-    ...                           ...
+export ECSDWAN_ORCH_URL=orchestrator.example.com
+export ECSDWAN_API_KEY=<api key>        # or store it in the OS keyring
+./ec-cli show appliances
 ```
 
-### Install from GitHub
+Credentials are never taken on argv. TLS verification is on by default
+(`--insecure` exists, and nags). `commit confirm` requires API-key auth — a
+background watchdog cannot replay an interactive login.
 
-To install the most recent version of pyedgeconnect, open an
-interactive shell and run:
+No Orchestrator handy? `python -m pyecsdwan.mock --port 8442` starts the
+bundled fake Orchestrator; then `ec-cli --mock 8442 shell`.
+
+## Junos-mode cheat sheet
+
+```
+$ ./ec-cli                       # or: ec-cli shell
+pyecsdwan> show appliances
+pyecsdwan> show journal
+pyecsdwan> configure
+pyecsdwan(config)# set interface-labels global wan 3 name LTE
+pyecsdwan(config)# set interface-labels global wan 3 topology 2
+pyecsdwan(config)# show | compare        # colorized +/- canonical diff
+pyecsdwan(config)# commit confirm 10     # auto-reverts in 10 min unless...
+pyecsdwan(config)# commit                # ...confirmed inside the window
+pyecsdwan(config)# rollback 1            # restore previous confirmed state
+pyecsdwan(config)# discard               # drop candidate changes
+pyecsdwan(config)# exit
+pyecsdwan> exit
+```
+
+Operational mode: `show appliances`, `show <kind> [<name>]`, `show journal`,
+`show transactions pending`, `show coverage`.
+
+## Scriptable subcommands (automation / CI)
 
 ```bash
-    $ pip install git+https://github.com/aruba/pyedgeconnect
-    ...
-    $ pip list
-    Package                       Version
-    ----------------------------- --------------------------------
-    ...                           ...
-    pyedgeconnect                 x.y.z
-    ...                           ...
+ec-cli set interface-labels global wan 3 name LTE
+ec-cli diff                     # exit 1 if changes pending -> CI drift check
+ec-cli commit --confirm-minutes 10
+ec-cli commit                   # confirm within the window
+ec-cli rollback 1
+ec-cli rollback --pending       # recover orphaned unconfirmed transactions
+ec-cli load interface-labels global labels.yaml   # declarative desired state
+ec-cli api get /appliance       # Tier-0 raw passthrough (audit-journaled)
+ec-cli api post /gms/interfaceLabels --body labels.json
+ec-cli api get /systemInfo --appliance BR1-EC     # via appliance proxy
+ec-cli show coverage            # every kind: scope / reversibility / tier
 ```
 
-To install a specific branch use the @branch syntax
+## Safety model, in one table
+
+| Class | Meaning | commit confirm |
+|---|---|---|
+| REVERSIBLE | exact snapshot/restore | yes |
+| COMPENSABLE | compensating action (create→delete) | yes |
+| IRREVERSIBLE | no undo (deletes, upgrades, licenses) | **refused** — needs `--force`, no fake safety |
+
+| Tier | Meaning | In transactions? |
+|---|---|---|
+| 0 | raw `api` passthrough | never — audit journal only |
+| 1 | generated from spec | plain commit; confirm only with `--allow-untransactional` |
+| 2 | curated plugin | full commit-confirm |
+
+Partial failure mid-changeset auto-reverts the already-applied steps from the
+journal and reports exactly what state the fabric is in. Orphaned unconfirmed
+transactions (CLI or host died) are detected on every start; recover with
+`rollback --pending`.
+
+State lives under `~/.pyecsdwan/` (journal doubles as the audit log).
+
+## Development
 
 ```bash
-    $ pip install git+https://github.com/aruba/pyedgeconnect@<branch_name>
-    ...
-    # Install the Development branch
-    $ pip install git+https://github.com/aruba/pyedgeconnect@development
-    ...
+make check     # ruff + mypy + pytest — the local gate
+pytest -m "not slow"   # skip the detached-watchdog e2e tests
 ```
 
-### Install dev options
-
-For editing the code and general testing you can specify the ``[dev]``
-extras which will include ["black", "flake8", "flake8-rst-docstrings",
-"isort", "sphinx", "sphinx_rtd_theme"]
-
-To install from the remote repo with the ``[dev]`` extras option use the
-following syntax:
-
-```bash
-    $ pip install pyedgeconnect[dev]
-    or
-    $ pip install git+https://github.com/aruba/pyedgeconnect#egg=pyedgeconnect[dev]
-```
-
-## Docs
-
-[![Documentation Status](https://readthedocs.org/projects/pyedgeconnect/badge/?version=latest)](https://pyedgeconnect.readthedocs.io/en/latest/?badge=latest)
-
-Docs are viewable on [Read the Docs](https://pyedgeconnect.readthedocs.io)
-
-To build the documentation locally, clone the repository, install with ``[dev]`` option
-to include sphinx and related packages, then in the docs directory run ``make html``
-
-```bash
-    git clone https://github.com/aruba/pyedgeconnect.git
-    cd edgeconnect-python
-    pip install .[dev]
-    cd docs
-    make html
-```
-
-## Usage
-
-### Orchestrator Class
-
-Import the Orchestrator class to your script.
-
-```python
-    from pyedgeconnect import Orchestrator
-```
-
-To initialize an Orchestrator you must pass the url of the Orchestrator
-(IP or FQDN).
-
-> **Note:** If you're connecting to an Orchestrator without a valid certificate you'll want to set the ``verify_ssl`` paramter to ``False`` when instantiating Orchestrator to ignore certificate warnings/errors.
-
-```python
-    orch_url = '10.1.1.100'
-    orch_url = 'orchestrator.example.com'
-    orch = Orchestrator(orch_url, verify_ssl=False)
-```
-
-Now you can call the login function to connect to Orchestrator with a
-username and password:
-
-```python
-    orch_user = 'admin'
-    orch_pw = 'change_me'
-    orch.login(orch_user, orch_pw)
-    orch.logout()
-```
-
-Another option is to pass an API Key on init to make authenticated calls
-without having to call login/logout functions
-
-```python
-    orch_url = 'orchestrator.example.com'
-    orch = Orchestrator(orch_url, api_key='xxx')
-```
-
-### Edge Connect Class
-
-```python
-    from pyedgeconnect import EdgeConnect
-```
-
-To initialize an Edge Connect you must pass the url of the Edge Connect
-(IP or FQDN).
-
-> **Note:** If you're connecting to an Edge Connect without a valid certificate you'll want to set the ``verify_ssl`` paramter to ``False`` when instantiating EdgeConnect to ignore certificate warnings/errors.
-
-```python
-    ecos_url = '10.2.30.50'
-    ecos_url = 'edgeconnect.example.com'
-    ec = EdgeConnect(ecos_url, verify_ssl=False)
-```
-
-Now you can call the login function to connect to Edge Connect with a
-username and password:
-
-```python
-    ecos_user = 'admin'
-    ecos_pw = 'admin'
-    ec.login(ecos_user, ecos_pw)
-    ec.logout()
-```
-
-## Logging
-
-By default, Orchestrator and EdgeConnect classes will not log calls
-and/or errors to file or console. When instantiating Orchestrator
-or EdgeConnect classes follow the below settings to enable logging
-options:
-
-* Logging to a local file: set the ``log_file`` parameter to
-``True``. This will create ./logging/sp_orch.log or
-./logging/sp_ecos.log relative to where python is launched for calls
-that are performed.
-
-* Logging to the console: set the ``log_console`` parameter to
-``True``
-
-By default, successful API calls (e.g. returning HTTP 200/204 etc.) will
-not log response text to avoid logging sensitive data. To include
-response text in log messages, set the ``log_success`` parameter to
-``True``.
-
-> **Warning:** If ``log_file`` and ``log_success`` are set to ``True`` response text from successful API calls will be logged to the local log file. Some responses can include sensitive data that you may not wish to retain in the log files.
-
-```python
-    orch_url = 'orchestrator.example.com'
-    orch = Orchestrator(orch_url, log_file=True, log_console=True)
-    # or
-    ecos_url = '10.2.30.50'
-    ec = EdgeConnect(ecos_url, log_success=True)
-```
-
-## Example Code
-
-In the [Examples](/examples) directory you can find scripts leveraging
-the Orchestrator class demonstrating some uses
-
-* [create_user.py](/examples/create_user.py)
-  * creates a new read-only user on Orchestrator and returns the
-      configured details
-* [print_appliance_info.py](/examples/print_appliance_info.py)
-  * retrieves all appliances, retrieves detailed attributes of the
-      appliances, and prints details in a table format
-* [run_packet_capture.py](/examples/run_packet_capture.py)
-  * runs a tcpdump packet capture on a specified appliance, once
-      completed, uploads to Orchestrator for user retrieval
-* [preconfig.py](/examples/generate_preconfig/preconfig.py)
-  * uses a CSV file as source data to generate Edge Connect YAML
-      preconfig from a Jinja template
-
-## This is an alpha product
-
-This package is still very new. This is made explicit by the "Alpha"
-trove classifier, as well as by the "a" in the version number. **Until
-the package becomes stable, you should expect some formatting and/or
-syntax to change in the future**.
-
-## License
-
-MIT
-
-## Contributing to pyedgeconnect
-
-Adding more modules and API functions are prioritized as needed for use.
-There is not currently support for reviewing external PR's as maintenance
-is best effort by the authors.
-
-Open an [issue](issues)
-to track any/all suggestions/fixes/additions.
-Please don't file an issue to ask a question.
-
-As this code is in early stages there are larger changes that may be
-discussed in regards to overall structure, error handling, logging, etc.
-Suggestions for these topics can be raised via issue or contacting the
-authors.
-
-See contribution details at [Contributing](CONTRIBUTING.md)
-
-## Release Notes
-
-Release notes are located in ``docs/source/release-notes`` directory [here](docs/source/release-notes)
-
-## Authors
-
-Authored by Zach Camara, email at <aruba-automation@hpe.com>
+Repo conventions: `docs/sitrep/` session handoffs, `docs/futures/` roadmap,
+`docs/research/` mined API knowledge, `docs/plugin-promotion.md` for how a
+resource earns commit-confirm.
