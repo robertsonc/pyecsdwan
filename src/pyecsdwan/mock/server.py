@@ -492,6 +492,79 @@ def _seed_vrrp() -> dict[str, list[dict[str, Any]]]:
     return {"1.NE": [master], "3.NE": [backup], "5.NE": []}
 
 
+# -- appliance zones/security-maps (#19) -------------------------------------
+#
+# Both ECOS paths ("zones", "securityMaps") are served through the generic
+# appliance-proxy handler below, same as vrrp (#14) — no dedicated route is
+# needed, only realistic seed data in the per-appliance ECOS store.
+
+
+def _seed_appliance_zones() -> dict[str, dict[str, Any]]:
+    """Appliance-scope zone table, ECOS path 'zones'. Real captured shape
+    (#19, read-only against a live lab Orchestrator): {"1": {"name":
+    "Untrust"}} — note no id-0 Default row, unlike the orchestrator-scope
+    zones table (mock.zones above); that server-managed row is a genuine
+    difference at this scope, not an omission here."""
+    return {
+        "1.NE": {"1": {"name": "Untrust"}, "2": {"name": "DMZ"}},
+        "3.NE": {"1": {"name": "Untrust"}},
+        "5.NE": {},
+    }
+
+
+def _seed_appliance_security_maps() -> dict[str, dict[str, Any]]:
+    """Per-appliance security map table, ECOS path 'securityMaps'. Real
+    captured shape (#19, read-only against a live lab Orchestrator):
+    map -> "<fromZoneId>_<toZoneId>" -> "prio" -> priority -> rule
+    {comment, gms_marked, match, set, misc}."""
+    rules = {
+        "map1": {
+            "0_1": {
+                "prio": {
+                    "20000": {
+                        "comment": "",
+                        "gms_marked": True,
+                        "match": {"acl": "", "webcc_cat": "11|27|62|31|59|55|67|86"},
+                        "misc": {
+                            "tag": "tke",
+                            "rule": "enable",
+                            "logging_priority": "2",
+                            "logging": "enable",
+                        },
+                        "set": {"action": "deny"},
+                    },
+                    "24999": {
+                        "comment": "",
+                        "gms_marked": True,
+                        "match": {"acl": "", "internet": "1"},
+                        "misc": {
+                            "rule": "enable",
+                            "logging_priority": "2",
+                            "logging": "enable",
+                        },
+                        "set": {"action": "inspect"},
+                    },
+                    "65535": {
+                        "comment": "",
+                        "gms_marked": True,
+                        "match": {"acl": ""},
+                        "misc": {
+                            "rule": "enable",
+                            "logging_priority": "2",
+                            "logging": "enable",
+                        },
+                        "set": {"action": "deny"},
+                    },
+                }
+            }
+        }
+    }
+    return {"1.NE": copy.deepcopy(rules), "3.NE": {}, "5.NE": {}}
+
+
+# -- end appliance zones/security-maps (#19) seed data ------------------------
+
+
 def _seed_appliance_ecos() -> dict[str, dict[str, Any]]:
     """Seed for the generic per-appliance ECOS store (``appliance_ecos``
     below). Extend with more ``{ecosPath: payload}`` entries as further
@@ -500,6 +573,10 @@ def _seed_appliance_ecos() -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for ne_pk, entries in _seed_vrrp().items():
         out.setdefault(ne_pk, {})["vrrp"] = entries
+    for ne_pk, zone_table in _seed_appliance_zones().items():
+        out.setdefault(ne_pk, {})["zones"] = zone_table
+    for ne_pk, sec_map_table in _seed_appliance_security_maps().items():
+        out.setdefault(ne_pk, {})["securityMaps"] = sec_map_table
     return out
 
 
