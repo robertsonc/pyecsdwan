@@ -1,0 +1,300 @@
+"""Transaction engine tests: commit, guards, partial-failure revert, rollback
+history, orphan recovery — against an in-memory fake resource (no HTTP)."""
+
+from __future__ import annotations
+
+import copy
+from typing import Any
+
+import pytest
+
+from pyecsdwan import config, txn
+from pyecsdwan.candidate import CandidateStore
+from pyecsdwan.contract import (
+    ApplyResult,
+    CanonicalState,
+    Ctx,
+    Diff,
+    RawState,
+    Ref,
+    Resource,
+    Reversibility,
+    Tier,
+)
+from pyecsdwan.journal import TxnJournal, TxnState, list_txns
+from pyecsdwan.registry import Registry
+
+
+class FakeServer:
+    """Dict-backed 'orchestrator' shared by fake resources."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, dict[str, Any]] = {}
+        self.write_count = 0
+
+
+class FakeResource(Resource):
+    kind = "fake"
+    scope_name = "orchestrator"
+    reversibility = Reversibility.REVERSIBLE
+    tier = Tier.CURATED
+
+    def __init__(self, server: FakeServer, kind: str = "fake",
+                 dependencies: tuple[str, ...] = ()) -> None:
+        self.kind = kind
+        self.dependencies = dependencies
+        self.server = server
+        self.fail_apply_for: set[str] = set()
+
+    def fetch(self, ctx: Ctx, ref: Ref) -> RawState:
+        value = self.server.store.get(ref.key())
+        return copy.deepcopy(value) if value is not None else None
+
+    def normalize(self, raw: RawState) -> CanonicalState:
+        if not isinstance(raw, dict):
+            return None
+        return {k: raw[k] for k in sorted(raw) if k != "serverGeneratedId"}
+
+    def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
+        if diff.ref.key() in self.fail_apply_for:
+            self.server.write_count += 1  # the failed write may have landed
+            return ApplyResult(ok=False, message="injected failure")
+        self.server.write_count += 1
+        if diff.desired is None:
+            self.server.store.pop(diff.ref.key(), None)
+        else:
+            assert isinstance(diff.desired, dict)
+            self.server.store[diff.ref.key()] = copy.deepcopy(diff.desired)
+        return ApplyResult(ok=True)
+
+    def rollback(self, ctx: Ctx, ref: Ref, snapshot: RawState) -> ApplyResult:
+        self.server.write_count += 1
+        if snapshot is None:
+            self.server.store.pop(ref.key(), None)
+        else:
+            assert isinstance(snapshot, dict)
+            self.server.store[ref.key()] = copy.deepcopy(snapshot)
+        return ApplyResult(ok=True, message="restored")
+
+
+@pytest.fixture
+def world(state_home: Any, settings: config.Settings) -> dict[str, Any]:
+    server = FakeServer()
+    registry = Registry()
+    res_a = FakeResource(server, kind="alpha")
+    res_b = FakeResource(server, kind="beta", dependencies=("alpha",))
+    registry.register(res_a)
+    registry.register(res_b)
+    ctx = Ctx(client=None, resolver=None)  # type: ignore[arg-type]
+    candidate = CandidateStore("orch.example.com")
+    return {
+        "server": server, "registry": registry, "ctx": ctx,
+        "candidate": candidate, "settings": settings,
+        "alpha": res_a, "beta": res_b,
+    }
+
+
+def _plan(world: dict[str, Any]) -> txn.Plan:
+    return txn.build_plan(world["ctx"], world["registry"], world["candidate"])
+
+
+def test_commit_applies_and_is_idempotent(world: dict[str, Any]) -> None:
+    world["candidate"].set_path(Ref("alpha", "one"), ["speed"], 10)
+    report = txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"])
+    assert report.ok and report.state == TxnState.CONFIRMED
+    assert world["server"].store["alpha:one"] == {"speed": 10}
+
+    # DoD #1: same command twice — second run reports no changes, zero writes.
+    writes = world["server"].write_count
+    report2 = txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"])
+    assert report2.ok and report2.state == "NO_CHANGES"
+    assert world["server"].write_count == writes
+
+
+def test_dependency_ordering(world: dict[str, Any]) -> None:
+    # beta depends on alpha; submit beta first — apply order must be alpha, beta.
+    world["candidate"].set_path(Ref("beta", "b1"), ["v"], 1)
+    world["candidate"].set_path(Ref("alpha", "a1"), ["v"], 2)
+    report = txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"])
+    assert report.applied == ["alpha:a1", "beta:b1"]
+
+
+def test_partial_failure_reverts_to_snapshot(world: dict[str, Any]) -> None:
+    # Pre-existing state for alpha:one; changeset touches alpha then beta;
+    # beta fails -> everything back to pre-commit snapshot (DoD #5).
+    world["server"].store["alpha:one"] = {"speed": 1}
+    world["beta"].fail_apply_for.add("beta:two")
+    world["candidate"].set_path(Ref("alpha", "one"), ["speed"], 99)
+    world["candidate"].set_path(Ref("beta", "two"), ["mtu"], 9000)
+
+    report = txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"])
+    assert not report.ok
+    assert report.state == TxnState.REVERTED
+    assert world["server"].store["alpha:one"] == {"speed": 1}
+    assert "beta:two" not in world["server"].store
+    assert "alpha:one" in report.reverted
+    assert any("FAILED" in m for m in report.messages)
+
+    journal = list_txns()[0]
+    assert journal.meta.state == TxnState.REVERTED
+    events = [e["event"] for e in journal.events()]
+    assert "REVERT_START" in events and "REVERT_RESULT" in events
+
+
+def test_verify_failure_triggers_revert(world: dict[str, Any]) -> None:
+    class LyingResource(FakeResource):
+        def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
+            self.server.write_count += 1
+            return ApplyResult(ok=True)  # claims success, writes nothing
+
+    lying = LyingResource(world["server"], kind="liar")
+    world["registry"].register(lying)
+    world["candidate"].set_path(Ref("liar", "x"), ["a"], 1)
+    report = txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"])
+    assert not report.ok
+    assert any("verify" in m for m in report.messages)
+
+
+def test_irreversible_guards(world: dict[str, Any]) -> None:
+    world["alpha"].reversibility = Reversibility.IRREVERSIBLE
+    world["candidate"].set_path(Ref("alpha", "one"), ["v"], 1)
+    plan = _plan(world)
+    with pytest.raises(txn.CommitError, match="--force"):
+        txn.commit(world["ctx"], world["registry"], plan, world["settings"])
+    with pytest.raises(txn.CommitError, match="fake safety"):
+        txn.commit(world["ctx"], world["registry"], plan, world["settings"], confirm_minutes=5)
+    report = txn.commit(world["ctx"], world["registry"], plan, world["settings"], force=True)
+    assert report.ok
+
+
+def test_low_tier_refused_in_confirm_changeset(world: dict[str, Any],
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    world["alpha"].tier = Tier.GENERATED
+    world["candidate"].set_path(Ref("alpha", "one"), ["v"], 1)
+    plan = _plan(world)
+    assert any("tier-1" in w for w in plan.warnings)
+    with pytest.raises(txn.CommitError, match="allow-untransactional"):
+        txn.commit(world["ctx"], world["registry"], plan, world["settings"], confirm_minutes=5)
+    monkeypatch.setattr("pyecsdwan.watchdog.arm", lambda *a, **k: 4_000_000)
+    report = txn.commit(
+        world["ctx"], world["registry"], plan, world["settings"],
+        confirm_minutes=5, allow_untransactional=True,
+    )
+    assert report.ok and report.state == TxnState.APPLIED_UNCONFIRMED
+
+
+def test_ownership_refused_without_override(world: dict[str, Any]) -> None:
+    class OwnedResource(FakeResource):
+        def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:
+            return "template-group Branch-Std"
+
+    owned = OwnedResource(world["server"], kind="owned")
+    world["registry"].register(owned)
+    world["candidate"].set_path(Ref("owned", "x"), ["a"], 1)
+    plan = _plan(world)
+    assert any("managed-by" in w for w in plan.warnings)
+    with pytest.raises(txn.CommitError, match="--override-template"):
+        txn.commit(world["ctx"], world["registry"], plan, world["settings"])
+    report = txn.commit(
+        world["ctx"], world["registry"], plan, world["settings"], override_template=True
+    )
+    assert report.ok
+
+
+def test_confirm_requires_api_key(world: dict[str, Any]) -> None:
+    world["settings"].api_key = None
+    world["candidate"].set_path(Ref("alpha", "one"), ["v"], 1)
+    with pytest.raises(txn.CommitError, match="API-key"):
+        txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"],
+                   confirm_minutes=5)
+
+
+def test_commit_confirm_then_confirm_pending(world: dict[str, Any],
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("pyecsdwan.watchdog.arm", lambda *a, **k: 4_000_000)
+    world["candidate"].set_path(Ref("alpha", "one"), ["v"], 7)
+    report = txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"],
+                        confirm_minutes=10)
+    assert report.ok and report.state == TxnState.APPLIED_UNCONFIRMED
+    assert report.confirm_deadline is not None
+
+    confirm = txn.confirm_pending(world["settings"])
+    assert confirm.ok and confirm.state == TxnState.CONFIRMED
+    journal = TxnJournal.open(list_txns()[0].dir)
+    assert journal.meta.state == TxnState.CONFIRMED
+    assert journal.confirm_marker.exists()
+    # Nothing pending anymore.
+    again = txn.confirm_pending(world["settings"])
+    assert not again.ok
+
+
+def test_watchdog_arm_failure_auto_reverts(world: dict[str, Any],
+                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a: Any, **k: Any) -> int:
+        raise RuntimeError("no fork for you")
+
+    monkeypatch.setattr("pyecsdwan.watchdog.arm", boom)
+    world["server"].store["alpha:one"] = {"v": 1}
+    world["candidate"].set_path(Ref("alpha", "one"), ["v"], 2)
+    report = txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"],
+                        confirm_minutes=10)
+    assert not report.ok
+    assert world["server"].store["alpha:one"] == {"v": 1}
+    assert report.state == TxnState.REVERTED
+
+
+def test_rollback_history(world: dict[str, Any]) -> None:
+    # change 1
+    world["candidate"].set_path(Ref("alpha", "one"), ["v"], 1)
+    assert txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"]).ok
+    world["candidate"].clear()
+    # change 2
+    world["candidate"].set_path(Ref("alpha", "one"), ["v"], 2)
+    assert txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"]).ok
+    world["candidate"].clear()
+    assert world["server"].store["alpha:one"] == {"v": 2}
+
+    # rollback 1 = undo change 2
+    report = txn.rollback_history_txn(world["ctx"], world["registry"], world["settings"], n=1)
+    assert report.ok
+    assert world["server"].store["alpha:one"] == {"v": 1}
+    # the rollback is itself a confirmed txn; rolling back 1 again undoes it
+    report2 = txn.rollback_history_txn(world["ctx"], world["registry"], world["settings"], n=1)
+    assert report2.ok
+    assert world["server"].store["alpha:one"] == {"v": 2}
+
+
+def test_rollback_out_of_range(world: dict[str, Any]) -> None:
+    report = txn.rollback_history_txn(world["ctx"], world["registry"], world["settings"], n=3)
+    assert not report.ok
+
+
+def test_orphan_recovery(world: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("pyecsdwan.watchdog.arm", lambda *a, **k: 4_000_000)
+    world["server"].store["alpha:one"] = {"v": "before"}
+    world["candidate"].set_path(Ref("alpha", "one"), ["v"], "after")
+    report = txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"],
+                        confirm_minutes=10)
+    assert report.ok
+    assert world["server"].store["alpha:one"] == {"v": "after"}
+
+    # CLI and watchdog both die: pid 4000000 does not exist -> orphaned.
+    pending = txn.pending_rollbacks()
+    assert len(pending) == 1
+    result = txn.revert_txn_dir(pending[0].dir, reason="test recovery",
+                                ctx=world["ctx"], registry=world["registry"])
+    assert result.ok
+    assert world["server"].store["alpha:one"] == {"v": "before"}
+    assert not txn.pending_rollbacks()
+
+
+def test_delete_resource_roundtrip(world: dict[str, Any]) -> None:
+    world["server"].store["alpha:gone"] = {"v": 1}
+    world["candidate"].delete(Ref("alpha", "gone"))
+    report = txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"])
+    assert report.ok
+    assert "alpha:gone" not in world["server"].store
+    # rollback restores the deleted object from its snapshot
+    restore = txn.rollback_history_txn(world["ctx"], world["registry"], world["settings"], n=1)
+    assert restore.ok
+    assert world["server"].store["alpha:gone"] == {"v": 1}
