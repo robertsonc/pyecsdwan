@@ -19,12 +19,18 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from pyecsdwan import config
 from pyecsdwan.contract import Ref
+
+
+class CandidateCorruptError(Exception):
+    """The on-disk candidate store could not be parsed; it has been quarantined."""
 
 
 def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -86,8 +92,12 @@ class CandidateStore:
             node = nxt
         if path:
             node[path[-1]] = value
-        # A later set under a previously deleted subtree cancels that delete.
-        item.delete_paths = [p for p in item.delete_paths if p != path[: len(p)]]
+        # Drop only an exact-match delete of this same path (set overrides a
+        # prior delete of the identical leaf). A delete of a *parent* subtree
+        # is preserved — desired_for prunes the base first, then merges this
+        # set on top, giving correct Junos semantics ("delete wan; set wan 9 …"
+        # leaves only label 9).
+        item.delete_paths = [p for p in item.delete_paths if p != path]
         self._save()
 
     def set_desired(self, ref: Ref, desired: dict[str, Any]) -> None:
@@ -132,11 +142,13 @@ class CandidateStore:
             return None
         if item.mode == "replace":
             return copy.deepcopy(item.intent)
-        base = current_canonical if isinstance(current_canonical, dict) else {}
-        desired = deep_merge(base, item.intent)
+        base = copy.deepcopy(current_canonical) if isinstance(current_canonical, dict) else {}
+        # Prune the deleted subtrees from the base FIRST, then merge intent, so
+        # a `delete <subtree>` followed by a `set` under it keeps only the set
+        # value (the delete is honored, not silently cancelled).
         for path in item.delete_paths:
-            prune_path(desired, path)
-        return desired
+            prune_path(base, path)
+        return deep_merge(base, item.intent)
 
     # -- persistence ---------------------------------------------------------
 
@@ -151,8 +163,21 @@ class CandidateStore:
             return
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except OSError:
             return
+        except json.JSONDecodeError as exc:
+            # A corrupt candidate must not silently read as empty — that would
+            # make commit report "no changes" and the next save overwrite the
+            # evidence. Quarantine it and tell the operator.
+            corrupt = self.path.with_suffix(".corrupt")
+            try:
+                self.path.replace(corrupt)
+            except OSError:
+                corrupt = self.path
+            raise CandidateCorruptError(
+                f"candidate store {self.path} is corrupt ({exc}); moved to {corrupt}. "
+                f"Re-stage your changes."
+            ) from exc
         for entry in data.get("items", []):
             item = CandidateItem(
                 ref_key=entry["ref_key"],
@@ -164,6 +189,21 @@ class CandidateStore:
 
     def _save(self) -> None:
         payload = {"format": 1, "items": [dataclasses.asdict(i) for i in self.items.values()]}
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-        tmp.replace(self.path)
+        # Unique temp name + fsync + 0o600: two shells staging against the same
+        # host must not O_TRUNC each other's staging file, and the candidate can
+        # hold secret config values.
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(self.path.parent), prefix=self.path.name + ".", suffix=".tmp"
+        )
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, sort_keys=True)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self.path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise

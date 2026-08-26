@@ -31,31 +31,71 @@ log = structlog.get_logger("pyecsdwan.jobs")
 _DONE_STATUSES = frozenset(
     s.lower() for s in ("done", "completed", "complete", "finished", "failed", "error", "cancelled")
 )
+#: Statuses that are explicitly still in flight — a record wearing one of
+#: these is NOT finished, even at percentComplete 100 (the bar can hit 100
+#: before the task is stamped terminal).
+_IN_FLIGHT = frozenset(
+    s.lower() for s in ("in progress", "progress", "queued", "running", "pending")
+)
+
+
+def _is_in_flight(status: str) -> bool:
+    return any(marker in status for marker in _IN_FLIGHT)
 
 
 def _record_finished(rec: dict[str, Any]) -> bool:
+    status = str(rec.get("taskStatus", "")).lower()
+    if _is_in_flight(status):
+        return False
     if rec.get("endTime"):
         return True
     if isinstance(rec.get("percentComplete"), (int, float)) and rec["percentComplete"] >= 100:
         return True
-    status = str(rec.get("taskStatus", "")).lower()
     return any(marker in status for marker in _DONE_STATUSES)
 
 
 def _record_succeeded(rec: dict[str, Any]) -> bool:
     # Field experience (see docs/research/expert-repo.md): taskStatus is the
-    # reliable signal; completionStatus can stay false even on success (e.g.
-    # ECOS upgrades). Key on taskStatus text first, completionStatus only as a
-    # tiebreaker when taskStatus says nothing either way.
+    # reliable terminal signal, but a "Completed" record can still carry an
+    # error in `result` — the verified success test is
+    # taskStatus == COMPLETED AND result startswith "Success". completionStatus
+    # is unreliable (false even on success for ECOS upgrades) and used only as
+    # a last-resort tiebreaker.
     status = str(rec.get("taskStatus", "")).lower()
     if any(bad in status for bad in ("fail", "error", "cancel")):
         return False
+    result = str(rec.get("result", "")).strip().lower()
     if any(good in status for good in ("done", "complete", "finish", "success")):
+        # A terminal record can still carry an error in `result` (a "Completed"
+        # push that failed on some appliances). Reject only on an explicit
+        # error token; a plain success message ("template pushed") passes.
+        if any(bad in result for bad in ("fail", "error", "denied", "unable", "cannot")):
+            return False
         return True
     completion = rec.get("completionStatus")
     if completion is not None:
         return bool(completion)
     return True
+
+
+def extract_action_key(response: Any) -> str | None:
+    """Pull an action/client key out of a write response, if one is present.
+
+    Many Orchestrator writes are fire-and-204 (the template push is one: its
+    per-appliance results land in the action log under a guid, not in the
+    response). Others return ``{"clientKey": ...}`` / ``{"actionKey": ...}``.
+    Returns the key when the response carries one, else None so the caller
+    proceeds without polling."""
+    if isinstance(response, str) and response.strip():
+        # appliance_resync / delete_ecos_image return a bare-string key.
+        candidate = response.strip().strip('"')
+        return candidate or None
+    if isinstance(response, dict):
+        for field in ("clientKey", "actionKey", "action_key", "guid", "key"):
+            val = response.get(field)
+            if isinstance(val, str) and val:
+                return val
+    return None
 
 
 def wait_for_action(

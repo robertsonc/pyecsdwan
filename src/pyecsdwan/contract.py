@@ -19,8 +19,18 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import urllib.parse
 from collections.abc import Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
+
+
+def _quote(part: str) -> str:
+    # Escape ':' and '%' so component boundaries in a Ref key are unambiguous.
+    return urllib.parse.quote(part, safe="")
+
+
+def _unquote(part: str) -> str:
+    return urllib.parse.unquote(part)
 
 if TYPE_CHECKING:
     from pyecsdwan.client import OrchClient
@@ -71,20 +81,31 @@ class Ref:
     appliance: str | None = None
 
     def key(self) -> str:
+        # Percent-escape each component so a ':' inside a name (e.g. a BGP
+        # neighbor "peer:10.1.1.1") can't corrupt round-tripping through the
+        # journal, candidate store, or resolver.
+        kind = _quote(self.kind)
+        name = _quote(self.name)
+        if self.appliance is not None:
+            return f"{kind}:{_quote(self.appliance)}:{name}"
+        return f"{kind}:{name}"
+
+    def __str__(self) -> str:
         if self.appliance is not None:
             return f"{self.kind}:{self.appliance}:{self.name}"
         return f"{self.kind}:{self.name}"
-
-    def __str__(self) -> str:
-        return self.key()
 
     @staticmethod
     def from_key(key: str) -> Ref:
         parts = key.split(":")
         if len(parts) == 2:
-            return Ref(kind=parts[0], name=parts[1])
+            return Ref(kind=_unquote(parts[0]), name=_unquote(parts[1]))
         if len(parts) == 3:
-            return Ref(kind=parts[0], appliance=parts[1], name=parts[2])
+            return Ref(
+                kind=_unquote(parts[0]),
+                appliance=_unquote(parts[1]),
+                name=_unquote(parts[2]),
+            )
         raise ValueError(f"malformed ref key: {key!r}")
 
 
@@ -194,6 +215,10 @@ class Resource:
     #: Kinds that must be applied before this kind within one changeset
     #: (e.g. template-group before template-group-association).
     dependencies: tuple[str, ...] = ()
+    #: Whether whole-resource ``delete`` is meaningful. False for singleton
+    #: tables (interface-labels) that have no "absent" state — deleting an
+    #: entry there means removing a sub-key, not the resource.
+    deletable: bool = True
     #: Optional JSON-schema-ish hint used by the CLI for YAML input validation.
     desired_state_doc: str = ""
 
