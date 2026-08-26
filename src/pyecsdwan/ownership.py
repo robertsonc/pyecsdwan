@@ -35,6 +35,12 @@ KIND_TO_TEMPLATE_SECTIONS: dict[str, tuple[str, ...]] = {
     "appliance/dhcp": ("dhcpd", "dhcpFailover"),
     "appliance/shaper": ("shaper",),
     "appliance/nat": ("natMaps",),
+    # UNVERIFIED — not confirmed against a live Default Template Group's
+    # section list (that group didn't select an obvious interfaces/deployment
+    # section this session). "deployment"/"interfaces" are the section-name
+    # candidates the Orchestrator UI groups this config under; revisit once a
+    # live group with an interfaces template selected is available (#12).
+    "appliance/deployment": ("deployment", "interfaces"),
 }
 
 

@@ -136,6 +136,231 @@ def _seed_bgp_system() -> dict[str, dict[str, Any]]:
 # -- end bgp (#16) seed data -----------------------------------------------------
 
 
+# -- deployment (#12) ---------------------------------------------------------
+#
+# Genericized capture of a real GET /appliance/rest?...&url=deployment
+# response against a lab Orchestrator this session (docs/research/
+# appliance-config.md + resources/deployment.py docstring). Six interfaces,
+# one running a DHCP server, matching the sampled appliance's shape.
+
+
+def _seed_deployment() -> dict[str, Any]:
+    def _ip(
+        devnum_role: str,
+        ip: str,
+        mask: str,
+        *,
+        label: str,
+        lan_side: bool,
+        wan_side: bool,
+        wan_nexthop: str = "",
+        zone: int = 0,
+        dhcpd: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "ip": ip,
+            "mask": mask,
+            "wanNexthop": wan_nexthop,
+            "dhcp": False,
+            "lanSide": lan_side,
+            "wanSide": wan_side,
+            "label": label,
+            "harden": 0,
+            "behindNAT": False,
+            "maxBW": {"inbound": 0, "outbound": 0},
+            "zone": zone,
+            "comment": "",
+            "vrf": 0,
+            "role": devnum_role,
+            "proxy_arp": False,
+            "dhcpd": dhcpd
+            if dhcpd is not None
+            else {"type": "none", "server": {}, "relay": {}},
+        }
+
+    return {
+        # Read-only hardware/license limits — Deployment.normalize() strips
+        # this key entirely; kept here only so the mock's GET response
+        # matches the real appliance shape byte-for-byte.
+        "scalars": {
+            "maxWanBandwidth": 1000000,
+            "defaultMaxWanBandwidth": 1000000,
+            "maxRxTargetBandwidth": 1000000,
+            "maxTunnels": 500,
+            "maxIKETunnels": 500,
+            "minMtu": 576,
+            "maxMtu": 9216,
+            "maxRouteMapEntries": 512,
+            "maxOptMapEntries": 256,
+            "maxQoSMapEntries": 256,
+            "maxNatMapEntries": 512,
+            "isPortalLicensed": True,
+            "portalLicenseType": "boost",
+            "supportServerMode": True,
+            "isLicenseRequired": False,
+            "isDynamicLimits": False,
+            "isDynamicInterface": True,
+            "isModel4Port": False,
+            "isModel10G": False,
+            "isModelSingleDisk": True,
+            "isModelPowerCycle": False,
+            "num1GigPorts": 8,
+            "num1GigFiberPorts": 0,
+            "numMgmtPorts": 1,
+            "num10GigPorts": 0,
+        },
+        "sysConfig": {
+            "mode": "router",
+            "useMgmt0": True,
+            "tenG": False,
+            "bonding": False,
+            "maxBW": 100000,
+            "propagateLinkDown": False,
+            "singleBridge": False,
+            "inline": False,
+            "vrfEnable": False,
+            "serverPerSegment": False,
+            "ifLabels": {"lan": ["Data", "Voice"], "wan": ["MPLS1", "INET1"]},
+            "haIf": "",
+            "zones": [],
+            "vrfs": [],
+            "roles": [],
+            "vrfZonesMap": {},
+            "maxInBW": 100000,
+            "maxInSysBW": 100000,
+            "maxObSysBW": 100000,
+            "license": "boost",
+        },
+        "mgmtIfData": {
+            "mgmt0": {
+                "dhcp": False,
+                "ip": "10.0.0.10",
+                "mask": "255.255.255.0",
+                "nexthop": "10.0.0.1",
+            },
+        },
+        "modeIfs": [
+            {
+                "devNum": "rtr1",
+                "ifName": "lan0",
+                "applianceIPs": [
+                    _ip(
+                        "lan",
+                        "10.1.1.1",
+                        "255.255.255.0",
+                        label="Data",
+                        lan_side=True,
+                        wan_side=False,
+                        zone=0,
+                    )
+                ],
+            },
+            {
+                "devNum": "rtr1",
+                "ifName": "lan1",
+                "applianceIPs": [
+                    _ip(
+                        "lan",
+                        "10.1.2.1",
+                        "255.255.255.0",
+                        label="Voice",
+                        lan_side=True,
+                        wan_side=False,
+                        zone=0,
+                        dhcpd={
+                            "type": "server",
+                            "server": {
+                                "prefix": "10.1.2.0/24",
+                                "ipStart": "10.1.2.100",
+                                "ipEnd": "10.1.2.200",
+                                "gw": ["10.1.2.1"],
+                                "dns": ["10.1.2.1"],
+                                "ntpd": [],
+                                "netbios": [],
+                                "netbiosNodeType": 0,
+                                "maxLease": 86400,
+                                "defaultLease": 43200,
+                                "ip_range": {},
+                                "options": {},
+                                "host": {},
+                                "failover": "",
+                            },
+                            "relay": {},
+                        },
+                    )
+                ],
+            },
+            {
+                "devNum": "rtr1",
+                "ifName": "wan0",
+                "applianceIPs": [
+                    _ip(
+                        "wan",
+                        "203.0.113.10",
+                        "255.255.255.0",
+                        label="MPLS1",
+                        lan_side=False,
+                        wan_side=True,
+                        wan_nexthop="203.0.113.1",
+                        zone=0,
+                    )
+                ],
+            },
+            {
+                "devNum": "rtr1",
+                "ifName": "wan1",
+                "applianceIPs": [
+                    _ip(
+                        "wan",
+                        "198.51.100.10",
+                        "255.255.255.0",
+                        label="INET1",
+                        lan_side=False,
+                        wan_side=True,
+                        wan_nexthop="198.51.100.1",
+                        zone=0,
+                    )
+                ],
+            },
+            {"devNum": "rtr1", "ifName": "wan2", "applianceIPs": []},
+            {"devNum": "rtr1", "ifName": "lan2", "applianceIPs": []},
+        ],
+        "dpRoutes": [],
+        # Real top-level key (issue text didn't mention it) — pass-through
+        # unknown config, never dropped by Deployment.normalize().
+        "vifs": {"pppoe": [], "bondedIfs": []},
+        "dhcpFailover": {},
+    }
+
+
+def _validate_deployment(body: Any, force_fail: bool) -> dict[str, Any]:
+    """Minimal mock of ``deployment/validate``: ``{err, rebootRequired}``.
+
+    ``force_fail`` lets a test arm one deterministic failure (mirrors
+    ``fail_next_action``); otherwise a body missing a mask for a configured
+    IP is the one condition rejected, so the happy path is always empty.
+    """
+    if force_fail:
+        return {
+            "err": "mock validation failure: conflicting IP allocation",
+            "rebootRequired": False,
+        }
+    if isinstance(body, dict):
+        for iface in body.get("modeIfs") or []:
+            if not isinstance(iface, dict):
+                continue
+            for entry in iface.get("applianceIPs") or []:
+                if isinstance(entry, dict) and entry.get("ip") and not entry.get("mask"):
+                    return {
+                        "err": (
+                            f"{iface.get('devNum')}.{iface.get('ifName')}: "
+                            f"ip {entry.get('ip')} missing mask"
+                        ),
+                        "rebootRequired": False,
+                    }
+    return {"err": "", "rebootRequired": False}
+
+
 # -- state -------------------------------------------------------------------
 
 
@@ -181,6 +406,10 @@ class MockState:
     #: Per-appliance BGP neighbor table, keyed by nePk -> {neighborKey: {...}}.
     #: Empty for every seeded appliance (matches the live lab sample).
     bgp_neighbor: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # -- deployment (#12) --
+    #: Consumed by the next POST .../url=deployment/validate call, like
+    #: fail_next_action: forces one deterministic {err: ...} response.
+    deployment_fail_validate: bool = False
 
     def reset(self) -> None:
         """Restore every field to its seeded default (in place)."""
@@ -644,6 +873,20 @@ def create_app(state: MockState | None = None) -> FastAPI:
         """Proxy to a per-appliance ECOS store keyed by (nePk, url). Writes set
         hasUnsavedChanges on the appliance until saveChanges clears it."""
         store = mock.appliance_ecos.setdefault(nePk, {})
+        # -- deployment (#12) --
+        # deployment/validate is a virtual ECOS endpoint: it never touches
+        # the ecos store, it only inspects the candidate body and reports
+        # {err, rebootRequired} per the real validate-then-apply contract.
+        if url == "deployment/validate":
+            body = await _json_body(request)
+            force_fail = mock.deployment_fail_validate
+            mock.deployment_fail_validate = False
+            return _validate_deployment(body, force_fail)
+        if url == "deployment" and request.method == "GET" and url not in store:
+            # Seed realistic interface/IP fixture data on first read so
+            # tests exercise the real captured shape, not an empty object.
+            return _seed_deployment()
+        # -- end deployment (#12) --
         if request.method == "GET":
             return store.get(url, {})
         if request.method == "DELETE":
