@@ -1,15 +1,19 @@
-"""Unit tests for pyecsdwan.jobs: async action-key and keyless window polling."""
+"""Unit tests for pyecsdwan.jobs: action-key polling, keyless window polling,
+and the save-changes primitive."""
 
+import json
 import time
 
 import httpx
+import pytest
 import respx
 
 from pyecsdwan.client import OrchClient
-from pyecsdwan.jobs import wait_for_action, wait_for_recent_action
+from pyecsdwan.jobs import save_changes, wait_for_action, wait_for_recent_action
 
 STATUS_URL = "https://orch.example.com/gms/rest/action/status"
 ACTION_LOG_URL = "https://orch.example.com/gms/rest/action"
+SAVE_URL = "https://orch.example.com/gms/rest/appliance/saveChanges"
 
 
 @respx.mock
@@ -216,3 +220,90 @@ def test_keyless_window_times_out_while_in_flight(settings, monkeypatch):
     assert outcome.state == "TIMEOUT"
     assert outcome.key == "guid-A"  # the last-seen guid is carried for triage
     assert outcome.detail == "job did not finish within 5.0s"
+
+
+# -- save_changes (issue #11) --------------------------------------------------
+
+
+@respx.mock
+def test_save_changes_batches_dedupes_and_awaits(settings, monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    save_route = respx.post(SAVE_URL).mock(
+        return_value=httpx.Response(200, json={"clientKey": "sk-1"})
+    )
+    status_route = respx.get(STATUS_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "nepk": "1.NE",
+                    "taskStatus": "Completed",
+                    "percentComplete": 100,
+                    "completionStatus": True,
+                    "endTime": 1724680000000,
+                    "result": "Success",
+                },
+                {
+                    "nepk": "3.NE",
+                    "taskStatus": "Completed",
+                    "percentComplete": 100,
+                    "completionStatus": True,
+                    "endTime": 1724680000001,
+                    "result": "Success",
+                },
+            ],
+        )
+    )
+    outcome = save_changes(OrchClient(settings), ["3.NE", "1.NE", "3.NE"], settings)
+    assert outcome.state == "SUCCESS"
+    assert outcome.key == "sk-1"
+    # One batched POST: duplicates collapsed, order deterministic.
+    assert save_route.call_count == 1
+    assert json.loads(save_route.calls.last.request.content) == {"nePks": ["1.NE", "3.NE"]}
+    assert status_route.calls.last.request.url.params["key"] == "sk-1"
+    assert outcome.per_appliance == {"1.NE": "Success", "3.NE": "Success"}
+
+
+@respx.mock
+def test_save_changes_failed_action_is_reported(settings, monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    respx.post(SAVE_URL).mock(return_value=httpx.Response(200, json={"clientKey": "sk-2"}))
+    respx.get(STATUS_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "taskStatus": "Failed",
+                "percentComplete": 100,
+                "completionStatus": False,
+                "endTime": 1724680000000,
+                "result": "disk full",
+            },
+        )
+    )
+    outcome = save_changes(OrchClient(settings), ["3.NE"], settings)
+    assert outcome.state == "FAILED"
+    assert "disk full" in outcome.detail
+
+
+def test_save_changes_empty_list_is_noop(settings):
+    # No respx routes active: any HTTP request would error the test.
+    outcome = save_changes(OrchClient(settings), [], settings)
+    assert outcome.state == "SUCCESS"
+    assert outcome.key == ""
+    assert "no appliances" in outcome.detail
+
+
+def test_save_changes_rejects_invalid_ne_pk(settings):
+    with pytest.raises(ValueError, match="invalid appliance nePk"):
+        save_changes(OrchClient(settings), ["BR1-EC"], settings)
+
+
+@respx.mock
+def test_save_changes_keyless_response_tolerated(settings):
+    # Off-spec 204 with no clientKey: accepted-but-unawaited, not a failure.
+    # No /action/status route is registered, so any poll attempt would fail.
+    route = respx.post(SAVE_URL).mock(return_value=httpx.Response(204))
+    outcome = save_changes(OrchClient(settings), ["3.NE"], settings)
+    assert route.call_count == 1
+    assert outcome.state == "SUCCESS"
+    assert "not awaited" in outcome.detail
