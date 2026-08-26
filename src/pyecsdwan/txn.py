@@ -18,6 +18,7 @@ import dataclasses
 import datetime as _dt
 import os
 import signal
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +97,12 @@ def build_plan(ctx: Ctx, registry: Registry, candidate: CandidateStore) -> Plan:
     for ref in ordered:
         cand = by_key[ref.key()]
         resource = registry.get(ref.kind)
+        if cand.mode == "delete" and not resource.deletable:
+            raise CommitError(
+                f"{ref.kind} is a singleton and cannot be deleted as a whole; "
+                f"delete individual entries instead (e.g. "
+                f"`delete {ref.kind} {ref.name} wan <label-id>`)"
+            )
         current_raw = resource.fetch(ctx, ref)
         current = resource.normalize(current_raw)
         desired_input = candidate.desired_for(cand, current)
@@ -174,7 +181,9 @@ def commit(
             f"server state moved since compare for: {', '.join(stale)} (diff recomputed)"
         )
     if not work:
-        journal.set_state(TxnState.CONFIRMED, note="no changes at commit time")
+        # Record as AUDIT_ONLY, never CONFIRMED: a no-op commit must not enter
+        # the rollback history and shift every `rollback <n>` index by one.
+        journal.set_state(TxnState.AUDIT_ONLY, note="no changes at commit time")
         report.ok = True
         report.state = "NO_CHANGES"
         report.messages.append("no changes (server already matches)")
@@ -233,7 +242,7 @@ def commit(
         journal.set_state(TxnState.APPLIED_UNCONFIRMED)
         try:
             pid = _watchdog.arm(journal.dir, settings)
-        except (RuntimeError, OSError) as exc:
+        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
             # No watchdog = no safety net. Honor confirm semantics by
             # reverting immediately rather than leaving an unprotected commit.
             report.messages.append(f"watchdog failed to arm ({exc}); auto-reverting")
@@ -249,7 +258,7 @@ def commit(
         return report
 
     journal.set_state(TxnState.CONFIRMED)
-    prune_history(settings.rollback_history, root=journal_root)
+    prune_history(settings.rollback_history, root=journal_root, host=settings.host)
     report.ok = True
     report.state = TxnState.CONFIRMED
     report.messages.append(f"commit complete: {len(applied)} change(s) applied")
@@ -344,18 +353,30 @@ def _revert_items(
 def confirm_pending(
     settings: config.Settings, journal_root: Path | None = None, txn_id: str | None = None
 ) -> CommitReport:
-    """Bare ``commit`` inside a confirm window: write marker, stop watchdog."""
+    """Bare ``commit`` inside a confirm window: claim the decision, write the
+    marker, stop the watchdog. Scoped to ``settings.host`` so a confirm against
+    one Orchestrator can never finalize an unconfirmed change on another."""
     from pyecsdwan.journal import list_txns
 
     candidates = [
         t
         for t in list_txns(journal_root)
         if t.meta.state == TxnState.APPLIED_UNCONFIRMED
+        and t.meta.orch_host == settings.host
         and (txn_id is None or t.meta.txn_id == txn_id)
     ]
     if not candidates:
         return CommitReport(ok=False, state="NONE", messages=["no unconfirmed transaction found"])
     txn = candidates[0]
+    # Win the decision atomically; if the watchdog already claimed 'revert',
+    # the confirm loses and we report that rather than a false success.
+    if txn.try_claim("confirm") != "confirm":
+        return CommitReport(
+            ok=False,
+            txn_id=txn.meta.txn_id,
+            state="NONE",
+            messages=[f"transaction {txn.meta.txn_id} is already being rolled back"],
+        )
     txn.write_confirm_marker()
     txn.append("CONFIRM")
     pid = txn.watchdog_pid()
@@ -364,8 +385,18 @@ def confirm_pending(
             os.kill(pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
-    txn.set_state(TxnState.CONFIRMED)
-    prune_history(settings.rollback_history, root=journal_root)
+    # Re-open and compare-and-swap on state: never clobber a REVERTED/REVERTING
+    # record the watchdog may have written from a race we didn't win.
+    fresh = TxnJournal.open(txn.dir)
+    if fresh.meta.state not in (TxnState.APPLIED_UNCONFIRMED, TxnState.CONFIRMED):
+        return CommitReport(
+            ok=False,
+            txn_id=txn.meta.txn_id,
+            state=fresh.meta.state,
+            messages=[f"transaction {txn.meta.txn_id} was already {fresh.meta.state}"],
+        )
+    fresh.set_state(TxnState.CONFIRMED)
+    prune_history(settings.rollback_history, root=journal_root, host=settings.host)
     return CommitReport(
         ok=True,
         txn_id=txn.meta.txn_id,
@@ -387,10 +418,35 @@ def revert_txn_dir(
         from pyecsdwan.runtime import bootstrap
 
         ctx, registry, _settings = bootstrap()
+    # Never restore one Orchestrator's snapshot into another.
+    client_host = getattr(getattr(ctx.client, "settings", None), "host", None)
+    if client_host is not None and journal.meta.orch_host != client_host:
+        return CommitReport(
+            ok=False,
+            txn_id=journal.meta.txn_id,
+            state="NONE",
+            messages=[
+                f"refusing: transaction targets Orchestrator {journal.meta.orch_host!r} "
+                f"but the session is connected to {client_host!r}"
+            ],
+        )
+    applied = journal.applied_refs()
+    if not applied:
+        # A journal with zero APPLY_START events (e.g. an interrupted Tier-0
+        # `api` call, or a snapshot-phase crash) has nothing to restore.
+        # Marking it REVERTED would be a lie about the fabric — close it out
+        # as AUDIT_ONLY instead.
+        journal.append("REVERT_SKIPPED", reason="no applied changes to revert")
+        journal.set_state(TxnState.AUDIT_ONLY)
+        return CommitReport(
+            ok=True,
+            txn_id=journal.meta.txn_id,
+            state=TxnState.AUDIT_ONLY,
+            messages=["nothing to revert (no changes were applied)"],
+        )
     journal.append("REVERT_TRIGGERED", reason=reason)
     report = CommitReport(ok=False, txn_id=journal.meta.txn_id)
     snapshots = journal.snapshots()
-    applied = journal.applied_refs()
     items: list[PlanItem] = []
     for key in reversed(applied):
         ref = Ref.from_key(key)
@@ -421,7 +477,7 @@ def rollback_history_txn(
 ) -> CommitReport:
     """Junos-style ``rollback <n>``: restore the nth prior confirmed
     transaction's pre-change snapshots, journaled as a new transaction."""
-    history = committed_history(journal_root)
+    history = committed_history(journal_root, host=settings.host)
     if n < 1 or n > len(history):
         return CommitReport(
             ok=False,
@@ -429,15 +485,16 @@ def rollback_history_txn(
             messages=[f"no such rollback point {n}; history depth is {len(history)}"],
         )
     source = history[n - 1]
-    snapshots = source.snapshots()
-    if not snapshots:
+    applied = source.applied_refs()
+    if not applied:
         return CommitReport(
             ok=False,
             state="NONE",
-            messages=[f"transaction {source.meta.txn_id} has no snapshots to restore"],
+            messages=[f"transaction {source.meta.txn_id} applied no changes; nothing to roll back"],
         )
+    snapshots = source.snapshots()
 
-    refs = [Ref.from_key(k) for k in source.applied_refs() or list(snapshots)]
+    refs = [Ref.from_key(k) for k in applied]
     journal = TxnJournal.create(settings.host, refs, root=journal_root)
     journal.append("ROLLBACK_OF", source_txn=source.meta.txn_id, n=n)
     report = CommitReport(ok=False, txn_id=journal.meta.txn_id)
@@ -473,14 +530,17 @@ def rollback_history_txn(
         report.messages.append(
             f"restored {len(report.applied)} resource(s) from transaction {source.meta.txn_id}"
         )
-        prune_history(settings.rollback_history, root=journal_root)
+        prune_history(settings.rollback_history, root=journal_root, host=settings.host)
     return report
 
 
-def pending_rollbacks(journal_root: Path | None = None) -> list[TxnJournal]:
+def pending_rollbacks(
+    journal_root: Path | None = None, host: str | None = None
+) -> list[TxnJournal]:
     """Orphaned unconfirmed transactions (CLI/watchdog died) for
-    ``rollback --pending`` and the startup scan."""
-    return orphaned_txns(journal_root)
+    ``rollback --pending`` and the startup scan, scoped to ``host`` so
+    recovery never touches another Orchestrator's transactions."""
+    return orphaned_txns(journal_root, host=host)
 
 
 def format_report(report: CommitReport) -> str:

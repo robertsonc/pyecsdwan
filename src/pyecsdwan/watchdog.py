@@ -75,8 +75,9 @@ def arm(txn_dir: Path, settings: config.Settings) -> int:
     deadline = time.monotonic() + _ARM_TIMEOUT
     while time.monotonic() < deadline:
         try:
-            pid = int(pid_file.read_text().strip())
-        except (OSError, ValueError):
+            # The pid file is "<pid> <start-token>"; take the first field.
+            pid = int(pid_file.read_text().strip().split()[0])
+        except (OSError, ValueError, IndexError):
             time.sleep(0.05)
             continue
         return pid
@@ -112,13 +113,20 @@ def watch(txn_dir: Path, poll_interval: float = 1.0) -> int:
     """Watch loop (runs inside the daemon, or inline under --foreground)."""
     journal = TxnJournal.open(txn_dir)
     pid = os.getpid()
-    journal.watchdog_pid_file.write_text(str(pid))
+    journal.write_watchdog_pid(pid)
     journal.append("WATCHDOG_ARMED", pid=pid)
     _log(f"watchdog armed pid={pid} txn={journal.meta.txn_id} "
          f"deadline={journal.meta.confirm_deadline}")
 
-    # SIGTERM from `commit` (confirm path) is a clean shutdown.
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    # SIGTERM from `commit` (confirm path) is a clean shutdown *between* poll
+    # iterations. The flag is checked at safe points; during the revert itself
+    # SIGTERM is blocked so a late confirm can't kill the daemon mid-restore.
+    terminate = {"flag": False}
+
+    def _on_term(*_: object) -> None:
+        terminate["flag"] = True
+
+    signal.signal(signal.SIGTERM, _on_term)
 
     if journal.meta.confirm_deadline is None:
         _log("no confirm deadline set; nothing to do")
@@ -126,11 +134,10 @@ def watch(txn_dir: Path, poll_interval: float = 1.0) -> int:
     deadline = _dt.datetime.fromisoformat(journal.meta.confirm_deadline)
 
     while True:
-        if journal.confirm_marker.exists():
+        if terminate["flag"] or journal.confirm_marker.exists():
             journal.append("WATCHDOG_EXIT", reason="confirmed")
-            _log("confirm marker seen; exiting")
+            _log("confirm marker/term seen; exiting")
             return 0
-        # Re-read state: an operator may have reverted manually.
         journal = TxnJournal.open(txn_dir)
         if journal.meta.state in TxnState.TERMINAL:
             journal.append("WATCHDOG_EXIT", reason=f"state={journal.meta.state}")
@@ -140,6 +147,17 @@ def watch(txn_dir: Path, poll_interval: float = 1.0) -> int:
             break
         time.sleep(poll_interval)
 
+    # Deadline reached. Re-check the marker one last time, then claim the
+    # decision atomically: if a concurrent `commit` already claimed 'confirm'
+    # (or wrote the marker), stand down without reverting.
+    if journal.confirm_marker.exists() or journal.try_claim("revert") != "revert":
+        journal.append("WATCHDOG_EXIT", reason="confirm won the decision claim")
+        _log("confirm won the race; exiting without revert")
+        return 0
+
+    # Block SIGTERM for the duration of the revert: a late confirm must not
+    # tear the daemon down mid-restore, leaving the fabric half-reverted.
+    _block_sigterm()
     _log("confirm window expired; reverting from journal")
     journal.append("WATCHDOG_REVERT_TRIGGERED")
     try:
@@ -152,6 +170,14 @@ def watch(txn_dir: Path, poll_interval: float = 1.0) -> int:
         return 1
     _log("revert complete")
     return 0
+
+
+def _block_sigterm() -> None:
+    try:
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    except (AttributeError, ValueError, OSError):
+        # Non-POSIX or restricted; the atomic claim is still the real guard.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
 
 def main(argv: list[str] | None = None) -> int:
