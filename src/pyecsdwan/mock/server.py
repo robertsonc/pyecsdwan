@@ -39,7 +39,10 @@ def _seed_appliances() -> list[dict[str, Any]]:
             "hostName": "HUB1-EC",
             "site": "HQ",
             "model": "EC-S",
-            "reachabilityStatus": 1,
+            "state": 1,
+            "reachabilityChannel": 2,
+            "hasUnsavedChanges": False,
+            "rebootRequired": False,
         },
         {
             "nePk": "3.NE",
@@ -47,7 +50,10 @@ def _seed_appliances() -> list[dict[str, Any]]:
             "hostName": "BR1-EC",
             "site": "Branch-1",
             "model": "EC-S",
-            "reachabilityStatus": 1,
+            "state": 1,
+            "reachabilityChannel": 2,
+            "hasUnsavedChanges": False,
+            "rebootRequired": False,
         },
         {
             "nePk": "5.NE",
@@ -55,7 +61,10 @@ def _seed_appliances() -> list[dict[str, Any]]:
             "hostName": "BR2-EC",
             "site": "Branch-2",
             "model": "EC-S",
-            "reachabilityStatus": 1,
+            "state": 1,
+            "reachabilityChannel": 2,
+            "hasUnsavedChanges": False,
+            "rebootRequired": False,
         },
     ]
 
@@ -110,6 +119,9 @@ class MockState:
     security_maps: dict[str, Any] = field(default_factory=_seed_security_maps)
     #: Segment-pair keyed security policy data ("0_0" -> SecurityMaps object).
     security_policies: dict[str, Any] = field(default_factory=dict)
+    #: Per-appliance ECOS store reached via the /appliance/rest proxy:
+    #: {nePk: {ecosPath: payload}}.
+    appliance_ecos: dict[str, dict[str, Any]] = field(default_factory=dict)
     actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     sessions: set[str] = field(default_factory=set)
     next_overlay_id: int = 2
@@ -219,14 +231,17 @@ def create_app(state: MockState | None = None) -> FastAPI:
 
     @auth.post("/authentication/login")
     async def login(request: Request) -> Response:
-        await _json_body(request)  # {user, password, token} — any credentials accepted
+        await _json_body(request)  # {user, password, loginType} — any accepted
         session_id = uuid.uuid4().hex
         mock.sessions.add(session_id)
         response = JSONResponse({"status": "logged in"})
         response.set_cookie(_SESSION_COOKIE, session_id, httponly=True)
+        # Real Orchestrator also sets the CSRF cookie the client echoes back.
+        response.set_cookie("orchCsrfToken", uuid.uuid4().hex)
         return response
 
-    @auth.post("/authentication/logout")
+    # Logout is a GET on the real Orchestrator (the client uses GET too).
+    @auth.get("/authentication/logout")
     async def logout(request: Request) -> Response:
         cookie = request.cookies.get(_SESSION_COOKIE)
         if cookie:
@@ -474,6 +489,34 @@ def create_app(state: MockState | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="body must carry a 'data' object")
         mock.security_policies[map] = body["data"]
         return Response(status_code=204)
+
+    # -- appliance proxy + save-changes -------------------------------------
+
+    @api.api_route("/appliance/rest", methods=["GET", "POST", "PUT", "DELETE"])
+    async def appliance_proxy(request: Request, nePk: str, url: str) -> Any:
+        """Proxy to a per-appliance ECOS store keyed by (nePk, url). Writes set
+        hasUnsavedChanges on the appliance until saveChanges clears it."""
+        store = mock.appliance_ecos.setdefault(nePk, {})
+        if request.method == "GET":
+            return store.get(url, {})
+        if request.method == "DELETE":
+            store.pop(url, None)
+        else:
+            body = await _json_body(request)
+            store[url] = body
+        for appliance in mock.appliances:
+            if appliance.get("nePk") == nePk:
+                appliance["hasUnsavedChanges"] = True
+        return Response(status_code=204)
+
+    @api.post("/appliance/saveChanges")
+    async def save_changes(request: Request, nePk: str | None = None) -> Any:
+        body = await _json_body(request)
+        ne_pks = [nePk] if nePk else (body.get("nePks", []) if isinstance(body, dict) else [])
+        for appliance in mock.appliances:
+            if appliance.get("nePk") in ne_pks:
+                appliance["hasUnsavedChanges"] = False
+        return {"clientKey": mock.new_action(ne_pks=[str(p) for p in ne_pks])}
 
     # -- catch-all (must be registered last on this router) -----------------
 

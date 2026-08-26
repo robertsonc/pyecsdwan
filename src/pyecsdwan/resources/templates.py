@@ -17,12 +17,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from pyecsdwan import jobs
 from pyecsdwan.client import OrchApiError
 from pyecsdwan.contract import (
     ApplyResult,
     CanonicalState,
     Ctx,
     Diff,
+    JobOutcome,
     RawState,
     Ref,
     Resource,
@@ -156,13 +158,31 @@ class TemplateAssociation(Resource):
         ne_pk = ctx.resolver.ne_pk_for(ref.name)
         desired = diff.desired if isinstance(diff.desired, dict) else {"template_groups": []}
         groups = list(desired.get("template_groups", []))
-        # Complete replacement; the Orchestrator pushes the templates async.
-        ctx.client.post(_ASSOC_PATH, {"templateIds": groups}, params={"nePk": ne_pk})
+        # Complete replacement; this POST triggers the template push. The real
+        # endpoint returns 204 and the per-appliance results land in the action
+        # log by guid (see docs/futures — action-log polling for keyless pushes
+        # is tracked). When a key IS returned, await it so a failed push fails
+        # the commit instead of being reported CONFIRMED.
+        resp = ctx.client.post(_ASSOC_PATH, {"templateIds": groups}, params={"nePk": ne_pk})
+        key = jobs.extract_action_key(resp)
+        outcomes: list[JobOutcome] = []
+        if key is not None:
+            outcome = jobs.wait_for_action(
+                ctx.client, key, ctx.client.settings, f"template push {ref.name}"
+            )
+            outcomes.append(outcome)
+            if outcome.state != "SUCCESS":
+                return ApplyResult(
+                    ok=False,
+                    message=f"template push for {ref.name} {outcome.state}: {outcome.detail}",
+                    jobs=outcomes,
+                )
         return ApplyResult(
             ok=True,
+            jobs=outcomes,
             message=(
                 f"association for {ref.name} set to {groups or '[]'} "
-                f"(template push runs async on the Orchestrator)"
+                f"(template push {'confirmed' if key else 'triggered'})"
             ),
         )
 

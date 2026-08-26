@@ -20,8 +20,14 @@ def bootstrap(
     insecure: bool | None = None,
     dry_run: bool = False,
     transport: httpx.BaseTransport | None = None,
+    mock: bool = False,
 ) -> tuple[Ctx, Registry, config.Settings]:
     settings = config.settings_from_env(orch_url=orch_url, insecure=insecure)
+    if mock and not settings.api_key:
+        # The bundled mock accepts any non-empty token; supply one so the
+        # demo path (and commit-confirm, which requires key auth) works with
+        # no real credential configured.
+        settings.api_key = "mock"
     config.ensure_dirs()
     client = OrchClient(settings, transport=transport)
     resolver = Resolver(client)
