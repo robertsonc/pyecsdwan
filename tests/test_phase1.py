@@ -146,6 +146,13 @@ def test_keyless_template_push_failure_auto_reverts(world: dict[str, Any]) -> No
     assert job_outcomes[0]["state"] == "FAILED"
     assert job_outcomes[0]["per_appliance"] == {"3.NE": "mock failure"}
 
+    # #22: the same per-appliance breakdown is on the report itself, not
+    # just reachable by re-opening the journal — this is what the CLI
+    # renders (cli/render.py's render_report).
+    assert len(report.jobs) == 1
+    assert report.jobs[0].state == "FAILED"
+    assert report.jobs[0].per_appliance == {"3.NE": "mock failure"}
+
 
 def test_bio_and_association_dependency_order(world: dict[str, Any]) -> None:
     """One changeset creates a new overlay AND its membership: the bio kind

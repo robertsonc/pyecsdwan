@@ -29,6 +29,7 @@ from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
     Diff,
+    JobOutcome,
     RawState,
     Ref,
     Resource,
@@ -83,6 +84,10 @@ class CommitReport:
     reverted: list[str] = dataclasses.field(default_factory=list)
     messages: list[str] = dataclasses.field(default_factory=list)
     confirm_deadline: str | None = None
+    #: Every JobOutcome returned by an apply()/rollback() this commit ran,
+    #: in order. Group pushes populate `.per_appliance` — the CLI renders a
+    #: per-appliance breakdown for any job that carries it (issue #22).
+    jobs: list[JobOutcome] = dataclasses.field(default_factory=list)
 
 
 def build_plan(ctx: Ctx, registry: Registry, candidate: CandidateStore) -> Plan:
@@ -215,6 +220,7 @@ def commit(
             message=result.message,
             jobs=[dataclasses.asdict(j) for j in result.jobs],
         )
+        report.jobs.extend(result.jobs)
         if not result.ok:
             failure = f"{item.ref}: {result.message or 'apply failed'}"
             failed_item = item
@@ -322,6 +328,7 @@ def _revert_items(
             result = item.resource.rollback(ctx, item.ref, snap)
             ok = result.ok
             detail = result.message
+            report.jobs.extend(result.jobs)
         except Exception as exc:  # noqa: BLE001 - collect every revert failure; the report must state exactly what is left un-reverted
             ok = False
             detail = f"{type(exc).__name__}: {exc}"
