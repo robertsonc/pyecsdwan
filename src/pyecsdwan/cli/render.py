@@ -46,10 +46,24 @@ def render_plan(console: Console, plan: txn.Plan) -> None:
 
 
 def render_report(console: Console, report: txn.CommitReport) -> None:
-    """Commit/rollback report: messages green on success, red on failure."""
+    """Commit/rollback report: messages green on success, red on failure.
+
+    Group pushes (e.g. a keyless template push fanning out to every
+    appliance in a template group) can fail on some appliances and succeed
+    on others; any job that carries a per-appliance breakdown gets one
+    printed here so the operator sees exactly which nePk(s) failed, not just
+    that the overall push did (issue #22).
+    """
     style = "green" if report.ok else "red"
     for message in report.messages:
         console.print(Text(message, style=style))
+    for job in report.jobs:
+        if not job.per_appliance:
+            continue
+        job_style = "red" if job.state != "SUCCESS" else "dim"
+        console.print(Text(f"  per-appliance results ({job.state}):", style=job_style))
+        for ne_pk, detail in sorted(job.per_appliance.items()):
+            console.print(Text(f"    {ne_pk}: {detail}", style=job_style))
     if report.confirm_deadline:
         console.print(Text(f"confirm deadline: {report.confirm_deadline}", style="yellow"))
     if report.txn_id:
