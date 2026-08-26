@@ -154,6 +154,54 @@ def test_keyless_template_push_failure_auto_reverts(world: dict[str, Any]) -> No
     assert report.jobs[0].per_appliance == {"3.NE": "mock failure"}
 
 
+def test_timeout_during_confirm_window_commit_reverts(
+    state_home: Any, mock_server: tuple[str, MockState]
+) -> None:
+    """#24 acceptance: a job TIMEOUT during a `commit confirm N` apply must
+    count as failure and auto-revert — never proceed to arm a confirm window
+    over a changeset whose apply never actually finished (the contract's own
+    "a TIMEOUT inside a commit-confirm window counts as failure upstream"
+    promise, made explicit with a real timing regression rather than just
+    asserted in a docstring).
+
+    Uses its own fast-poll settings (short job_timeout, short poll delays)
+    bound to the same shared mock server, rather than the module `world`
+    fixture's 5s/1s defaults — this test needs a real timeout to happen
+    quickly, not a slow one to prove the point.
+    """
+    base_url, state = mock_server
+    state.reset()
+    # Never resolves within the short job_timeout below: the mock's action
+    # only finishes after `action_delay_polls` polls (see MockState.new_action).
+    state.action_delay_polls = 10_000
+    settings = config.Settings(
+        orch_url=base_url,
+        api_key="test-key",
+        job_timeout=0.1,
+        job_poll_initial=0.02,
+        job_poll_max=0.05,
+    )
+    client = OrchClient(settings)
+    ctx = Ctx(client=client, resolver=Resolver(client))
+    candidate = CandidateStore(settings.host)
+
+    state.template_groups["G1"] = {"name": "G1", "templates": []}
+    state.template_association["3.NE"] = []
+
+    ref = Ref("template-association", "BR1-EC")
+    candidate.set_desired(ref, {"template_groups": ["G1"]})
+    plan = txn.build_plan(ctx, default_registry, candidate)
+    report = txn.commit(ctx, default_registry, plan, settings, confirm_minutes=5)
+
+    assert not report.ok
+    assert report.state == TxnState.REVERTED
+    assert report.confirm_deadline is None  # the confirm window was never armed
+    assert report.jobs and report.jobs[0].state == "TIMEOUT"
+    # Nothing was actually associated — the pre-commit (empty) state holds,
+    # not a half-applied push silently left in place.
+    assert state.template_association["3.NE"] == []
+
+
 def test_bio_and_association_dependency_order(world: dict[str, Any]) -> None:
     """One changeset creates a new overlay AND its membership: the bio kind
     must apply before bio-association (which resolves the new overlay id)."""

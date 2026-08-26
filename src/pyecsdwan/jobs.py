@@ -133,6 +133,29 @@ def extract_action_key(response: Any) -> str | None:
     return None
 
 
+def cancel_action(client: OrchClient, action_key: str) -> bool:
+    """Cancel an in-flight action key: ``POST /action/cancel?key=<action_key>``
+    (issue #24).
+
+    The vendored SDK's ``cancel_audit_log_task`` is buggy — it issues a GET
+    on the status endpoint instead of calling cancel at all (see
+    docs/research/appliance-jobs.md's SDK-defects note) — so this calls the
+    real endpoint directly rather than going through it. Returns ``True``
+    when the Orchestrator accepts the cancel request. A cancel on an
+    already-terminal or unknown key is not treated as an error here (the
+    Orchestrator's own response governs); callers that need to distinguish
+    "cancelled" from "was already done" should re-poll the key afterward.
+    """
+    log.debug("action_cancel", key=action_key)
+    response = client.post("/action/cancel", params={"key": action_key})
+    if isinstance(response, dict):
+        for field in ("success", "ok", "cancelled"):
+            val = response.get(field)
+            if isinstance(val, bool):
+                return val
+    return True
+
+
 def wait_for_action(
     client: OrchClient,
     action_key: str,

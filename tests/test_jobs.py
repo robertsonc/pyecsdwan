@@ -10,6 +10,7 @@ import respx
 
 from pyecsdwan.client import OrchClient
 from pyecsdwan.jobs import (
+    cancel_action,
     save_changes,
     wait_for_action,
     wait_for_preconfig_apply,
@@ -402,3 +403,33 @@ def test_preconfig_apply_timeout(settings, monkeypatch):
     assert outcome.state == "TIMEOUT"
     assert outcome.key == "preconfig-4"
     assert "did not finish" in outcome.detail
+
+
+# -- job cancellation (#24) ---------------------------------------------------
+
+
+@respx.mock
+def test_cancel_action_success(settings):
+    route = respx.post("https://orch.example.com/gms/rest/action/cancel").mock(
+        return_value=httpx.Response(200, json={"success": True})
+    )
+    assert cancel_action(OrchClient(settings), "guid-cancel-1") is True
+    assert route.calls.last.request.url.params["key"] == "guid-cancel-1"
+
+
+@respx.mock
+def test_cancel_action_reads_falsy_response_field(settings):
+    respx.post("https://orch.example.com/gms/rest/action/cancel").mock(
+        return_value=httpx.Response(200, json={"cancelled": False})
+    )
+    assert cancel_action(OrchClient(settings), "guid-cancel-2") is False
+
+
+@respx.mock
+def test_cancel_action_empty_response_treated_as_accepted(settings):
+    # A bare 204/empty body — no boolean field to read — is treated as
+    # accepted, matching the "Orchestrator's own response governs" default.
+    respx.post("https://orch.example.com/gms/rest/action/cancel").mock(
+        return_value=httpx.Response(204)
+    )
+    assert cancel_action(OrchClient(settings), "guid-cancel-3") is True
