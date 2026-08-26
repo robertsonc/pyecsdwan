@@ -108,6 +108,8 @@ class MockState:
     overlays: dict[str, dict[str, Any]] = field(default_factory=_seed_overlays)
     overlay_association: dict[str, list[str]] = field(default_factory=_seed_overlay_association)
     security_maps: dict[str, Any] = field(default_factory=_seed_security_maps)
+    #: Segment-pair keyed security policy data ("0_0" -> SecurityMaps object).
+    security_policies: dict[str, Any] = field(default_factory=dict)
     actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     sessions: set[str] = field(default_factory=set)
     next_overlay_id: int = 2
@@ -455,6 +457,23 @@ def create_app(state: MockState | None = None) -> FastAPI:
     @api.get("/securityMaps")
     async def get_security_maps(nePk: str | None = None, cached: bool | None = None) -> Any:
         return mock.security_maps
+
+    # -- security policy orchestration (segment-pair scoped) ----------------
+
+    @api.get("/vrf/config/securityPolicies")
+    async def get_security_policies(map: str) -> Any:
+        data = mock.security_policies.get(map)
+        if data is None:
+            return Response(status_code=204)
+        return {"data": data}
+
+    @api.post("/vrf/config/securityPolicies")
+    async def set_security_policies(request: Request, map: str) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict) or "data" not in body:
+            raise HTTPException(status_code=400, detail="body must carry a 'data' object")
+        mock.security_policies[map] = body["data"]
+        return Response(status_code=204)
 
     # -- catch-all (must be registered last on this router) -----------------
 
