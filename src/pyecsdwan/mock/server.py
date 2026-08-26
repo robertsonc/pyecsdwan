@@ -110,6 +110,32 @@ def _seed_zone_list_meta() -> dict[str, Any]:
     }
 
 
+# -- bgp (#16) -----------------------------------------------------------------
+
+
+def _seed_bgp_system() -> dict[str, dict[str, Any]]:
+    """Per-appliance BGP system config, keyed by nePk. Shape is the real
+    payload captured live against a lab Orchestrator's ``bgp/config/system``
+    (see resources/bgp.py module docstring) — same defaults for every seeded
+    appliance since the lab sample had BGP disabled/unconfigured on all of
+    them."""
+    default = {
+        "stale_path_time": 150,
+        "enable_gms_marked": False,
+        "enable": False,
+        "remote_as_path_advertise": False,
+        "log_nbr_msgs": True,
+        "rtr_id": "0.0.0.0",
+        "asn": 65534,
+        "max_restart_time": 120,
+        "graceful_restart_en": False,
+    }
+    return {"1.NE": dict(default), "3.NE": dict(default), "5.NE": dict(default)}
+
+
+# -- end bgp (#16) seed data -----------------------------------------------------
+
+
 # -- state -------------------------------------------------------------------
 
 
@@ -149,6 +175,12 @@ class MockState:
     actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     sessions: set[str] = field(default_factory=set)
     next_overlay_id: int = 2
+    # -- bgp (#16) -------------------------------------------------------
+    #: Per-appliance BGP system config, keyed by nePk (see resources/bgp.py).
+    bgp_system: dict[str, dict[str, Any]] = field(default_factory=_seed_bgp_system)
+    #: Per-appliance BGP neighbor table, keyed by nePk -> {neighborKey: {...}}.
+    #: Empty for every seeded appliance (matches the live lab sample).
+    bgp_neighbor: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def reset(self) -> None:
         """Restore every field to its seeded default (in place)."""
@@ -640,6 +672,16 @@ def create_app(state: MockState | None = None) -> FastAPI:
                 ne_pks=[str(p) for p in ne_pks], name="save changes"
             )
         }
+
+    # -- bgp (#16) — orchestrator-proxied views, queried by nePk ------------
+
+    @api.get("/bgp/config/system")
+    async def get_bgp_system(nePk: str) -> Any:
+        return mock.bgp_system.get(nePk, {})
+
+    @api.get("/bgp/config/neighbor")
+    async def get_bgp_neighbor(nePk: str) -> Any:
+        return mock.bgp_neighbor.get(nePk, {})
 
     # -- catch-all (must be registered last on this router) -----------------
 
