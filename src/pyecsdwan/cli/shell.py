@@ -78,6 +78,7 @@ _SHOW_OPERATIONAL_USAGE = (
     "usage: show <appliances | journal | coverage | transactions pending | <kind> [<name>]>"
 )
 _ROLLBACK_USAGE = "usage: rollback <n>  |  rollback pending"
+_SHOW_GENERIC_USAGE = "usage: show [appliance <name>] <kind> [<instance>]"
 
 
 @dataclasses.dataclass
@@ -362,13 +363,28 @@ def _show_generic(args: list[str], state: ShellState) -> None:
     resource and print it as YAML. With no instance name, enumerate the kind's
     known instances via list_refs() (a lone instance is shown directly)."""
     appliance: str | None = None
-    if len(args) >= 2 and args[0] == "appliance":
+    if args and args[0] == "appliance":
+        # Need at least `appliance <name> <kind>` — an incomplete prefix (just
+        # "appliance", or "appliance <name>") falls through to the generic
+        # usage error below rather than being silently mistaken for a kind or
+        # swallowing the next token as an appliance name.
+        if len(args) < 3:
+            raise ValueError(_SHOW_GENERIC_USAGE)
         appliance = args[1]
         args = args[2:]
     if not args or len(args) > 2:
-        raise ValueError("usage: show [appliance <name>] <kind> [<instance>]")
+        raise ValueError(_SHOW_GENERIC_USAGE)
     kind = args[0]
     resource = state.registry.get(kind)
+    if appliance is not None and resource.scope.value != "appliance":
+        # Mirrors the symmetric check in _parse_ref (set/delete): an
+        # orchestrator-scoped kind silently ignoring an `appliance <name>`
+        # prefix produced confusing "(not present)"-style results instead of
+        # a clear rejection (#48).
+        raise ValueError(
+            f"{kind} is {resource.scope.value}-scope; omit the 'appliance' form: "
+            f"show {kind} [<instance>]"
+        )
 
     if len(args) == 2:
         instance = args[1]
@@ -578,7 +594,7 @@ class ShellCompleter(Completer):
             if first == "show" and self.state.mode == MODE_OPERATIONAL:
                 options.extend(_SHOW_SPECIALS)
             return options
-        if prior[1] == "appliance" and first in ("set", "delete"):
+        if prior[1] == "appliance" and first in ("set", "delete", "show"):
             if len(prior) == 2:
                 return self._appliance_names()
             if len(prior) == 3:
