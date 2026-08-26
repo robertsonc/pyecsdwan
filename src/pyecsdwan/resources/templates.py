@@ -9,12 +9,16 @@ Endpoint facts: docs/research/templates-overlays-security.md. Two kinds:
   appliance (ref name = appliance hostname). The POST is a *complete
   replacement* (the Orchestrator merges nothing), and it is what triggers the
   actual template push to the appliance — the push itself runs async
-  server-side; verify() re-checks the association record, which is the
+  server-side. apply() confirms the push through the action log before
+  returning: by key when the response carries one, else via
+  ``jobs.wait_for_recent_action`` (``GET /action`` by appliance + time
+  window). verify() re-checks the association record, which is the
   orchestrator-side state this resource manages.
 """
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from pyecsdwan import jobs
@@ -160,29 +164,34 @@ class TemplateAssociation(Resource):
         groups = list(desired.get("template_groups", []))
         # Complete replacement; this POST triggers the template push. The real
         # endpoint returns 204 and the per-appliance results land in the action
-        # log by guid (see docs/futures — action-log polling for keyless pushes
-        # is tracked). When a key IS returned, await it so a failed push fails
-        # the commit instead of being reported CONFIRMED.
+        # log by guid. When a key IS returned, await it; when the response is
+        # keyless, poll the action log by appliance + a window opening just
+        # before the POST — either way a failed push fails the commit instead
+        # of being reported CONFIRMED.
+        since_ms = int(time.time() * 1000)
         resp = ctx.client.post(_ASSOC_PATH, {"templateIds": groups}, params={"nePk": ne_pk})
         key = jobs.extract_action_key(resp)
-        outcomes: list[JobOutcome] = []
+        outcome: JobOutcome
         if key is not None:
             outcome = jobs.wait_for_action(
                 ctx.client, key, ctx.client.settings, f"template push {ref.name}"
             )
-            outcomes.append(outcome)
-            if outcome.state != "SUCCESS":
-                return ApplyResult(
-                    ok=False,
-                    message=f"template push for {ref.name} {outcome.state}: {outcome.detail}",
-                    jobs=outcomes,
-                )
+        else:
+            outcome = jobs.wait_for_recent_action(
+                ctx.client, ctx.client.settings, ne_pk, since_ms, f"template push {ref.name}"
+            )
+        if outcome.state != "SUCCESS":
+            return ApplyResult(
+                ok=False,
+                message=f"template push for {ref.name} {outcome.state}: {outcome.detail}",
+                jobs=[outcome],
+            )
         return ApplyResult(
             ok=True,
-            jobs=outcomes,
+            jobs=[outcome],
             message=(
                 f"association for {ref.name} set to {groups or '[]'} "
-                f"(template push {'confirmed' if key else 'triggered'})"
+                f"(template push confirmed)"
             ),
         )
 
