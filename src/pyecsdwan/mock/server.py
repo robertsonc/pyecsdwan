@@ -94,6 +94,22 @@ def _seed_security_maps() -> dict[str, Any]:
     return {"mapsByVrf": {"0": {"zoneMap": {}}}}
 
 
+def _seed_zones() -> dict[str, Any]:
+    return {"0": {"name": "Default"}}
+
+
+def _seed_vrf_zones_map() -> dict[str, Any]:
+    return {"0": {"0": {"id": 0, "name": "Default"}}}
+
+
+def _seed_zone_list_meta() -> dict[str, Any]:
+    return {
+        "1.NE": {"zones": ["Default"]},
+        "3.NE": {"zones": ["Default"]},
+        "5.NE": {"zones": ["Default"]},
+    }
+
+
 # -- state -------------------------------------------------------------------
 
 
@@ -119,6 +135,14 @@ class MockState:
     security_maps: dict[str, Any] = field(default_factory=_seed_security_maps)
     #: Segment-pair keyed security policy data ("0_0" -> SecurityMaps object).
     security_policies: dict[str, Any] = field(default_factory=dict)
+    #: Orchestrator firewall zone table ({zone_id: {"name": ...}}) plus the
+    #: monotonic id allocator and the end-to-end ZBFW flag.
+    zones: dict[str, Any] = field(default_factory=_seed_zones)
+    zones_next_id: int = 1
+    zones_ee_enable: bool = False
+    #: Read-only views: segment<->zone map and per-appliance cached zone lists.
+    vrf_zones_map: dict[str, Any] = field(default_factory=_seed_vrf_zones_map)
+    zone_list_meta: dict[str, Any] = field(default_factory=_seed_zone_list_meta)
     #: Per-appliance ECOS store reached via the /appliance/rest proxy:
     #: {nePk: {ecosPath: payload}}.
     appliance_ecos: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -525,6 +549,61 @@ def create_app(state: MockState | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="body must carry a 'data' object")
         mock.security_policies[map] = body["data"]
         return Response(status_code=204)
+
+    # -- zones (orchestrator scope) ------------------------------------------
+
+    @api.get("/zones")
+    async def get_zones(allVRFZones: bool = False) -> Any:
+        # The mock keeps one unique-names table; allVRFZones=true would add
+        # per-segment duplicates on a real Orchestrator.
+        return mock.zones
+
+    @api.post("/zones")
+    async def replace_zones(request: Request, deleteDependencies: bool) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "body must map zone id -> zone object"}, status_code=400
+            )
+        mock.zones = {str(zone_id): zone for zone_id, zone in body.items()}
+        # Real Orchestrator behavior: the Default zone is re-added to any
+        # table posted without it.
+        mock.zones.setdefault("0", {"name": "Default"})
+        return Response(status_code=204)
+
+    @api.get("/zones/nextId")
+    async def get_zone_next_id() -> Any:
+        return {"nextId": mock.zones_next_id}
+
+    @api.post("/zones/nextId")
+    async def set_zone_next_id(request: Request) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict) or "nextId" not in body:
+            return JSONResponse({"error": "body must carry nextId"}, status_code=400)
+        mock.zones_next_id = int(body["nextId"])
+        return Response(status_code=204)
+
+    @api.get("/zones/eeEnable")
+    async def get_zones_ee_enable() -> Any:
+        return {"enable": mock.zones_ee_enable}
+
+    @api.post("/zones/eeEnable")
+    async def set_zones_ee_enable(request: Request) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict) or "enable" not in body:
+            return JSONResponse({"error": "body must carry enable"}, status_code=400)
+        mock.zones_ee_enable = bool(body["enable"])
+        return Response(status_code=204)
+
+    @api.get("/zones/vrfZonesMap")
+    async def get_vrf_zones_map() -> Any:
+        return mock.vrf_zones_map
+
+    @api.get("/appliance/zoneListMeta")
+    async def get_zone_list_meta(nePk: str | None = None) -> Any:
+        if nePk is None:
+            return mock.zone_list_meta
+        return {nePk: mock.zone_list_meta.get(nePk, {"zones": []})}
 
     # -- appliance proxy + save-changes -------------------------------------
 

@@ -60,7 +60,8 @@ sharded into issues when their phase starts.
 | Appliance interfaces / IP / DHCP / VRRP / routes | 🔷 Phase 2 (#12–#15) |
 | BGP / OSPF (read+diff → write) | 🔷 Phase 2 (#16, #17) |
 | Loopbacks / loopback orchestration | 🔷 Phase 2 (#18) |
-| Zones / ACLs / NAT / route-opt-QoS policy | 🔶 Phase 3 (#30–#33) |
+| Firewall zones (orchestrator scope + segment↔zone map) | ✅ shipped (Phase 3, #30) |
+| ACLs / NAT / route-opt-QoS policy | 🔶 Phase 3 (#31–#33) |
 | Service orchestration associations | 🔶 Phase 3 (#34) |
 | Regions / regional overlays / priorities | 🔶 Phase 3 (#35, #36) |
 | Common settings (DNS/NTP/SNMP/logging) | 🔶 Phase 3 (#38) |
