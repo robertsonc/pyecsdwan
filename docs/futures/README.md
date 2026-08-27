@@ -265,3 +265,21 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   ref.name)` while its `normalize()` doesn't strip `name`** — if a desired
   state ever lacks `name`, post-apply `verify()` would see the injected key
   as drift. Not hit today because intent always carries a name.
+- **The `gen_models.py` map-key heuristic is name-shaped, and a few vendor
+  spellings slip past it** (issue #26). A `properties` block is read as a
+  mapping when *every* key is all digits, angle-bracketed, an appliance
+  primary key (`1.NE`) or an IPv4 literal — which covers the ~485 map-shaped
+  blocks in the two baselines. It still reads three families as records:
+  ASCII placeholder keys the vendor wrote without brackets (`x.x.x.x`,
+  `x.x.x.x/x`, `a number from 1 to 1000`), interface-name keys (`lan0`/`lan1`
+  in `poe/config`, arguably real fields), and the 32 *mixed* blocks like
+  `{"<nePk>": ..., "header": ...}`, where the map-shaped names are dropped
+  and absorbed by `extra="allow"` rather than typed. All three still produce
+  valid, drift-tolerant models; they just under-type. A value-shaped rule
+  (all sibling values share one schema, key names vary) would catch the rest
+  and is the obvious next iteration.
+- **`tools/README.md` still says model/stub codegen is "later work
+  (#26/#27)"**, which #26 has now made false. Left untouched on purpose: #27
+  lands in the same file this wave, and one worker rewriting that paragraph
+  would collide with the other. Whoever merges the pair should write the two
+  sections together.

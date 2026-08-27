@@ -123,9 +123,33 @@ PYDANTIC_ATTRIBUTES = frozenset(
         "validate",
     }
 )
-#: Names the binding signature already occupies; a query parameter that lands
-#: on one of these is suffixed instead of silently shadowing it.
-BINDING_RESERVED = frozenset({"client", "body", "params", "expected", "ne_pk", "self"})
+#: Names a binding signature already occupies, plus the builtins its own body
+#: annotates with. A path or query parameter landing on one of these is
+#: suffixed rather than silently shadowing it.
+BINDING_RESERVED = frozenset(
+    {
+        "client",
+        "body",
+        "params",
+        "expected",
+        "ne_pk",
+        "self",
+        "path",
+        "query",
+        "raw",
+        "Any",
+        "Mapping",
+        "OrchClient",
+        "RequestBody",
+        "dict",
+        "list",
+        "tuple",
+        "str",
+        "int",
+        "float",
+        "bool",
+    }
+)
 
 _SCALARS: dict[str, str] = {
     "string": "str",
@@ -1624,7 +1648,7 @@ def run_ruff(paths: Sequence[Path]) -> None:
     belt-and-braces pass rather than the thing that makes the output legal --
     which is what keeps generation deterministic on a machine without ruff.
     """
-    ruff = _find_ruff()
+    ruff = find_ruff()
     if ruff is None:
         print("gen_models: ruff not found; skipping format pass", file=sys.stderr)
         return
@@ -1635,13 +1659,28 @@ def run_ruff(paths: Sequence[Path]) -> None:
     ):
         # Argument list, never shell=True: paths are repo-controlled but there
         # is no reason to hand any of this to a shell.
-        subprocess.run(command, check=False, capture_output=True)  # noqa: S603
+        completed = subprocess.run(command, check=False, capture_output=True, text=True)  # noqa: S603
+        if completed.returncode != 0:
+            # Never fatal -- the file is already written and already clean --
+            # but a formatter that rejected generated code is worth surfacing.
+            print(
+                f"gen_models: {Path(command[0]).name} {command[1]} exited "
+                f"{completed.returncode}: {completed.stderr.strip()[:400]}",
+                file=sys.stderr,
+            )
 
 
-def _find_ruff() -> str | None:
-    local = Path(sys.executable).resolve().parent / "ruff"
-    if local.is_file():
-        return str(local)
+def find_ruff() -> str | None:
+    """Locate the ruff binary: the running interpreter's bin/ first, then PATH.
+
+    ``sys.executable`` inside a venv is the venv's own ``bin/python`` -- but it
+    is often a symlink to the system interpreter, so resolving it first would
+    look for ruff in ``/usr/bin``. Both spellings are tried.
+    """
+    for base in (Path(sys.executable).parent, Path(sys.executable).resolve().parent):
+        candidate = base / "ruff"
+        if candidate.is_file():
+            return str(candidate)
     return shutil.which("ruff")
 
 
