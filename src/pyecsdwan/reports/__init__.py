@@ -23,10 +23,18 @@ from pyecsdwan.reports.fanout import (
     unreachable,
     values,
 )
+from pyecsdwan.reports.versions import (
+    ApplianceVersions,
+    FabricVersions,
+    Partition,
+)
 
 __all__ = [
     "DEFAULT_CONCURRENCY",
+    "ApplianceVersions",
+    "FabricVersions",
     "Outcome",
+    "Partition",
     "fan_out",
     "unreachable",
     "values",

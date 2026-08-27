@@ -36,6 +36,7 @@ from pyecsdwan.client import OrchApiError
 from pyecsdwan.contract import Ctx, Ref, Resource, Reversibility, Scope, Tier
 from pyecsdwan.journal import TxnJournal, TxnState, list_txns
 from pyecsdwan.registry import Registry, UnknownKind, default_registry
+from pyecsdwan.reports import versions
 from pyecsdwan.resolver import ResolveError
 
 console = Console()
@@ -512,6 +513,157 @@ def show_pending(ctx: typer.Context) -> None:
         console.print("no pending transactions")
         return
     render.render_journal_table(console, orphans)
+
+
+# -- show version: fabric version report (#57) --------------------------------
+#
+# Rendering only; the report itself is built in `pyecsdwan.reports.versions`.
+# It lives here rather than in `cli/render.py` for the same reason
+# `coverage_summary_line` does: the shell imports it back from this module, so
+# the CLI and the prompt cannot drift into showing different things.
+
+#: An appliance off the fleet baseline.
+_SKEW_STYLE = "yellow"
+#: A next boot that would move the appliance off its running partition.
+_NEXT_BOOT_STYLE = "bold yellow"
+_ABSENT = Text("-", style="dim")
+
+
+def _partition_cell(partition: versions.Partition | None, style: str = "") -> Text:
+    return Text(partition.label, style=style) if partition is not None else _ABSENT.copy()
+
+
+def _version_table(report: versions.FabricVersions) -> Table:
+    """One row per appliance: active partition, backup partition, next boot."""
+    table = Table(title=f"appliance versions ({len(report.appliances)})")
+    table.add_column("appliance")
+    table.add_column("active")
+    table.add_column("backup (fallback)")
+    table.add_column("next boot")
+    table.add_column("notes")
+    for appliance in report.appliances:
+        name = Text(appliance.hostname)
+        if appliance.unreachable:
+            # One dead branch box never costs the operator the rest of the
+            # table — it degrades to a row carrying the reason.
+            table.add_row(
+                name,
+                Text("unreachable", style="red"),
+                _ABSENT.copy(),
+                _ABSENT.copy(),
+                Text(appliance.error, style="red"),
+            )
+            continue
+        if not appliance.partitions:
+            table.add_row(
+                name,
+                Text(versions.UNKNOWN, style="yellow"),
+                _ABSENT.copy(),
+                _ABSENT.copy(),
+                Text("appliance reported no partitions", style="yellow"),
+            )
+            continue
+        notes: list[str] = []
+        skewed = report.is_outlier(appliance)
+        if skewed:
+            notes.append(f"version skew (fleet baseline {report.baseline_version})")
+        next_boot = appliance.next_boot
+        if next_boot is not None and appliance.next_boot_diverges:
+            next_cell = Text(f"! {next_boot.label}", style=_NEXT_BOOT_STYLE)
+            notes.append("reload changes the running partition")
+        else:
+            next_cell = _partition_cell(next_boot)
+        table.add_row(
+            name,
+            _partition_cell(appliance.active, style=_SKEW_STYLE if skewed else ""),
+            _partition_cell(appliance.backup),
+            next_cell,
+            Text("; ".join(notes), style=_SKEW_STYLE if notes else ""),
+        )
+    return table
+
+
+def render_version_report(console: Console, report: versions.FabricVersions) -> None:
+    """Orchestrator header, per-appliance table, then the two conditions this
+    report exists to surface: fleet version skew and a divergent next boot."""
+    if report.orchestrator_error:
+        console.print(
+            Text(f"Orchestrator version unknown: {report.orchestrator_error}", style="red")
+        )
+    else:
+        # `current`, never `installed` — the latter is what is available to
+        # upgrade to, not what is running.
+        console.print(Text(f"Orchestrator {report.orchestrator}", style="bold"))
+    if report.orchestrator_available:
+        console.print(
+            Text(
+                f"orchestrator versions available: {', '.join(report.orchestrator_available)}",
+                style="dim",
+            )
+        )
+    if not report.appliances:
+        console.print("no appliances")
+        return
+    console.print(_version_table(report))
+
+    if report.skewed:
+        outliers = ", ".join(a.hostname for a in report.appliances if report.is_outlier(a))
+        console.print(
+            Text(
+                f"version skew: {len(report.active_versions)} active versions across the fleet "
+                f"({', '.join(report.active_versions)}); baseline {report.baseline_version}, "
+                f"off-baseline: {outliers}",
+                style=_SKEW_STYLE,
+            )
+        )
+    elif report.reachable:
+        console.print(Text(f"fleet is uniform on {report.baseline_version}", style="green"))
+    for appliance in report.divergent_next_boot:
+        upcoming, active = appliance.next_boot, appliance.active
+        if upcoming is None or active is None:
+            continue
+        console.print(
+            Text(
+                f"! {appliance.hostname}: next reload boots {upcoming.label}, "
+                f"not the running {active.label}",
+                style=_NEXT_BOOT_STYLE,
+            )
+        )
+    if report.unreachable:
+        console.print(
+            Text(f"{len(report.unreachable)} appliance(s) unreachable", style="red")
+        )
+    if not report.cached:
+        console.print(Text("read live from each appliance (--no-cache)", style="dim"))
+
+
+@show_app.command("version")
+def show_version(
+    ctx: typer.Context,
+    no_cache: Annotated[
+        bool,
+        typer.Option(
+            "--no-cache",
+            help="Read versions live from each appliance instead of the Orchestrator cache.",
+        ),
+    ] = False,
+    timeout: Annotated[
+        float | None,
+        typer.Option("--timeout", help="Overall deadline (seconds) for the appliance fan-out."),
+    ] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+) -> None:
+    """Orchestrator version, then every appliance's active and backup partitions.
+
+    Read-only: two GETs and a bounded fan-out. Never touches the candidate
+    config, the journal, or the transaction engine.
+    """
+    rt_ctx, _registry, _settings = _bootstrap(_state(ctx))
+    report = versions.collect(rt_ctx, cached=not no_cache, timeout=timeout)
+    if as_json:
+        console.print_json(json.dumps(versions.to_payload(report), default=str))
+        return
+    render_version_report(console, report)
 
 
 def _coverage_notes(resource: Resource) -> str:
