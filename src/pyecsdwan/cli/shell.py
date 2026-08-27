@@ -57,7 +57,14 @@ _CONFIG_COMMANDS: tuple[str, ...] = (
     "show",
     "top",
 )
-_SHOW_SPECIALS: tuple[str, ...] = ("appliances", "coverage", "journal", "transactions")
+_SHOW_SPECIALS: tuple[str, ...] = (
+    "appliances",
+    "coverage",
+    "flow",
+    "flows",
+    "journal",
+    "transactions",
+)
 #: CLI token -> txn.commit() keyword argument.
 _COMMIT_FLAGS: dict[str, str] = {
     "force": "force",
@@ -75,8 +82,13 @@ _DELETE_USAGE = (
     "delete appliance <appliance-name> <kind> <name> [<path...>]"
 )
 _SHOW_OPERATIONAL_USAGE = (
-    "usage: show <appliances | journal | coverage | transactions pending | <kind> [<name>]>"
+    "usage: show <appliances | journal | coverage | transactions pending | "
+    "flows summary | flow <ip> | <kind> [<name>]>"
 )
+# `show flow` and `show flows` differ by one character and mean different
+# things, so each insists on its own shape rather than guessing at the other.
+_SHOW_FLOWS_USAGE = "usage: show flows summary"
+_SHOW_FLOW_USAGE = "usage: show flow <ip>[/<prefix>]"
 _ROLLBACK_USAGE = "usage: rollback <n>  |  rollback pending"
 _SHOW_GENERIC_USAGE = "usage: show [appliance <name>] <kind> [<instance>]"
 
@@ -312,6 +324,10 @@ def _show_operational(args: list[str], state: ShellState) -> None:
         _show_pending(state)
     elif head == "coverage":
         _show_coverage(state)
+    elif head == "flows":
+        _show_flows_summary(args[1:], state)
+    elif head == "flow":
+        _show_flow(args[1:], state)
     else:
         _show_generic(args, state)
 
@@ -370,6 +386,34 @@ def _show_coverage(state: ShellState) -> None:
     state.console.print(table)
     state.console.print(coverage_summary_line(state.registry))
     _info(state.console, "`ec-cli show coverage --endpoints` lists every known endpoint")
+
+
+def _show_flows_summary(args: list[str], state: ShellState) -> None:
+    """``show flows summary`` (#58) — the per-appliance x per-overlay matrix.
+
+    The literal ``summary`` subcommand is required: a bare ``show flows``
+    would otherwise be one keystroke away from ``show flow`` and quietly do
+    the wrong thing.
+    """
+    if args != ["summary"]:
+        raise ValueError(_SHOW_FLOWS_USAGE)
+    from pyecsdwan.cli.main import render_flows_summary
+    from pyecsdwan.reports import flows as flows_report
+
+    render_flows_summary(state.console, flows_report.build_flows_summary(state.ctx))
+
+
+def _show_flow(args: list[str], state: ShellState) -> None:
+    """``show flow <ip>`` (#59) — every flow touching one address, fabric-wide.
+
+    A bare ``show flow`` is a usage error, never silently the summary.
+    """
+    if len(args) != 1:
+        raise ValueError(_SHOW_FLOW_USAGE)
+    from pyecsdwan.cli.main import render_flow_search
+    from pyecsdwan.reports import flows as flows_report
+
+    render_flow_search(state.console, flows_report.find_flows(state.ctx, args[0]))
 
 
 def _show_generic(args: list[str], state: ShellState) -> None:
@@ -615,6 +659,11 @@ class ShellCompleter(Completer):
                 return kinds
         if first == "show" and prior[1] == "transactions" and len(prior) == 2:
             return ["pending"]
+        # `flows` completes to its one subcommand; `flow` takes a free-form
+        # address, so it deliberately offers nothing rather than suggesting
+        # `summary` and inviting the two to be confused.
+        if first == "show" and prior[1] == "flows" and len(prior) == 2:
+            return ["summary"]
         return []
 
     def _appliance_names(self) -> list[str]:

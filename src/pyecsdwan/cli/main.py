@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Any, NoReturn, cast
 
@@ -36,6 +37,8 @@ from pyecsdwan.client import OrchApiError
 from pyecsdwan.contract import Ctx, Ref, Resource, Reversibility, Scope, Tier
 from pyecsdwan.journal import TxnJournal, TxnState, list_txns
 from pyecsdwan.registry import Registry, UnknownKind, default_registry
+from pyecsdwan.reports import DEFAULT_CONCURRENCY
+from pyecsdwan.reports import flows as flows_report
 from pyecsdwan.resolver import ResolveError
 
 console = Console()
@@ -48,9 +51,11 @@ app = typer.Typer(
 show_app = typer.Typer(help="Read-only views of fabric and CLI state.")
 cache_app = typer.Typer(help="Resolver cache maintenance.")
 plugin_app = typer.Typer(help="Resource-plugin tooling (promotion checklist).")
+flows_app = typer.Typer(help="Active-flow reports (see also: show flow <ip>).")
 app.add_typer(show_app, name="show")
 app.add_typer(cache_app, name="cache")
 app.add_typer(plugin_app, name="plugin")
+show_app.add_typer(flows_app, name="flows")
 
 _API_METHODS = ("get", "post", "put", "delete")
 
@@ -831,6 +836,244 @@ def show_candidate(ctx: typer.Context) -> None:
             console.print(dumped.rstrip("\n"))
         for path in item.delete_paths:
             console.print(Text(f"  delete: {'.'.join(path)}", style="red"))
+
+
+# -- flows: active-flow reports (#58 summary matrix, #59 one address) ---------
+#
+# Both read GET /flow through `pyecsdwan.reports.flows`; everything below is
+# rendering and option plumbing. `show flows summary` and `show flow <ip>`
+# differ by one character, so they are deliberately two separate commands
+# (a sub-Typer and a leaf) rather than one command with a mode argument —
+# `show flow` with no address is then a usage error from the parser itself,
+# never mistaken for the summary.
+
+
+def _human_bytes(count: int) -> str:
+    """Byte counters run to the gigabytes; a raw integer column is unreadable."""
+    size = float(count)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def _human_uptime(milliseconds: int) -> str:
+    seconds, ms = divmod(max(0, milliseconds), 1000)
+    minutes, secs = divmod(seconds, 60)
+    hours, mins = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{mins:02d}m"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}.{ms // 100}s"
+
+
+def _bounded_note(appliances: Sequence[str], max_flows: int) -> str:
+    """The line that keeps a truncated tally from reading as a total."""
+    return (
+        f"bounded by --max-flows {max_flows} on {', '.join(appliances)}: "
+        "those figures are a ceiling, not a total — re-run with a higher "
+        "--max-flows for a complete answer"
+    )
+
+
+def render_flows_summary(console_out: Console, summary: flows_report.FlowsSummary) -> None:
+    """The #58 matrix: appliances down, overlays across, totals both ways."""
+    reachable = [row for row in summary.rows if row.reachable]
+    title = f"active flows ({summary.grand_total}) across {len(reachable)} appliance(s)"
+    table = Table(title=title)
+    table.add_column("appliance")
+    for overlay in summary.overlays:
+        table.add_column(overlay, justify="right")
+    table.add_column("total", justify="right")
+    for row in summary.rows:
+        if not row.reachable:
+            table.add_row(
+                Text(row.target.name, style="red"),
+                *["-" for _ in summary.overlays],
+                Text("unreachable", style="red"),
+            )
+            continue
+        total = Text(str(row.total) + ("+" if row.bounded else ""))
+        table.add_row(
+            row.target.name,
+            *[str(row.counts.get(overlay, 0)) for overlay in summary.overlays],
+            total,
+        )
+    if summary.overlays:
+        table.add_section()
+        column_totals = summary.column_totals
+        table.add_row(
+            Text("total", style="bold"),
+            *[Text(str(column_totals[overlay]), style="bold") for overlay in summary.overlays],
+            Text(str(summary.grand_total), style="bold"),
+        )
+    console_out.print(table)
+    if flows_report.PASSTHROUGH in summary.overlays:
+        console_out.print(
+            Text(
+                f"{flows_report.PASSTHROUGH}: built-in and passthrough traffic "
+                "(not on a named SD-WAN overlay)",
+                style="dim",
+            )
+        )
+    if summary.bounded:
+        console_out.print(
+            Text(_bounded_note(summary.bounded_appliances, summary.max_flows), style="yellow")
+        )
+    for row in summary.unreachable:
+        err_console.print(Text(f"unreachable: {row.target.name}: {row.error}", style="red"))
+
+
+def render_flow_search(console_out: Console, search: flows_report.FlowSearch) -> None:
+    """The #59 fabric-wide table. One row per *conversation*, not per
+    per-appliance observation — see ``reports.flows`` for the identity."""
+    if not search.matches:
+        console_out.print(
+            f"no flows found for {search.query} on "
+            f"{len(search.searched)} appliance(s) searched"
+        )
+    else:
+        table = Table(title=f"flows matching {search.query} ({search.match_count})")
+        for name in ("appliance", "src", "dst", "proto/app", "overlay", "transport", "state"):
+            table.add_column(name)
+        table.add_column("uptime", justify="right")
+        table.add_column("bytes out tx/rx", justify="right")
+        table.add_column("bytes in tx/rx", justify="right")
+        previous = ""
+        for match in search.matches:
+            flow = match.primary
+            appliance = ", ".join(match.appliances)
+            if previous and flow.appliance != previous:
+                table.add_section()
+            previous = flow.appliance
+            table.add_row(
+                appliance,
+                str(flow.source),
+                str(flow.destination),
+                f"{flow.protocol}/{flow.application}" if flow.application else flow.protocol,
+                flow.overlay,
+                flow.transport,
+                flow.status,
+                _human_uptime(flow.uptime_ms),
+                f"{_human_bytes(flow.outbound_tx_bytes)}/{_human_bytes(flow.outbound_rx_bytes)}",
+                f"{_human_bytes(flow.inbound_tx_bytes)}/{_human_bytes(flow.inbound_rx_bytes)}",
+            )
+        console_out.print(table)
+        console_out.print(
+            Text(
+                f"{search.match_count} flow(s); an entry naming two appliances is one "
+                "conversation seen from both ends, counted once. Byte counters are the "
+                "first-listed appliance's view — summing the two would double-count. "
+                "'transport' is derived from the overlay; the API reports no such field.",
+                style="dim",
+            )
+        )
+    if search.bounded:
+        console_out.print(
+            Text(_bounded_note(search.bounded_appliances, search.max_flows), style="yellow")
+        )
+    for target, error in search.unreachable:
+        err_console.print(Text(f"unreachable: {target.name}: {error}", style="red"))
+
+
+_MAX_FLOWS_OPTION = typer.Option(
+    "--max-flows",
+    min=1,
+    help="Per-appliance cap sent as the required maxFlows parameter.",
+)
+_APPLIANCE_OPTION = typer.Option(
+    "--appliance",
+    help="Restrict to these appliances (hostname or nePk); repeatable.",
+)
+_CONCURRENCY_OPTION = typer.Option(
+    "--concurrency", min=1, help="Appliances queried in parallel."
+)
+_TIMEOUT_OPTION = typer.Option(
+    "--timeout", help="Overall report deadline in seconds; stragglers become unreachable rows."
+)
+_NO_CACHE_OPTION = typer.Option(
+    "--no-cache",
+    help="Refresh the cached appliance inventory first (flow data is always live).",
+)
+_JSON_OPTION = typer.Option("--json", help="Machine-readable output.")
+
+
+@flows_app.command("summary")
+def show_flows_summary(
+    ctx: typer.Context,
+    max_flows: Annotated[int, _MAX_FLOWS_OPTION] = flows_report.DEFAULT_MAX_FLOWS,
+    appliance: Annotated[list[str] | None, _APPLIANCE_OPTION] = None,
+    concurrency: Annotated[int, _CONCURRENCY_OPTION] = DEFAULT_CONCURRENCY,
+    timeout: Annotated[float | None, _TIMEOUT_OPTION] = None,
+    no_cache: Annotated[bool, _NO_CACHE_OPTION] = False,
+    as_json: Annotated[bool, _JSON_OPTION] = False,
+) -> None:
+    """Active flow counts per appliance per overlay, with row and column totals.
+
+    Read-only: one GET /flow per appliance and nothing else. Counts come from
+    the returned rows because the response's computed summary carries no
+    per-overlay breakdown -- see ``pyecsdwan.reports.flows``.
+    """
+    rt_ctx, _registry, _settings = _bootstrap(_state(ctx))
+    try:
+        summary = flows_report.build_flows_summary(
+            rt_ctx,
+            appliances=appliance,
+            max_flows=max_flows,
+            concurrency=concurrency,
+            timeout=timeout,
+            no_cache=no_cache,
+        )
+    except ResolveError as exc:
+        _fail(str(exc))
+    if as_json:
+        console.print_json(json.dumps(summary.as_dict(), default=str))
+        return
+    render_flows_summary(console, summary)
+
+
+@show_app.command("flow")
+def show_flow(
+    ctx: typer.Context,
+    ip: Annotated[
+        str,
+        typer.Argument(help="Address to search for: <ip> or <ip>/<prefix>."),
+    ],
+    max_flows: Annotated[int, _MAX_FLOWS_OPTION] = flows_report.DEFAULT_MAX_FLOWS,
+    appliance: Annotated[list[str] | None, _APPLIANCE_OPTION] = None,
+    concurrency: Annotated[int, _CONCURRENCY_OPTION] = DEFAULT_CONCURRENCY,
+    timeout: Annotated[float | None, _TIMEOUT_OPTION] = None,
+    no_cache: Annotated[bool, _NO_CACHE_OPTION] = False,
+    as_json: Annotated[bool, _JSON_OPTION] = False,
+) -> None:
+    """Every flow touching an address, fabric-wide, deduped across appliances.
+
+    Matching is done by the Orchestrator via ipEitherFlag -- the address is
+    matched at either end of the flow server-side, never by pulling every flow
+    and filtering here. Read-only.
+    """
+    rt_ctx, _registry, _settings = _bootstrap(_state(ctx))
+    try:
+        search = flows_report.find_flows(
+            rt_ctx,
+            ip,
+            appliances=appliance,
+            max_flows=max_flows,
+            concurrency=concurrency,
+            timeout=timeout,
+            no_cache=no_cache,
+        )
+    except ValueError as exc:
+        _fail(str(exc))
+    except ResolveError as exc:
+        _fail(str(exc))
+    if as_json:
+        console.print_json(json.dumps(search.as_dict(), default=str))
+        return
+    render_flow_search(console, search)
+
 
 
 # -- tier-0 passthrough -------------------------------------------------------
