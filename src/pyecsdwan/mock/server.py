@@ -1653,6 +1653,14 @@ def _seed_flows() -> dict[str, list[dict[str, Any]]]:
     10.1.1.5 appears on two appliances as the two ends of one conversation
     (HUB1 sees it as ip2, BR1 as ip1) — that is the case `show flow <ip>` has
     to dedupe rather than report twice.
+
+    The overlay names here (RealTime, CriticalApps) deliberately do NOT appear
+    in ``_seed_overlays`` and that is not an oversight to tidy: flow rows carry
+    ``overlayName`` as a resolved string and no report looks the name up, so
+    the two fixtures never cross-reference. Reconciling them would mean adding
+    overlay ids that collide with ``next_overlay_id``'s allocator and breaking
+    a dozen tests across four files for no behavioral gain. Passthrough is a
+    built-in and legitimately has no entry in the overlay table at all.
     """
     return {
         "1.NE": [
