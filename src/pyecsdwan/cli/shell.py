@@ -37,6 +37,7 @@ from pyecsdwan import __version__, config, journal, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.contract import Ctx, Ref, Scope
 from pyecsdwan.registry import Registry
+from pyecsdwan.reports import versions
 
 MODE_OPERATIONAL = "operational"
 MODE_CONFIG = "config"
@@ -57,7 +58,13 @@ _CONFIG_COMMANDS: tuple[str, ...] = (
     "show",
     "top",
 )
-_SHOW_SPECIALS: tuple[str, ...] = ("appliances", "coverage", "journal", "transactions")
+_SHOW_SPECIALS: tuple[str, ...] = (
+    "appliances",
+    "coverage",
+    "journal",
+    "transactions",
+    "version",
+)
 #: CLI token -> txn.commit() keyword argument.
 _COMMIT_FLAGS: dict[str, str] = {
     "force": "force",
@@ -75,7 +82,8 @@ _DELETE_USAGE = (
     "delete appliance <appliance-name> <kind> <name> [<path...>]"
 )
 _SHOW_OPERATIONAL_USAGE = (
-    "usage: show <appliances | journal | coverage | transactions pending | <kind> [<name>]>"
+    "usage: show <appliances | journal | coverage | version | transactions pending | "
+    "<kind> [<name>]>"
 )
 _ROLLBACK_USAGE = "usage: rollback <n>  |  rollback pending"
 _SHOW_GENERIC_USAGE = "usage: show [appliance <name>] <kind> [<instance>]"
@@ -312,6 +320,8 @@ def _show_operational(args: list[str], state: ShellState) -> None:
         _show_pending(state)
     elif head == "coverage":
         _show_coverage(state)
+    elif head == "version":
+        _show_version(state)
     else:
         _show_generic(args, state)
 
@@ -370,6 +380,24 @@ def _show_coverage(state: ShellState) -> None:
     state.console.print(table)
     state.console.print(coverage_summary_line(state.registry))
     _info(state.console, "`ec-cli show coverage --endpoints` lists every known endpoint")
+
+
+def _show_version(state: ShellState) -> None:
+    """Orchestrator version plus per-appliance partition versions (#57).
+
+    Read-only, and identical to ``ec-cli show version`` with no flags: the
+    renderer is imported from :mod:`pyecsdwan.cli.main` — for the same reason
+    ``coverage_summary_line`` is — so the prompt and the scriptable CLI cannot
+    drift into reporting different versions.
+    """
+    from pyecsdwan.cli.main import render_version_report
+
+    report = versions.collect(state.ctx)
+    render_version_report(state.console, report)
+    _info(
+        state.console,
+        "`ec-cli show version --no-cache` re-reads each appliance instead of the cache",
+    )
 
 
 def _show_generic(args: list[str], state: ShellState) -> None:
