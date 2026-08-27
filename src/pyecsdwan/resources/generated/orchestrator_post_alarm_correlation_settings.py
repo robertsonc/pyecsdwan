@@ -63,6 +63,13 @@ log = structlog.get_logger(
 #: curated kind, and so `ec-cli show coverage` reads unambiguously.
 KIND = "generated/orchestrator_post_alarm_correlation_settings"
 
+#: Status codes these calls treat as success. The spec's declared codes,
+#: widened to OrchClient's own success set: the 7.2.0 baseline documents
+#: only the codes it documents, and the Orchestrator answers a proxied
+#: write that carries no body with 204. Failing an otherwise-successful
+#: write on an undocumented-but-fine status is the worse error.
+ACCEPTED_STATUS: tuple[int, ...] = (200, 201, 204)
+
 #: This endpoint takes no path or required query parameters.
 REF_PARAMS: tuple[StubParam, ...] = ()
 
@@ -101,7 +108,7 @@ class OrchestratorPostAlarmCorrelationSettings(Resource):
         back empty would make rollback() write an empty object.
         """
         try:
-            raw = orchestrator_get_alarm_correlation_settings(ctx.client)
+            raw = orchestrator_get_alarm_correlation_settings(ctx.client, expected=ACCEPTED_STATUS)
         except OrchApiError as exc:
             if exc.status_code == 404:
                 return None
@@ -133,7 +140,7 @@ class OrchestratorPostAlarmCorrelationSettings(Resource):
     ) -> ApplyResult:
         """Send *desired* to orchestrator POST /alarm/correlationSettings verbatim."""
         log.info("generated_stub_write", kind=KIND, ref=str(ref), action=action)
-        orchestrator_post_alarm_correlation_settings(ctx.client, desired)
+        orchestrator_post_alarm_correlation_settings(ctx.client, desired, expected=ACCEPTED_STATUS)
         return ApplyResult(ok=True, message=f"{KIND} {action}: {ref}")
 
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
@@ -143,9 +150,7 @@ class OrchestratorPostAlarmCorrelationSettings(Resource):
         if diff.desired is None:
             return ApplyResult(
                 ok=False,
-                message=(
-                    f"{KIND} cannot delete {diff.ref}: the spec exposes no DELETE on this path"
-                ),
+                message=f"{KIND} cannot delete {diff.ref}: the spec exposes no DELETE on this path",
             )
         return self._write(ctx, diff.ref, diff.desired, "apply")
 
@@ -155,9 +160,8 @@ class OrchestratorPostAlarmCorrelationSettings(Resource):
             return ApplyResult(
                 ok=False,
                 message=(
-                    f"no pre-change state recorded for {ref}: it did not "
-                    f"exist before this change, and the spec exposes no "
-                    f"DELETE on this path to compensate the creation"
+                    f"no pre-change state recorded for {ref}: it did not exist before this change, "
+                    "and the spec exposes no DELETE on this path to compensate the creation"
                 ),
             )
         return self._write(ctx, ref, snapshot, "rollback")

@@ -118,6 +118,9 @@ KIND_PREFIX = "generated/"
 
 _WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
+#: ``OrchClient.request``'s own default success set.
+CLIENT_SUCCESS_STATUS: tuple[int, ...] = (200, 201, 204)
+
 
 class GenPluginError(Exception):
     """Nothing could be generated; message is operator-facing."""
@@ -508,20 +511,44 @@ def _docstring(indent: str, summary: str, *paragraphs: str) -> list[str]:
     -- some spec summaries run past 100 columns on their own, and an endpoint
     key interpolated into a sentence pushes plenty more over.
     """
+    # A summary-only docstring gets its closing ``"""`` joined back onto the
+    # last line by ruff format, so reserve those three columns up front --
+    # otherwise formatting a legal file introduces an E501 into it.
+    width = LINE_LENGTH - (0 if paragraphs else 3)
     head = textwrap.wrap(
-        _fit_tokens(summary, LINE_LENGTH - len(indent) - 3),
-        width=LINE_LENGTH,
+        _fit_tokens(summary, width - len(indent) - 3),
+        width=width,
         initial_indent=f'{indent}"""',
         subsequent_indent=indent,
         break_long_words=False,
         break_on_hyphens=False,
     ) or [f'{indent}"""']
-    if not paragraphs and len(head) == 1 and len(head[0]) + 3 <= LINE_LENGTH:
+    if not paragraphs and len(head) == 1:
         return [head[0] + '"""']
     lines = list(head)
     for paragraph in paragraphs:
         lines += ["", *_wrap(paragraph, indent=indent)]
     lines.append(f'{indent}"""')
+    return lines
+
+
+def _message(indent: str, text: str) -> list[str]:
+    """``message=...`` for an ApplyResult, on one line when it fits.
+
+    Ruff format joins implicitly concatenated strings whose join fits, so an
+    over-cautious split here would be undone on write and the tool's output
+    would stop matching the file it wrote.
+    """
+    single = f'{indent}message=f"{text}",'
+    if len(single) <= LINE_LENGTH and "\n" not in text:
+        return [single]
+    chunks = _chunks(text, LINE_LENGTH - len(indent) - 8)
+    lines = [f"{indent}message=("]
+    for index, chunk in enumerate(chunks):
+        trailing = "" if index == len(chunks) - 1 else " "
+        prefix = "f" if "{" in chunk else ""
+        lines.append(f'{indent}    {prefix}"{chunk}{trailing}"')
+    lines.append(f"{indent}),")
     return lines
 
 
@@ -580,6 +607,7 @@ def _call_arguments(
         for query in operation.query_params
         if query.required
     ]
+    keywords.append("expected=ACCEPTED_STATUS")
     return positional, keywords
 
 
@@ -715,10 +743,11 @@ def _appliance_persist(what: str) -> list[str]:
         "            return ApplyResult(",
         "                ok=False,",
         "                jobs=[save],",
-        "                message=(",
-        f'                    f"{{KIND}} {what} on {{ne_pk}} is NOT persisted -- "',
-        '                    f"save-changes {save.state}: {save.detail}"',
-        "                ),",
+        *_message(
+            "                ",
+            f"{{KIND}} {what} on {{ne_pk}} is NOT persisted -- save-changes "
+            f"{{save.state}}: {{save.detail}}",
+        ),
         "            )",
         "        return ApplyResult(",
         "            ok=True,",
@@ -779,11 +808,11 @@ def _apply_method(
             "        if diff.desired is not None:",
             "            return ApplyResult(",
             "                ok=False,",
-            "                message=(",
-            '                    f"{KIND} was generated from a DELETE operation: it can remove "',
-            '                    f"{diff.ref}, but the spec gives it no endpoint to write "',
-            '                    f"state to it"',
-            "                ),",
+            *_message(
+                "                ",
+                "{KIND} was generated from a DELETE operation: it can remove "
+                "{diff.ref}, but the spec gives it no endpoint to write state to it",
+            ),
             "            )",
             '        return self._delete(ctx, diff.ref, "apply")',
         ]
@@ -793,10 +822,10 @@ def _apply_method(
         lines += [
             "            return ApplyResult(",
             "                ok=False,",
-            "                message=(",
-            '                    f"{KIND} cannot delete {diff.ref}: the spec exposes no "',
-            '                    f"DELETE on this path"',
-            "                ),",
+            *_message(
+                "                ",
+                "{KIND} cannot delete {diff.ref}: the spec exposes no DELETE on this path",
+            ),
             "            )",
         ]
     else:
@@ -825,10 +854,11 @@ def _rollback_method(
             ),
             "        return ApplyResult(",
             "            ok=False,",
-            "            message=(",
-            '                f"{KIND} is IRREVERSIBLE: no generated compensating action "',
-            '                f"exists for {ref}; the change stands"',
-            "            ),",
+            *_message(
+                "            ",
+                "{KIND} is IRREVERSIBLE: no generated compensating action exists for "
+                "{ref}; the change stands",
+            ),
             "        )",
         ]
     lines = [
@@ -840,11 +870,12 @@ def _rollback_method(
         lines += [
             "            return ApplyResult(",
             "                ok=False,",
-            "                message=(",
-            '                    f"no pre-change state recorded for {ref}: it did not "',
-            '                    f"exist before this change, and the spec exposes no "',
-            '                    f"DELETE on this path to compensate the creation"',
-            "                ),",
+            *_message(
+                "                ",
+                "no pre-change state recorded for {ref}: it did not exist before this "
+                "change, and the spec exposes no DELETE on this path to compensate the "
+                "creation",
+            ),
             "            )",
         ]
     else:
@@ -900,9 +931,7 @@ def _class_attributes(
         f"    reversibility = Reversibility.{reversibility}",
         "    tier = Tier.GENERATED",
         f"    deletable = {delete is not None or endpoint.method == 'DELETE'}",
-        "    endpoints = (",
-        *(f'        "{key}",' for key in declared),
-        "    )",
+        *_tuple_literal("    endpoints", [f'"{key}"' for key in declared], "    "),
     ]
     operation = f"{endpoint.scope} {endpoint.method} {endpoint.path}"
     shape = (
@@ -926,6 +955,20 @@ def _class_attributes(
     return lines
 
 
+def _tuple_literal(name: str, entries: Sequence[str], indent: str) -> list[str]:
+    """``name = (a, b)``, exploded when it does not fit.
+
+    A one-element tuple is emitted on one line where it fits: its trailing
+    comma is required syntax rather than a "magic trailing comma", so ruff
+    format collapses it and the tool's output would otherwise differ from the
+    file it writes.
+    """
+    single = f"{name} = (" + ", ".join(entries) + ("," if len(entries) == 1 else "") + ")"
+    if len(single) <= LINE_LENGTH:
+        return [single]
+    return [f"{name} = (", *(f"{indent}    {entry}," for entry in entries), f"{indent})"]
+
+
 def gen_models_ref_syntax(params: Sequence[RefParam]) -> str:
     """The ``Ref.name`` spelling the emitted stub accepts (mirrors ``_stub``)."""
     if len(params) == 1:
@@ -933,13 +976,24 @@ def gen_models_ref_syntax(params: Sequence[RefParam]) -> str:
     return "'" + ",".join(f"{p.wire_name}=<value>" for p in params) + "'"
 
 
-def _constants(slug: str, params: Sequence[RefParam]) -> list[str]:
+def _constants(
+    slug: str,
+    params: Sequence[RefParam],
+    operations: Sequence[gen_models.GeneratedOperation],
+) -> list[str]:
     lines = [
         *_call("log = ", "structlog.get_logger", [f'"{STUB_PACKAGE}.{slug}"'], [], ""),
         "",
         "#: Namespaced under ``generated/`` so a stub can never collide with a",
         "#: curated kind, and so `ec-cli show coverage` reads unambiguously.",
         f'KIND = "{KIND_PREFIX}{slug}"',
+        "",
+        "#: Status codes these calls treat as success. The spec's declared codes,",
+        "#: widened to OrchClient's own success set: the 7.2.0 baseline documents",
+        "#: only the codes it documents, and the Orchestrator answers a proxied",
+        "#: write that carries no body with 204. Failing an otherwise-successful",
+        "#: write on an undocumented-but-fine status is the worse error.",
+        f"ACCEPTED_STATUS: tuple[int, ...] = {accepted_status(operations)!r}",
         "",
     ]
     if not params:
@@ -951,24 +1005,54 @@ def _constants(slug: str, params: Sequence[RefParam]) -> list[str]:
     lines += [
         "#: Values every instance ref must carry in ``Ref.name`` (see",
         "#: ``pyecsdwan.resources.generated._stub.param_values``).",
-        "REF_PARAMS: tuple[StubParam, ...] = (",
     ]
-    for param in params:
-        description = gen_models.ascii_fold(param.description).replace('"', "'")
-        lines += _call(
-            "",
-            "StubParam",
-            [f'"{param.wire_name}"', f'"{param.where}"', f'"{_clip(description)}"'],
-            [],
-            "    ",
-            trailing=",",
-        )
+    # Room for ``    StubParam(...),`` at the exploded indent; the description
+    # is clipped to whatever is left so no entry can overflow the line budget.
+    room = LINE_LENGTH - 5
+    entries = [_stub_param_entry(param, room) for param in params]
+    prefix = "REF_PARAMS: tuple[StubParam, ...] = "
+    # A one-element tuple's trailing comma is syntax, not a "magic trailing
+    # comma", so ruff format collapses it onto one line when it fits. Emitting
+    # it any other way would make the tool's output differ from the file it
+    # writes, which `test_the_committed_stubs_are_what_the_tool_emits_today`
+    # (rightly) refuses.
+    single = f"{prefix}({entries[0]},)" if len(entries) == 1 else ""
+    if single and len(single) <= LINE_LENGTH:
+        lines.append(single)
+        return lines
+    lines.append(f"{prefix}(")
+    lines.extend(f"    {entry}," for entry in entries)
     lines.append(")")
     return lines
 
 
+def accepted_status(operations: Sequence[gen_models.GeneratedOperation]) -> tuple[int, ...]:
+    """Success codes for a stub's calls: declared, widened to the client's set.
+
+    ``OrchClient`` defaults to ``(200, 201, 204)`` and the generated bindings
+    narrow that to whatever the operation documents. For a curated resource
+    that narrowing is a feature; for a stub it is a trap -- the appliance proxy
+    answers a bodiless write with 204 whether or not the spec mentions it, and
+    a stub that raised on a landed write would send the operator hunting for a
+    failure that did not happen.
+    """
+    codes = set(CLIENT_SUCCESS_STATUS)
+    for operation in operations:
+        codes.update(gen_models.expected_status(operation.endpoint))
+    return tuple(sorted(codes))
+
+
+def _stub_param_entry(param: RefParam, room: int) -> str:
+    """One ``StubParam(...)`` literal, its description clipped to fit *room*."""
+    head = f'StubParam("{param.wire_name}", "{param.where}", '
+    description = gen_models.ascii_fold(param.description).replace('"', "'")
+    return head + f'"{_clip(description, min(60, room - len(head) - 3))}")'
+
+
 def _clip(text: str, limit: int = 60) -> str:
     flat = " ".join(text.split())
+    if limit < 4:
+        return ""
     return flat if len(flat) <= limit else flat[: limit - 3].rstrip() + "..."
 
 
@@ -1040,7 +1124,7 @@ def render_stub_module(
         class_lines += ["", *method]
 
     body_lines = [
-        *_constants(slug, params),
+        *_constants(slug, params, [op for op in (write, read, delete) if op is not None]),
         "",
         "",
         *class_lines,

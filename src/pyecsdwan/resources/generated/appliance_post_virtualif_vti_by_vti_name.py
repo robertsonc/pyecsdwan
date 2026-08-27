@@ -65,6 +65,13 @@ log = structlog.get_logger("pyecsdwan.resources.generated.appliance_post_virtual
 #: curated kind, and so `ec-cli show coverage` reads unambiguously.
 KIND = "generated/appliance_post_virtualif_vti_by_vti_name"
 
+#: Status codes these calls treat as success. The spec's declared codes,
+#: widened to OrchClient's own success set: the 7.2.0 baseline documents
+#: only the codes it documents, and the Orchestrator answers a proxied
+#: write that carries no body with 204. Failing an otherwise-successful
+#: write on an undocumented-but-fine status is the worse error.
+ACCEPTED_STATUS: tuple[int, ...] = (200, 201, 204)
+
 #: Values every instance ref must carry in ``Ref.name`` (see
 #: ``pyecsdwan.resources.generated._stub.param_values``).
 REF_PARAMS: tuple[StubParam, ...] = (StubParam("vtiName", "path", "vti interface name"),)
@@ -107,7 +114,12 @@ class AppliancePostVirtualifVtiByVtiName(Resource):
         values = param_values(KIND, ref, REF_PARAMS)
         ne_pk = ne_pk_for(ctx, KIND, ref)
         try:
-            raw = appliance_get_virtualif_vti_by_vti_name(ctx.client, ne_pk, values["vtiName"])
+            raw = appliance_get_virtualif_vti_by_vti_name(
+                ctx.client,
+                ne_pk,
+                values["vtiName"],
+                expected=ACCEPTED_STATUS,
+            )
         except OrchApiError as exc:
             if exc.status_code == 404:
                 return None
@@ -154,15 +166,21 @@ class AppliancePostVirtualifVtiByVtiName(Resource):
         values = param_values(KIND, ref, REF_PARAMS)
         ne_pk = ne_pk_for(ctx, KIND, ref)
         log.info("generated_stub_write", kind=KIND, ref=str(ref), action=action)
-        appliance_post_virtualif_vti_by_vti_name(ctx.client, ne_pk, values["vtiName"], desired)
+        appliance_post_virtualif_vti_by_vti_name(
+            ctx.client,
+            ne_pk,
+            values["vtiName"],
+            desired,
+            expected=ACCEPTED_STATUS,
+        )
         save = ctx.save_changes([ne_pk], f"{KIND} {action}: {ref}")
         if save.state != "SUCCESS":
             return ApplyResult(
                 ok=False,
                 jobs=[save],
                 message=(
-                    f"{KIND} write on {ne_pk} is NOT persisted -- "
-                    f"save-changes {save.state}: {save.detail}"
+                    f"{KIND} write on {ne_pk} is NOT persisted -- save-changes {save.state}: "
+                    f"{save.detail}"
                 ),
             )
         return ApplyResult(
@@ -176,15 +194,20 @@ class AppliancePostVirtualifVtiByVtiName(Resource):
         values = param_values(KIND, ref, REF_PARAMS)
         ne_pk = ne_pk_for(ctx, KIND, ref)
         log.info("generated_stub_delete", kind=KIND, ref=str(ref), action=action)
-        appliance_delete_virtualif_vti_by_vti_name(ctx.client, ne_pk, values["vtiName"])
+        appliance_delete_virtualif_vti_by_vti_name(
+            ctx.client,
+            ne_pk,
+            values["vtiName"],
+            expected=ACCEPTED_STATUS,
+        )
         save = ctx.save_changes([ne_pk], f"{KIND} {action}: {ref}")
         if save.state != "SUCCESS":
             return ApplyResult(
                 ok=False,
                 jobs=[save],
                 message=(
-                    f"{KIND} delete on {ne_pk} is NOT persisted -- "
-                    f"save-changes {save.state}: {save.detail}"
+                    f"{KIND} delete on {ne_pk} is NOT persisted -- save-changes {save.state}: "
+                    f"{save.detail}"
                 ),
             )
         return ApplyResult(
