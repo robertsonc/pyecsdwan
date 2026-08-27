@@ -14,20 +14,50 @@ through three tiers; `ec-cli show coverage` reports where every kind stands.
 
 ## Tier 1 — generated from spec
 
-Produced by `tools/spec_sync.py` from `specs/*.json` for new endpoints:
-pydantic models + typed bindings + a plugin stub with:
+Three tools, in order (`tools/README.md` has the invocations):
 
-- `fetch`/`apply` wired to generated bindings
-- best-effort GET-before-write snapshot; `reversibility = COMPENSABLE` at most
+1. `tools/spec_sync.py --diff` detects an endpoint the vendored baseline does
+   not carry; `--update` vendors it.
+2. `tools/gen_models.py` emits pydantic models + a typed binding for one
+   operation.
+3. `tools/gen_plugin.py` turns that binding into a registered plugin stub in
+   `src/pyecsdwan/resources/generated/`. `--from-diff` drives it straight off
+   the report from step 1, one stub per path.
+
+The emitted stub has:
+
+- `fetch`/`apply`/`rollback` wired to the generated bindings, plus
+  `ctx.save_changes([nePk])` on appliance scope
+- a best-effort GET-before-write snapshot where the spec exposes a `GET` on
+  the write's path — and `reversibility = COMPENSABLE` only then. With no
+  `GET` there is nothing to snapshot and the stub declares `IRREVERSIBLE`
+  instead, because a compensator `rollback()` cannot run is worse than the
+  truth. A paired `DELETE` on its own does not change that: without a `GET`
+  the stub cannot tell a create from an update, and deleting to "compensate"
+  an update would destroy live configuration. It never claims `REVERSIBLE` —
+  nothing in a spec promises the `GET`'s response is accepted verbatim by the
+  write.
 - `normalize()` raising `NotCurated` until a human/agent finishes it
 - `tier = Tier.GENERATED`
+
+Unlike `pyecsdwan.generated`, a stub is meant to be **hand-edited** — it is
+the starting point for curation, and `gen_plugin.py` refuses to overwrite one
+without `--force`.
 
 Tier-1 resources refuse `commit confirm` unless the operator passes
 `--allow-untransactional`, and the plan output flags the downgrade. That guard
 is enforced at runtime by `txn.py`; the `NotCurated` raise above is enforced
 statically by `make check` (see *What the gate actually checks*), so a stub
 that was wired up far enough to return from `normalize()` fails in the repo
-rather than looking curated on a fabric.
+rather than looking curated on a fabric. That gate parametrizes over the live
+registry, so it applies to every stub anyone generates — not only the ones
+committed here — with nothing to opt into.
+
+Note what the `NotCurated` raise costs, deliberately: `txn.build_plan()` calls
+`normalize()` on every candidate, so a Tier-1 stub cannot take part in a plan
+or a commit **at all** until someone curates it. The wiring below `normalize()`
+is there so that curation is a small edit against working code, not so the
+stub can be pointed at a fabric today.
 
 ## Tier 2 — curated (earns full commit-confirm)
 
@@ -80,6 +110,12 @@ returning anything at all, fails. This is the static half of the guard
 resource is refused without `--allow-untransactional`): the point is that a
 generated stub left un-curated fails in `make check`, not on a fabric.
 
+Since #27 this half is no longer vacuous over the live registry — the two
+committed samples in `pyecsdwan.resources.generated` are real Tier-1 kinds
+that it bites on. It also covers stubs that are not in this repo: the check
+is parametrized off `default_registry.kinds()`, so generating a stub is all
+it takes to be held to the rule.
+
 **Curated kinds must be idempotent, provably.** One parametrized test per
 curated kind runs four checks against a sample raw state:
 
@@ -108,12 +144,15 @@ is the vendor's published Postman payload example (`specs.payload_example`,
 scalar, so it proves field names and nesting round-trip and proves nothing
 about values.
 
-**The gate is proved to bite.** The registry holds no Tier-0/1 kind today, so
-the un-curated half would pass vacuously on the registry alone. The same
-functions are therefore run over constructed stubs that must FAIL: one that
+**The gate is proved to bite.** Passing input is not evidence a gate works, so
+the same functions are run over constructed resources that must FAIL: one that
 returns from `normalize()` instead of raising, one that raises the wrong error,
 one whose `normalize()` is not a fixed point, one that canonicalizes everything
-to an empty shell, and one whose re-plan is dirty.
+to an empty shell, and one whose re-plan is dirty. (That proof was written when
+the registry held no Tier-0/1 kind at all and the un-curated half passed
+vacuously; #27's committed stubs mean it now has real subjects too, but the
+constructed failures stay — a *passing* Tier-1 kind still cannot show that the
+check would fail a broken one.)
 
 ## Running the checklist against your own fabric
 
@@ -130,3 +169,11 @@ so they stay visible.
 It does **not** flip the tier. `tier = Tier.CURATED` is a source declaration a
 reviewer signs off on, not a runtime toggle; when every machine-checkable box
 is green the command prints the change to make and leaves it to you.
+
+**Caveat on Tier-1 kinds** (see `docs/futures/README.md`): the command gates
+the idempotency checks behind `tier >= CURATED`, so for a generated stub the
+only box it evaluates is the `NotCurated` refusal — which passes, and it then
+prints the promote-now message. Ignore that on a stub: implement `normalize()`
+first, and treat the command as useful from the moment the raise is gone.
+`make check` is not fooled either way — a Tier-2 kind whose `normalize()`
+raises fails the gate immediately.

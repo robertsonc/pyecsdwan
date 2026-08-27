@@ -138,13 +138,21 @@ def test_rollup_partitions_the_universe(registry: Registry) -> None:
     rows = cli_main._endpoint_coverage(registry)
     counts = cli_main._coverage_rollup(rows)
     assert counts["curated"] + counts["generated"] + counts["raw"] == counts["endpoints"]
-    # Every unique declared key is curated today (no Tier.GENERATED plugins yet).
+    # Every declared endpoint is attributed above the passthrough floor, and
+    # nothing else is. Checked against curated+generated rather than curated
+    # alone: tier 1 stopped being empty when the first generated stub landed
+    # (#27), and an endpoint declared by both a curated and a generated kind
+    # is one row, at the higher tier.
     declared = {
         specs.endpoint_key(*e.split(" ", 2))
         for kind in registry.kinds()
         for e in registry.get(kind).endpoints
     }
-    assert counts["curated"] == len(declared)
+    assert counts["curated"] + counts["generated"] == len(declared)
+    assert counts["generated"] > 0, (
+        "no Tier.GENERATED kind is registered; the roll-up's middle number is "
+        "the whole point of tools/gen_plugin.py (#27)"
+    )
 
 
 def test_no_declared_endpoint_falls_outside_the_universe(registry: Registry) -> None:
