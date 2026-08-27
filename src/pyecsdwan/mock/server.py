@@ -742,6 +742,28 @@ def _seed_appliance_security_maps() -> dict[str, dict[str, Any]]:
 # -- end appliance zones/security-maps (#19) seed data ------------------------
 
 
+# -- internal subnets (#37) ---------------------------------------------------
+#
+# Orchestrator-scope singleton served by GET/POST /gms/internalSubnets2 (see
+# the routes block of the same label below). Seeded from the real captured
+# payload, including the live-only `segmentedIpv6Enabled` key that is absent
+# from the vendored spec — it exercises the resource's unknown-key passthrough.
+
+
+def _seed_internal_subnets() -> dict[str, Any]:
+    return {
+        "ipv4": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4"],
+        "ipv6": ["fe80::/10", "ff00::/8", "fc00::/7"],
+        "segmentIpv4": [],
+        "segmentIpv6": [],
+        "segmentedIpv6Enabled": True,
+        "nonDefaultRoutes": False,
+    }
+
+
+# -- end internal subnets (#37) seed data -------------------------------------
+
+
 def _seed_appliance_ecos() -> dict[str, dict[str, Any]]:
     """Seed for the generic per-appliance ECOS store (``appliance_ecos``
     below). Extend with more ``{ecosPath: payload}`` entries as further
@@ -831,6 +853,10 @@ class MockState:
     #: addrAllocated, addrDeleted}}) — mutated only by the reclaim
     #: endpoints' addrDeleted bookkeeping, never by POST /loopbackOrch.
     loopback_orch_pool: dict[str, Any] = field(default_factory=_seed_loopback_orch_pool)
+    # -- internal subnets (#37) --
+    #: Fabric-wide internal-subnet table, replaced wholesale by
+    #: POST /gms/internalSubnets2.
+    internal_subnets: dict[str, Any] = field(default_factory=_seed_internal_subnets)
 
     def reset(self) -> None:
         """Restore every field to its seeded default (in place)."""
@@ -1449,6 +1475,28 @@ def create_app(state: MockState | None = None) -> FastAPI:
         return Response(status_code=204)
 
     # -- end loopback (#18) ---------------------------------------------------
+
+    # -- internal subnets (#37) -----------------------------------------------
+    #
+    # Orchestrator scope (not the appliance proxy): one fabric-wide table,
+    # read whole and replaced whole. The POST stores the body verbatim so a
+    # test can observe that unknown keys survive the round trip.
+
+    @api.get("/gms/internalSubnets2")
+    async def get_internal_subnets() -> Any:
+        return mock.internal_subnets
+
+    @api.post("/gms/internalSubnets2")
+    async def replace_internal_subnets(request: Request) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "body must be an internal-subnets object"}, status_code=400
+            )
+        mock.internal_subnets = dict(body)
+        return Response(status_code=204)
+
+    # -- end internal subnets (#37) -------------------------------------------
 
     # -- catch-all (must be registered last on this router) -----------------
 
