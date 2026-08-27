@@ -765,6 +765,109 @@ def _seed_internal_subnets() -> dict[str, Any]:
 # -- end internal subnets (#37) seed data -------------------------------------
 
 
+# -- nat (#32) ----------------------------------------------------------------
+#
+# Two appliance-scope ECOS paths ("natMaps", "nat/natPools") ride the generic
+# /appliance/rest proxy, same as vrrp/zones/securityMaps — no dedicated route
+# is needed, only seed data merged in by _seed_appliance_ecos() below. The one
+# writable NAT endpoint on the Orchestrator API (/vrf/config/snatMaps) does
+# get a route block, down next to the other orchestrator routes.
+
+
+def _seed_nat_maps() -> dict[str, dict[str, Any]]:
+    """NAT policy-map table, ECOS path 'natMaps'.
+
+    Real captured envelope (#32, read-only against a live lab Orchestrator):
+    ``{"data": {"map1": {"self": "map1", "prio": {...}}}, "options": {...}}``.
+    The envelope, the `self` echo and the map->prio nesting are live-
+    confirmed; the individual rule fields below follow the appliance spec's
+    NatPolicyRule/BrNatPriority schemas. `options` is seeded with `activeMap`
+    only — that key is what resources/nat.py lifts into canonical state;
+    `merge`/`templateApply` are write-only directives and are covered by a
+    unit test rather than invented into a GET response here.
+    """
+    return {
+        "1.NE": {
+            "data": {
+                "map1": {
+                    "self": "map1",
+                    "prio": {
+                        "10": {
+                            "self": 10,
+                            "comment": "",
+                            "gms_marked": True,
+                            "match": {"acl": ""},
+                            "set": {"nat_dir": "none"},
+                        },
+                        "65535": {
+                            "self": 65535,
+                            "comment": "",
+                            "gms_marked": True,
+                            "match": {"acl": ""},
+                            "set": {"nat_dir": "none"},
+                        },
+                    },
+                }
+            },
+            "options": {"activeMap": "map1"},
+        },
+        "3.NE": {
+            "data": {
+                "map2": {
+                    "self": "map2",
+                    "prio": {
+                        "100": {
+                            "self": 100,
+                            "comment": "branch outbound",
+                            "gms_marked": False,
+                            "match": {"acl": ""},
+                            "set": {"nat_dir": "outbound"},
+                        }
+                    },
+                }
+            },
+            "options": {"activeMap": "map2"},
+        },
+        "5.NE": {},
+    }
+
+
+def _seed_nat_pools() -> dict[str, dict[str, Any]]:
+    """NAT pool table, ECOS path 'nat/natPools'.
+
+    SPEC-DERIVED (#32): the live lab returned ``{}`` here, so this follows
+    the appliance spec's NATPools/NATPool schema ({poolId: {name, subnet,
+    dir, pat, comment}}) rather than a captured payload.
+    """
+    return {
+        "1.NE": {
+            "1": {
+                "name": "pool1",
+                "subnet": "192.0.2.0/24",
+                "dir": "outbound",
+                "pat": 1,
+                "comment": "",
+            }
+        },
+        "3.NE": {},
+        "5.NE": {},
+    }
+
+
+def _seed_snat_maps() -> dict[str, Any]:
+    """Orchestrator-scope inter-segment S-NAT rules (/vrf/config/snatMaps).
+
+    SPEC-DERIVED (#32): the live lab returned ``{}``. Shape follows the
+    SnatMaps schema plus the vendored SDK's documented read-side extras
+    (gms_marked, comment). Only *disabled* pairs are listed — S-NAT between
+    segments is on by default.
+    """
+    return {"0_1": {"enable": False, "gms_marked": False, "comment": "no snat to guest"}}
+
+
+# -- end nat (#32) seed data ---------------------------------------------------
+
+
 def _seed_appliance_ecos() -> dict[str, dict[str, Any]]:
     """Seed for the generic per-appliance ECOS store (``appliance_ecos``
     below). Extend with more ``{ecosPath: payload}`` entries as further
@@ -787,6 +890,11 @@ def _seed_appliance_ecos() -> dict[str, dict[str, Any]]:
         out.setdefault(ne_pk, {})["ospf/config/system"] = system
     for ne_pk, interfaces in _seed_ospf_interfaces().items():
         out.setdefault(ne_pk, {})["ospf/config/interfaces"] = interfaces
+    # -- nat (#32) --
+    for ne_pk, nat_maps in _seed_nat_maps().items():
+        out.setdefault(ne_pk, {})["natMaps"] = nat_maps
+    for ne_pk, nat_pools in _seed_nat_pools().items():
+        out.setdefault(ne_pk, {})["nat/natPools"] = nat_pools
     return out
 
 
@@ -993,6 +1101,16 @@ class MockState:
     #: {overlayId: {regionId: overlay config}}, region-scope-merged by
     #: PUT /gms/overlays/config/regions.
     regional_overlays: dict[str, dict[str, Any]] = field(default_factory=_seed_regional_overlays)
+    # -- nat (#32) --
+    #: Fabric-wide disabled inter-segment S-NAT rules, replaced wholesale by
+    #: POST /vrf/config/snatMaps. The appliance-scope NAT tables (natMaps,
+    #: nat/natPools) need no field of their own — they ride appliance_ecos.
+    snat_maps: dict[str, Any] = field(default_factory=_seed_snat_maps)
+    #: Read-only inter-segment D-NAT view ({nePk: VRFPolicyMap}); there is no
+    #: D-NAT write endpoint in either spec.
+    dnat_maps: dict[str, Any] = field(
+        default_factory=lambda: {"1.NE": {"0_1": {"enable": True}}}
+    )
 
     def reset(self) -> None:
         """Restore every field to its seeded default (in place)."""
@@ -1676,6 +1794,34 @@ def create_app(state: MockState | None = None) -> FastAPI:
         return Response(status_code=204)
 
     # -- end internal subnets (#37) -------------------------------------------
+
+    # -- nat (#32) ------------------------------------------------------------
+    #
+    # The appliance-scope NAT tables (ECOS "natMaps", "nat/natPools") need no
+    # route: they ride the generic /appliance/rest proxy above, seeded by
+    # _seed_appliance_ecos(). Only the writable orchestrator endpoint and the
+    # read-only D-NAT view live here.
+
+    @api.get("/vrf/config/snatMaps")
+    async def get_snat_maps() -> Any:
+        return mock.snat_maps
+
+    @api.post("/vrf/config/snatMaps")
+    async def replace_snat_maps(request: Request) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "body must map '<srcVrfId>_<dstVrfId>' -> {enable: bool}"},
+                status_code=400,
+            )
+        mock.snat_maps = {str(pair): rule for pair, rule in body.items()}
+        return Response(status_code=204)
+
+    @api.get("/dnatMaps")
+    async def get_dnat_maps(nePk: str, cached: str = "false") -> Any:
+        return mock.dnat_maps.get(nePk, {})
+
+    # -- end nat (#32) --------------------------------------------------------
 
     # -- priorities (#36) -----------------------------------------------------
     #
