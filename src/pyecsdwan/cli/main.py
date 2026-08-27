@@ -37,7 +37,7 @@ from pyecsdwan.client import OrchApiError
 from pyecsdwan.contract import Ctx, Ref, Resource, Reversibility, Scope, Tier
 from pyecsdwan.journal import TxnJournal, TxnState, list_txns
 from pyecsdwan.registry import Registry, UnknownKind, default_registry
-from pyecsdwan.reports import DEFAULT_CONCURRENCY, applianceconfig, versions
+from pyecsdwan.reports import DEFAULT_CONCURRENCY, applianceconfig, fabric, versions
 from pyecsdwan.reports import flows as flows_report
 from pyecsdwan.resolver import ResolveError
 
@@ -1496,25 +1496,268 @@ def plugin_promote(
     raise typer.Exit(1)
 
 
+# -- show run: fabric configuration breakdown (#55) ----------------------------
+#
+# Rendering only; the report itself is built in `pyecsdwan.reports.fabric`.
+# Lives here rather than in `cli/render.py` for the same reason
+# `render_version_report` does: the shell imports it back from this module, so
+# `ec-cli show run` and the shell's `show run` cannot drift into showing
+# different things.
+
+#: A section that could only be read in part.
+_DEGRADED_STYLE = "yellow"
+
+
+def _breakdown(counts: Sequence[tuple[str, int]]) -> str:
+    """``hub 1, spoke 2`` — a count map on one line, in the report's order."""
+    return ", ".join(f"{value} {count}" for value, count in counts) if counts else "-"
+
+
+def _section_notes(console_out: Console, section: fabric.Section) -> None:
+    """Partial data, said out loud under the section it affects.
+
+    In-band and per-section on purpose: a footer would make the reader guess
+    which table the missing data belonged to.
+    """
+    for note in section.notes:
+        console_out.print(Text(f"  ! {note}", style=_DEGRADED_STYLE))
+
+
+def _render_overlays(console_out: Console, section: fabric.OverlaySection) -> None:
+    table = Table(title=f"overlays ({len(section.overlays)})")
+    table.add_column("overlay")
+    table.add_column("id")
+    table.add_column("topology")
+    table.add_column("members")
+    table.add_column("appliances", overflow="fold")
+    for overlay in section.overlays:
+        table.add_row(
+            Text(overlay.name),
+            overlay.overlay_id or "-",
+            overlay.topology or "-",
+            str(overlay.member_count),
+            ", ".join(overlay.members) or Text("none", style=_DEGRADED_STYLE),
+        )
+    console_out.print(table)
+    _section_notes(console_out, section)
+    for overlay in section.empty_overlays:
+        console_out.print(
+            Text(f"  {overlay.name}: no appliances associated", style=_DEGRADED_STYLE)
+        )
+    if section.unassociated:
+        console_out.print(
+            Text(
+                f"  {len(section.unassociated)} appliance(s) in no overlay: "
+                f"{', '.join(section.unassociated)}",
+                style=_DEGRADED_STYLE,
+            )
+        )
+
+
+def _render_templates(console_out: Console, section: fabric.TemplateSection) -> None:
+    table = Table(title=f"template groups ({len(section.groups)})")
+    table.add_column("group")
+    table.add_column("sections")
+    table.add_column("applied")
+    table.add_column("appliances", overflow="fold")
+    for group in section.groups:
+        table.add_row(
+            Text(group.name),
+            str(len(group.sections)),
+            str(group.applied_count),
+            ", ".join(group.applied_to) or Text("nowhere", style=_DEGRADED_STYLE),
+        )
+    console_out.print(table)
+    _section_notes(console_out, section)
+    if section.unassigned:
+        console_out.print(
+            Text(
+                f"  {len(section.unassigned)} appliance(s) with no template group: "
+                f"{', '.join(section.unassigned)}",
+                style=_DEGRADED_STYLE,
+            )
+        )
+
+
+def _render_security(console_out: Console, section: fabric.SecuritySection) -> None:
+    table = Table(
+        title=f"security policy ({len(section.configured)} of "
+        f"{len(section.policies)} segment pair(s) configured)"
+    )
+    table.add_column("map")
+    table.add_column("rules")
+    table.add_column("zone pairs")
+    table.add_column("actions")
+    for policy in section.policies:
+        if policy.unreachable:
+            table.add_row(
+                Text(policy.pair),
+                Text("unreadable", style="red"),
+                _ABSENT.copy(),
+                Text(policy.error, style="red"),
+            )
+            continue
+        if not policy.present:
+            # A 204 is a real answer: the Orchestrator orchestrates no policy
+            # for this segment pair. Not the same as "could not be read".
+            table.add_row(
+                Text(policy.pair), Text("none", style="dim"), _ABSENT.copy(), _ABSENT.copy()
+            )
+            continue
+        table.add_row(
+            Text(policy.pair),
+            str(policy.rule_count),
+            str(policy.zone_pairs),
+            _breakdown(policy.actions),
+        )
+    console_out.print(table)
+    console_out.print(
+        Text(f"  segments: {', '.join(section.segments) or 'unknown'}", style="dim")
+    )
+    _section_notes(console_out, section)
+
+
+def _render_inventory(console_out: Console, section: fabric.InventorySection) -> None:
+    table = Table(title=f"appliances ({section.total})")
+    table.add_column("grouping")
+    table.add_column("breakdown", overflow="fold")
+    table.add_row("role", _breakdown(section.by_role))
+    table.add_row("site", _breakdown(section.by_site))
+    table.add_row("model", _breakdown(section.by_model))
+    table.add_row("state", _breakdown(section.by_state))
+    console_out.print(table)
+    _section_notes(console_out, section)
+
+
+def _render_deployment(console_out: Console, section: fabric.DeploymentSection) -> None:
+    table = Table(title=f"deployment ({len(section.appliances)})")
+    table.add_column("appliance")
+    table.add_column("mode")
+    table.add_column("license")
+    table.add_column("interfaces")
+    table.add_column("addresses")
+    table.add_column("wan labels", overflow="fold")
+    table.add_column("lan labels", overflow="fold")
+    for appliance in section.appliances:
+        if appliance.unreachable:
+            # One appliance that will not answer is a marked row, never a
+            # missing one — the fan-out contract, rendered.
+            table.add_row(
+                Text(appliance.hostname),
+                Text("unreachable", style="red"),
+                *([_ABSENT.copy()] * 4),
+                Text(appliance.error, style="red"),
+            )
+            continue
+        table.add_row(
+            Text(appliance.hostname),
+            appliance.mode,
+            appliance.license or "-",
+            str(appliance.interfaces),
+            str(appliance.addresses),
+            ", ".join(appliance.wan_labels) or "-",
+            ", ".join(appliance.lan_labels) or "-",
+        )
+    console_out.print(table)
+    _section_notes(console_out, section)
+    if section.unreachable:
+        console_out.print(
+            Text(
+                f"  {len(section.unreachable)} appliance(s) unreachable",
+                style=_DEGRADED_STYLE,
+            )
+        )
+
+
+def render_fabric_config(console_out: Console, report: fabric.FabricConfig) -> None:
+    """The fabric configuration breakdown, one section at a time.
+
+    Every section renders even when empty or degraded: a missing table would
+    read as "the fabric has none of that", which is exactly the wrong thing to
+    tell someone who is looking at a report because something is broken.
+    """
+    for index, section in enumerate(report.sections):
+        if index:
+            console_out.print()
+        if isinstance(section, fabric.OverlaySection):
+            _render_overlays(console_out, section)
+        elif isinstance(section, fabric.TemplateSection):
+            _render_templates(console_out, section)
+        elif isinstance(section, fabric.SecuritySection):
+            _render_security(console_out, section)
+        elif isinstance(section, fabric.InventorySection):
+            _render_inventory(console_out, section)
+        elif isinstance(section, fabric.DeploymentSection):
+            _render_deployment(console_out, section)
+    if report.degraded:
+        console_out.print()
+        console_out.print(
+            Text(
+                "partial data in: "
+                + ", ".join(s.name for s in report.degraded)
+                + " — the sections above say what could not be read",
+                style=_DEGRADED_STYLE,
+            )
+        )
+
+
 # -- show run: appliance CLI running-config (#56) ------------------------------
 #
-# `ec-cli show run appliance <name> [<name>...]`. Declared as its own Typer
-# group under `show` so the fabric-wide bare `show run` (#55) is a one-line
-# addition: give `run_app` a `@run_app.callback(invoke_without_command=True)`
-# that renders the fabric report when no subcommand was given. Nothing here
-# needs to move for that.
-run_app = typer.Typer(help="Running-config views.")
+# `ec-cli show run appliance <name> [<name>...]`, plus the fabric-wide bare
+# `show run` (#55) on the group callback below.
+# No `help=` on the Typer: with `invoke_without_command=True` the callback's
+# docstring is the group's help, and it is the one that describes what a bare
+# `show run` actually does.
+run_app = typer.Typer()
 show_app.add_typer(run_app, name="run")
 
 
-@run_app.callback()
-def show_run() -> None:
-    """Running-config views.
+@run_app.callback(invoke_without_command=True)
+def show_run(
+    ctx: typer.Context,
+    section: Annotated[
+        str | None,
+        typer.Option(
+            "--section",
+            help=f"Scope to one section: {', '.join(fabric.SECTIONS)}.",
+        ),
+    ] = None,
+    timeout: Annotated[
+        float | None,
+        typer.Option("--timeout", help="Overall deadline (seconds) for the deployment fan-out."),
+    ] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+) -> None:
+    """The fabric's Orchestrator-managed configuration, by section.
 
-    The fabric-wide bare `show run` (#55) plugs in here: add
-    `invoke_without_command=True` to this callback and render the fabric
-    report when `ctx.invoked_subcommand is None`.
+    With no subcommand this renders the fabric breakdown — overlays and their
+    members, template groups and where they are applied, orchestrated security
+    policy, the appliance inventory, and each appliance's deployment. With
+    `appliance <name>` it reads that appliance's own CLI running-config
+    instead.
+
+    Read-only: every call is a GET, and nothing here touches the candidate
+    config, the journal, or the transaction engine.
+
+    Partial data is never fatal and never silent — an endpoint that will not
+    answer costs its section, which still renders carrying the reason, and the
+    command still exits 0. It is an orientation report: the unreachable rows
+    are part of the answer, not a failure to produce one.
     """
+    if ctx.invoked_subcommand is not None:
+        return
+    try:
+        fabric.resolve_sections(section)
+    except fabric.UnknownSection as exc:
+        # Names the valid sections; `--section overlay` must not be answered
+        # with an empty report.
+        _fail(str(exc))
+    rt_ctx, _registry, _settings = _bootstrap(_state(ctx))
+    report = fabric.collect(rt_ctx, section=section, timeout=timeout)
+    if as_json:
+        console.print_json(json.dumps(fabric.to_payload(report), default=str))
+        return
+    render_fabric_config(console, report)
 
 
 def _render_appliance_config(config: applianceconfig.ApplianceConfig) -> None:
