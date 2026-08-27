@@ -169,3 +169,11 @@ so they stay visible.
 It does **not** flip the tier. `tier = Tier.CURATED` is a source declaration a
 reviewer signs off on, not a runtime toggle; when every machine-checkable box
 is green the command prints the change to make and leaves it to you.
+
+**Caveat on Tier-1 kinds** (see `docs/futures/README.md`): the command gates
+the idempotency checks behind `tier >= CURATED`, so for a generated stub the
+only box it evaluates is the `NotCurated` refusal — which passes, and it then
+prints the promote-now message. Ignore that on a stub: implement `normalize()`
+first, and treat the command as useful from the moment the raise is gone.
+`make check` is not fooled either way — a Tier-2 kind whose `normalize()`
+raises fails the gate immediately.
