@@ -55,14 +55,18 @@ prove nothing about real values.
 from __future__ import annotations
 
 import dataclasses
+import json
 from collections.abc import Iterator
 from typing import Any
 
 import pytest
+import structlog
+from typer.testing import CliRunner
 
 import pyecsdwan.resources  # noqa: F401 - importing registers the built-in plugins
 from pyecsdwan import config, specs
 from pyecsdwan import registry as registry_mod
+from pyecsdwan.cli import main as cli_main
 from pyecsdwan.client import OrchClient
 from pyecsdwan.contract import (
     CanonicalState,
@@ -163,16 +167,22 @@ class Sample:
 
 
 @pytest.fixture(scope="module")
-def mock_ctx() -> Iterator[Ctx]:
-    """A Ctx pointed at the bundled mock, with the empty tables seeded."""
+def mock_fabric() -> Iterator[str]:
+    """Base URL of a bundled mock with the empty tables seeded."""
     base_url, state, shutdown = run_in_thread()
     try:
         state.reset()
         _seed_untouched_tables(state)
-        settings = config.Settings(orch_url=base_url, api_key="test-key", job_timeout=5.0)
-        yield Ctx(client=OrchClient(settings), resolver=Resolver(OrchClient(settings)))
+        yield base_url
     finally:
         shutdown()
+
+
+@pytest.fixture(scope="module")
+def mock_ctx(mock_fabric: str) -> Ctx:
+    """A Ctx pointed at that mock."""
+    settings = config.Settings(orch_url=mock_fabric, api_key="test-key", job_timeout=5.0)
+    return Ctx(client=OrchClient(settings), resolver=Resolver(OrchClient(settings)))
 
 
 def _sample_for(ctx: Ctx, resource: Resource) -> Sample | None:
@@ -429,3 +439,58 @@ def test_manual_checks_are_reported_not_dropped() -> None:
     assert not any(c.failed for c in manual)
     names = {c.name for c in manual}
     assert {"reversibility-class", "async-jobs", "dependencies"} <= names
+
+
+# -- `ec-cli plugin promote` --------------------------------------------------
+#
+# The same checks, pointed at a real Orchestrator instead of the mock — the one
+# thing `make check` cannot do, because a plugin author's own fabric carries
+# shapes the fixtures do not. Built because the checklist logic was reusable as
+# is; it deliberately does NOT edit the plugin to flip the tier, since the tier
+# is a reviewed source declaration, not a runtime toggle.
+
+runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _reset_structlog() -> Iterator[None]:
+    yield
+    # The app callback binds structlog process-wide to CliRunner's capture
+    # stream, which is closed on exit; leaving it bound kills the next test
+    # that logs. (Same teardown as tests/test_coverage.py.)
+    structlog.reset_defaults()
+
+
+def _promote(mock_fabric: str, *args: str) -> Any:
+    port = mock_fabric.rsplit(":", 1)[1]
+    return runner.invoke(cli_main.app, ["--mock", port, "plugin", "promote", *args])
+
+
+def test_promote_reports_a_curated_kind_as_green(state_home: Any, mock_fabric: str) -> None:
+    result = _promote(mock_fabric, "zones", "--json")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["kind"] == "zones"
+    assert payload["green"] is True
+    names = {c["name"]: c["status"] for c in payload["checks"]}
+    assert names["normalize-idempotent"] == "pass"
+    assert names["replan-empty"] == "pass"
+    # The boxes a machine cannot decide are reported, never silently dropped.
+    assert names["reversibility-class"] == "manual"
+
+
+def test_promote_needs_a_ref_it_cannot_enumerate(state_home: Any, mock_fabric: str) -> None:
+    """security-policy has no listing endpoint; the command says so instead of
+    quietly reporting green on nothing."""
+    result = _promote(mock_fabric, "security-policy")
+    assert result.exit_code == 2
+    assert "enumerates no instances" in result.output
+    named = _promote(mock_fabric, "security-policy", "--name", "0_0", "--json")
+    assert named.exit_code == 0, named.output
+    assert json.loads(named.stdout)["green"] is True
+
+
+def test_promote_rejects_an_unknown_kind(state_home: Any, mock_fabric: str) -> None:
+    result = _promote(mock_fabric, "not-a-kind")
+    assert result.exit_code == 2
+    assert "unknown resource kind" in result.output
