@@ -409,13 +409,11 @@ def test_the_gate_bites_a_vacuous_sample() -> None:
 
 
 def test_the_gate_bites_a_resource_that_replans_dirty(mock_ctx: Ctx) -> None:
-    checks = check_idempotent(
-        _NonReplanningResource(), _STUB_REF, dict(_SAMPLE_RAW), mock_ctx
-    )
+    checks = check_idempotent(_NonReplanningResource(), _STUB_REF, dict(_SAMPLE_RAW), mock_ctx)
     assert _statuses(checks)["replan-empty"] is CheckStatus.FAIL
-    assert not check_idempotent(
-        _NonReplanningResource(), _STUB_REF, dict(_SAMPLE_RAW)
-    )[-1].failed  # without a ctx the replan box is not evaluated at all
+    assert not check_idempotent(_NonReplanningResource(), _STUB_REF, dict(_SAMPLE_RAW))[
+        -1
+    ].failed  # without a ctx the replan box is not evaluated at all
 
 
 def test_the_gate_bites_over_a_whole_registry() -> None:
@@ -501,3 +499,32 @@ def test_promote_validates_scope_on_a_named_ref(state_home: Any, mock_fabric: st
     result = _promote(mock_fabric, "appliance/bgp", "--name", "config")
     assert result.exit_code == 2
     assert "appliance-scoped" in result.output
+
+
+def test_promote_refuses_to_green_light_an_un_curated_stub(
+    state_home: Any, mock_fabric: str
+) -> None:
+    """A Tier-1 stub passes exactly one box — "normalize() refuses" — and the
+    Tier-2 boxes cannot run while normalize() raises. Reporting that as green
+    would tell a curator to set tier = Tier.CURATED on a resource whose
+    normalize() still raises, which `make check` then rejects. The advice has
+    to match what was actually verified."""
+    stub_kinds = [
+        k for k in default_registry.kinds() if default_registry.get(k).tier < Tier.CURATED
+    ]
+    assert stub_kinds, "expected at least one generated stub to be registered"
+    kind = stub_kinds[0]
+
+    result = _promote(mock_fabric, kind)
+    assert result.exit_code == 1, result.output
+    assert "were NOT checked" in result.output
+
+    as_json = _promote(mock_fabric, kind, "--json")
+    assert as_json.exit_code == 1
+    payload = json.loads(as_json.stdout)
+    assert payload["green"] is False
+    assert payload["tier2_evaluated"] is False
+    # The one box it *can* evaluate still passes — the stub is correct.
+    names = {c["name"]: c["status"] for c in payload["checks"]}
+    assert names["generated-normalize-refuses"] == "pass"
+    assert "normalize-idempotent" not in names

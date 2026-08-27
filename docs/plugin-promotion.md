@@ -166,6 +166,15 @@ fixtures do not. It is read-only (one `fetch()` for the sampled instance) and
 exits non-zero when a box fails. It also lists the human-judgment boxes above,
 so they stay visible.
 
+**On a Tier-1 stub it reports "not ready" and exits non-zero, by design.** The
+only box it can evaluate there is the `NotCurated` refusal, and that one passes
+*because* the stub is still a stub. The Tier-2 boxes cannot run at all while
+`normalize()` raises, so there is nothing to be green about — implement
+`normalize()` first, set `tier = Tier.CURATED`, then re-run to have the Tier-2
+boxes actually evaluated. `--json` reports this as `green: false` with
+`tier2_evaluated: false`. An un-curated kind needs no sample instance, so the
+command answers without one (generated stubs implement no `list_refs()`).
+
 It does **not** flip the tier. `tier = Tier.CURATED` is a source declaration a
 reviewer signs off on, not a runtime toggle; when every machine-checkable box
 is green the command prints the change to make and leaves it to you.

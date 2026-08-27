@@ -313,22 +313,7 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   valid, drift-tolerant models; they just under-type. A value-shaped rule
   (all sibling values share one schema, key names vary) would catch the rest
   and is the obvious next iteration.
-- **`ec-cli plugin promote` green-lights a Tier-1 stub.** The command runs
-  `check_untransactional_normalize` for every kind but gates
-  `check_idempotent` behind `resource.tier >= Tier.CURATED`
-  (`cli/main.py::plugin_promote`). For a generated stub that means the *only*
-  box evaluated is "un-curated kinds must refuse", which passes precisely
-  because `normalize()` still raises `NotCurated` — and the command then
-  prints "every machine-checkable box is green ... set `tier = Tier.CURATED`".
-  Following that advice produces a Tier-2 kind whose `normalize()` raises,
-  which `make check` rejects immediately (so nothing unsafe ships), but the
-  advice is backwards and it is the one command a curator is pointed at. The
-  branch was unreachable when #29 shipped, because no Tier-0/1 kind was
-  registered; #27's stubs made it reachable. Fix is small and belongs in
-  `cli/`: when `tier < CURATED`, say "still un-curated — implement
-  `normalize()` first" instead of the promote-now message, and run
-  `check_idempotent` anyway so the output shows what curation still owes.
-  Not fixed here because `cli/` was owned by parallel work.
+
 - **`gen_models.dunder_all_order` and ruff disagree on one family of names.**
   The helper reproduces `RUF022`'s isort-style order by splitting digit runs
   and comparing them as integers; ruff uses `strnatcmp` semantics, where a

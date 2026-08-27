@@ -748,10 +748,7 @@ def show_coverage(
         for row in all_rows
         if (tier is None or row.tier == tier)
         and (scope is None or row.scope == scope)
-        and (
-            kind is None
-            or specs.endpoint_key(row.scope, row.method, row.path) in covered_by_kind
-        )
+        and (kind is None or specs.endpoint_key(row.scope, row.method, row.path) in covered_by_kind)
     ]
     counts = _coverage_rollup(all_rows)
     unknown = _undeclared_keys(registry)
@@ -1034,14 +1031,25 @@ def plugin_promote(
     state = _state(ctx)
     rt_ctx, registry, _settings = _bootstrap(state)
     resource = _resource_for(registry, kind)
-    ref = _promotion_sample_ref(rt_ctx, registry, resource, name, appliance)
+    curated = resource.tier >= Tier.CURATED
 
+    # Only the Tier-2 boxes need a sample instance. An un-curated kind is
+    # answerable without one — and must be, since generated stubs implement no
+    # list_refs() and failing to resolve a ref would hide the real answer
+    # ("still a stub") behind a ref-resolution error.
     checks = [registry_mod.check_untransactional_normalize(resource)]
-    if resource.tier >= Tier.CURATED:
+    ref: Ref | None = None
+    if curated:
+        ref = _promotion_sample_ref(rt_ctx, registry, resource, name, appliance)
         raw = resource.fetch(rt_ctx, ref)
         checks.extend(registry_mod.check_idempotent(resource, ref, raw, rt_ctx))
     checks.extend(registry_mod.manual_checks())
     failed = [c for c in checks if c.failed]
+    # An un-curated kind never counts as green: the Tier-2 boxes above were
+    # skipped, and they *cannot* run while normalize() raises NotCurated.
+    # Reporting green on one evaluated box would tell a curator to promote a
+    # stub, producing a Tier-2 kind whose normalize() raises.
+    green = not failed and curated
 
     if as_json:
         console.print_json(
@@ -1049,8 +1057,9 @@ def plugin_promote(
                 {
                     "kind": kind,
                     "tier": int(resource.tier),
-                    "ref": str(ref),
-                    "green": not failed,
+                    "ref": str(ref) if ref is not None else None,
+                    "green": green,
+                    "tier2_evaluated": curated,
                     "checks": [dataclasses.asdict(c) for c in checks],
                 },
                 default=str,
@@ -1058,7 +1067,8 @@ def plugin_promote(
         )
     else:
         console.print(_check_table(kind, checks))
-        console.print(Text(f"sampled {ref}", style="dim"))
+        if ref is not None:
+            console.print(Text(f"sampled {ref}", style="dim"))
 
     if failed:
         if not as_json:
@@ -1066,20 +1076,30 @@ def plugin_promote(
                 Text(f"{len(failed)} checklist box(es) failed — not ready for Tier 2", style="red")
             )
         raise typer.Exit(1)
-    if as_json:
+    if curated:
+        if not as_json:
+            console.print(Text(f"ok: {kind} still meets its Tier-2 obligations", style="green"))
         return
-    if resource.tier >= Tier.CURATED:
-        console.print(Text(f"ok: {kind} still meets its Tier-2 obligations", style="green"))
-    else:
-        console.print(
-            Text(
-                f"ok: every machine-checkable box is green for {kind}. Confirm the "
-                f"manual boxes above, then set `tier = Tier.CURATED` on the "
-                f"resource class and re-run `make check` — the tier is a reviewed "
-                f"source declaration, so this command will not flip it for you.",
-                style="green",
-            )
+    # An un-curated kind reaching here has passed exactly one box: "normalize()
+    # refuses". The Tier-2 boxes were not evaluated and *cannot* be while
+    # normalize() still raises — so this is not a green light, and saying
+    # "every machine-checkable box is green" here would be advice that produces
+    # a Tier-2 kind whose normalize() raises. Report the real state instead.
+    if as_json:
+        raise typer.Exit(1)
+    err_console.print(
+        Text(
+            f"{kind} is tier {int(resource.tier)} (generated). It correctly refuses "
+            f"to normalize, and that is the only box this command can evaluate — "
+            f"the Tier-2 obligations above were NOT checked, because idempotency "
+            f"cannot be proved while normalize() raises NotCurated.\n"
+            f"Implement normalize() first (docs/plugin-promotion.md), set "
+            f"`tier = Tier.CURATED`, then re-run this command to have the Tier-2 "
+            f"boxes actually evaluated.",
+            style="yellow",
         )
+    )
+    raise typer.Exit(1)
 
 
 # -- entrypoint ---------------------------------------------------------------
