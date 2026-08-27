@@ -281,9 +281,7 @@ def _seed_deployment() -> dict[str, Any]:
             "vrf": 0,
             "role": devnum_role,
             "proxy_arp": False,
-            "dhcpd": dhcpd
-            if dhcpd is not None
-            else {"type": "none", "server": {}, "relay": {}},
+            "dhcpd": dhcpd if dhcpd is not None else {"type": "none", "server": {}, "relay": {}},
         }
 
     return {
@@ -855,12 +853,30 @@ def _shaper_traffic_classes(names: tuple[str, str, str]) -> dict[str, Any]:
     """Trimmed traffic-class subtree (live has 10 classes; 3 is enough to
     exercise numeric key ordering and per-class passthrough)."""
     return {
-        "1": {"name": names[0], "priority": 1, "min_bw": 10, "max_bw": 100,
-              "excess": 100, "max_wait": 100},
-        "2": {"name": names[1], "priority": 2, "min_bw": 5, "max_bw": 100,
-              "excess": 100, "max_wait": 200},
-        "10": {"name": names[2], "priority": 10, "min_bw": 0, "max_bw": 100,
-               "excess": 1, "max_wait": 1000},
+        "1": {
+            "name": names[0],
+            "priority": 1,
+            "min_bw": 10,
+            "max_bw": 100,
+            "excess": 100,
+            "max_wait": 100,
+        },
+        "2": {
+            "name": names[1],
+            "priority": 2,
+            "min_bw": 5,
+            "max_bw": 100,
+            "excess": 100,
+            "max_wait": 200,
+        },
+        "10": {
+            "name": names[2],
+            "priority": 10,
+            "min_bw": 0,
+            "max_bw": 100,
+            "excess": 1,
+            "max_wait": 1000,
+        },
     }
 
 
@@ -1491,6 +1507,173 @@ def _seed_app_express_associations() -> list[dict[str, Any]]:
 # -- state -------------------------------------------------------------------
 
 
+# -- operational reports (#54: versions, flows, cli) ---------------------------
+#
+# Read-only surfaces for the `show version` / `show flows` / `show run
+# appliance` commands. Shapes follow specs/orchestrator-openapi-7.2.0.json:
+#
+# * GET /gms/versions       -> {current, installed[]}. `current` is the
+#   RUNNING Orchestrator; `installed` is the three versions available to
+#   upgrade to. The spec summary ("Returns available orchestrator versions")
+#   reads as if the whole response answered "what version is this?" — it does
+#   not, and the mock keeps them visibly different so a report that renders
+#   the wrong one fails a test.
+# * GET /appliancesSoftwareVersions?nePk=&cached=  -> one entry per partition.
+#   BOTH query parameters are required by the spec.
+# * GET /flow?nePk=&maxFlows=  -> {active: {...counters...}, flows: [...]}.
+#   nePk and maxFlows are both required. ip1/ip2 are dotted strings and
+#   overlayName is already resolved, so neither needs decoding or a lookup.
+
+
+def _seed_orchestrator_versions() -> dict[str, Any]:
+    return {"current": "9.4.2.40100", "installed": ["9.4.2.40100", "9.4.1.40077", "9.3.4.39802"]}
+
+
+def _seed_appliance_versions() -> dict[str, list[dict[str, Any]]]:
+    """Per-nePk partition table. BR2-EC is deliberately skewed a minor release
+    behind, and its next_boot is the fallback partition rather than the active
+    one — the two conditions `show version` exists to make visible."""
+    return {
+        "1.NE": [
+            {
+                "partition": 0,
+                "build_version": "9.4.2.40100",
+                "build_time": "2026-06-11T02:14:00Z",
+                "active": True,
+                "next_boot": True,
+                "fallback_boot": False,
+            },
+            {
+                "partition": 1,
+                "build_version": "9.4.1.40077",
+                "build_time": "2026-04-02T02:11:00Z",
+                "active": False,
+                "next_boot": False,
+                "fallback_boot": True,
+            },
+        ],
+        "3.NE": [
+            {
+                "partition": 0,
+                "build_version": "9.4.2.40100",
+                "build_time": "2026-06-11T02:14:00Z",
+                "active": True,
+                "next_boot": True,
+                "fallback_boot": False,
+            },
+            {
+                "partition": 1,
+                "build_version": "9.4.1.40077",
+                "build_time": "2026-04-02T02:11:00Z",
+                "active": False,
+                "next_boot": False,
+                "fallback_boot": True,
+            },
+        ],
+        "5.NE": [
+            {
+                "partition": 0,
+                "build_version": "9.3.4.39802",
+                "build_time": "2026-01-20T02:09:00Z",
+                "active": True,
+                "next_boot": False,
+                "fallback_boot": False,
+            },
+            {
+                "partition": 1,
+                "build_version": "9.4.1.40077",
+                "build_time": "2026-04-02T02:11:00Z",
+                "active": False,
+                "next_boot": True,
+                "fallback_boot": True,
+            },
+        ],
+    }
+
+
+def _flow_row(
+    flow_id: int,
+    ip1: str,
+    port1: int,
+    ip2: str,
+    port2: int,
+    application: str,
+    overlay: str,
+    protocol: str = "tcp",
+) -> dict[str, Any]:
+    """One flow row, trimmed to the fields a report renders.
+
+    The real response carries 78 fields per row; the mock keeps the rendered
+    subset plus the ones whose absence would hide a bug. Note ip1/ip2 are
+    dotted strings — the ip1_1..ip1_4 integer quadruple in the spec is the
+    128-bit form and is not what a report should read.
+    """
+    return {
+        "flowId": flow_id,
+        "flowSeq": 1,
+        "ip1": ip1,
+        "port1": port1,
+        "ip2": ip2,
+        "port2": port2,
+        "ip1Version": 4,
+        "ip2Version": 4,
+        "application": application,
+        "protocol": protocol,
+        "overlayName": overlay,
+        "trafficClass": 1,
+        "status": "active",
+        "uptime": 4210,
+        "fromZone": 0,
+        "toZone": 0,
+        "vrf1": 0,
+        "vrf2": 0,
+        "outboundTxBytes": 918_244,
+        "outboundRxBytes": 44_120,
+        "inboundTxBytes": 51_002,
+        "inboundRxBytes": 883_910,
+    }
+
+
+def _seed_flows() -> dict[str, list[dict[str, Any]]]:
+    """Per-nePk active flows.
+
+    10.1.1.5 appears on two appliances as the two ends of one conversation
+    (HUB1 sees it as ip2, BR1 as ip1) — that is the case `show flow <ip>` has
+    to dedupe rather than report twice.
+    """
+    return {
+        "1.NE": [
+            _flow_row(1001, "10.20.0.9", 51_411, "10.1.1.5", 443, "https", "RealTime"),
+            _flow_row(1002, "10.20.0.9", 51_412, "10.30.7.2", 22, "ssh", "CriticalApps"),
+            _flow_row(1003, "10.20.0.14", 33_100, "8.8.8.8", 53, "dns", "Passthrough", "udp"),
+        ],
+        "3.NE": [
+            _flow_row(2001, "10.1.1.5", 443, "10.20.0.9", 51_411, "https", "RealTime"),
+            _flow_row(2002, "10.1.1.7", 8080, "10.20.0.31", 44_902, "http", "CriticalApps"),
+        ],
+        "5.NE": [
+            _flow_row(3001, "10.2.9.4", 3389, "10.20.0.55", 49_888, "rdp", "CriticalApps"),
+        ],
+    }
+
+
+def _seed_cli_output() -> dict[str, str]:
+    """`show running-config` text per nePk, keyed by hostname in the banner so
+    a report that attributes output to the wrong appliance is visible."""
+    return {
+        pk: (
+            f"# {name} running-config\n"
+            "hostname " + name + "\n"
+            "interface mgmt0\n  ip address 192.168.10.20/24\n"
+            "segment default\n  overlay RealTime\n"
+        )
+        for pk, name in (("1.NE", "HUB1-EC"), ("3.NE", "BR1-EC"), ("5.NE", "BR2-EC"))
+    }
+
+
+# -- end operational reports (#54) seed data ----------------------------------
+
+
 @dataclass
 class MockState:
     """Resettable in-memory Orchestrator state shared with the FastAPI app.
@@ -1562,9 +1745,7 @@ class MockState:
     overlay_priority: dict[str, Any] = field(default_factory=_seed_overlay_priority)
     #: Ordered template-group apply order (list of group names), replaced
     #: wholesale by POST /template/templateGroupsPriorities.
-    template_group_priorities: list[str] = field(
-        default_factory=_seed_template_group_priorities
-    )
+    template_group_priorities: list[str] = field(default_factory=_seed_template_group_priorities)
     # -- regions (#35) --
     #: Network regions, the array shape GET /regions returns.
     regions: list[dict[str, Any]] = field(default_factory=_seed_regions)
@@ -1583,9 +1764,7 @@ class MockState:
     snat_maps: dict[str, Any] = field(default_factory=_seed_snat_maps)
     #: Read-only inter-segment D-NAT view ({nePk: VRFPolicyMap}); there is no
     #: D-NAT write endpoint in either spec.
-    dnat_maps: dict[str, Any] = field(
-        default_factory=lambda: {"1.NE": {"0_1": {"enable": True}}}
-    )
+    dnat_maps: dict[str, Any] = field(default_factory=lambda: {"1.NE": {"0_1": {"enable": True}}})
     # -- common settings (#38) --
     # snmp / logging/config / mgmtServices / banners are appliance-scope and
     # live in appliance_ecos above (no dedicated fields). Only the Orchestrator
@@ -1607,6 +1786,16 @@ class MockState:
     app_express_associations: list[dict[str, Any]] = field(
         default_factory=_seed_app_express_associations
     )
+    # -- operational reports (#54) --
+    orchestrator_versions: dict[str, Any] = field(default_factory=_seed_orchestrator_versions)
+    #: {nePk: [partition entry, ...]}
+    appliance_versions: dict[str, list[dict[str, Any]]] = field(
+        default_factory=_seed_appliance_versions
+    )
+    #: {nePk: [flow row, ...]} served by GET /flow with its query filters.
+    flows: dict[str, list[dict[str, Any]]] = field(default_factory=_seed_flows)
+    #: {nePk: running-config text} returned by the ECOS `cli` proxy path.
+    cli_output: dict[str, str] = field(default_factory=_seed_cli_output)
 
     def reset(self) -> None:
         """Restore every field to its seeded default (in place)."""
@@ -1954,17 +2143,13 @@ def create_app(state: MockState | None = None) -> FastAPI:
             return list(mock.template_groups.values())
         group = mock.template_groups.get(templateGroup)
         if group is None:
-            return JSONResponse(
-                {"error": f"no template group {templateGroup!r}"}, status_code=404
-            )
+            return JSONResponse({"error": f"no template group {templateGroup!r}"}, status_code=404)
         return group
 
     @api.post("/template/templateGroups")
     async def update_template_group(request: Request, templateGroup: str) -> Response:
         if templateGroup not in mock.template_groups:
-            return JSONResponse(
-                {"error": f"no template group {templateGroup!r}"}, status_code=404
-            )
+            return JSONResponse({"error": f"no template group {templateGroup!r}"}, status_code=404)
         body = await _json_body(request)
         if not isinstance(body, dict):
             return JSONResponse({"error": "body must be a template group object"}, status_code=400)
@@ -1988,9 +2173,7 @@ def create_app(state: MockState | None = None) -> FastAPI:
     @api.delete("/template/templateGroups")
     async def delete_template_group(templateGroup: str) -> Response:
         if templateGroup not in mock.template_groups:
-            return JSONResponse(
-                {"error": f"no template group {templateGroup!r}"}, status_code=404
-            )
+            return JSONResponse({"error": f"no template group {templateGroup!r}"}, status_code=404)
         del mock.template_groups[templateGroup]
         mock.template_selection.pop(templateGroup, None)
         for ne_pk, groups in mock.template_association.items():
@@ -2000,17 +2183,13 @@ def create_app(state: MockState | None = None) -> FastAPI:
     @api.get("/template/templateSelection")
     async def get_template_selection(templateGroup: str) -> Any:
         if templateGroup not in mock.template_groups:
-            return JSONResponse(
-                {"error": f"no template group {templateGroup!r}"}, status_code=404
-            )
+            return JSONResponse({"error": f"no template group {templateGroup!r}"}, status_code=404)
         return mock.template_selection.get(templateGroup, [])
 
     @api.post("/template/templateSelection")
     async def set_template_selection(request: Request, templateGroup: str) -> Response:
         if templateGroup not in mock.template_groups:
-            return JSONResponse(
-                {"error": f"no template group {templateGroup!r}"}, status_code=404
-            )
+            return JSONResponse({"error": f"no template group {templateGroup!r}"}, status_code=404)
         body = await _json_body(request)
         if not isinstance(body, list):
             return JSONResponse({"error": "body must be a list of template names"}, status_code=400)
@@ -2097,9 +2276,7 @@ def create_app(state: MockState | None = None) -> FastAPI:
     async def add_overlay_association(request: Request) -> Response:
         body = await _json_body(request)
         if not isinstance(body, dict):
-            return JSONResponse(
-                {"error": "body must map overlay id -> nePk list"}, status_code=400
-            )
+            return JSONResponse({"error": "body must map overlay id -> nePk list"}, status_code=400)
         for overlay_id, ne_pks in body.items():
             if not isinstance(ne_pks, list):
                 continue
@@ -2113,9 +2290,7 @@ def create_app(state: MockState | None = None) -> FastAPI:
     async def remove_overlay_association(request: Request) -> Response:
         body = await _json_body(request)
         if not isinstance(body, dict):
-            return JSONResponse(
-                {"error": "body must map overlay id -> nePk list"}, status_code=400
-            )
+            return JSONResponse({"error": "body must map overlay id -> nePk list"}, status_code=400)
         for overlay_id, ne_pks in body.items():
             if not isinstance(ne_pks, list):
                 continue
@@ -2191,9 +2366,7 @@ def create_app(state: MockState | None = None) -> FastAPI:
     async def replace_zones(request: Request, deleteDependencies: bool) -> Response:
         body = await _json_body(request)
         if not isinstance(body, dict):
-            return JSONResponse(
-                {"error": "body must map zone id -> zone object"}, status_code=400
-            )
+            return JSONResponse({"error": "body must map zone id -> zone object"}, status_code=400)
         mock.zones = {str(zone_id): zone for zone_id, zone in body.items()}
         # Real Orchestrator behavior: the Default zone is re-added to any
         # table posted without it.
@@ -2256,6 +2429,20 @@ def create_app(state: MockState | None = None) -> FastAPI:
         # -- acls / ipObjects / appExpress (#31): real ACL + dependency behavior.
         if url == _ACLS_ECOS_PATH or url.startswith(_ACL_DEPENDENCY_PREFIX):
             return await _acls_dispatch(request, mock, nePk, url)
+        # -- cli passthrough (#54/#56): POST cli {"command": ...} -> text.
+        # Read-only by construction here: the mock answers `show running-config`
+        # and refuses anything else, mirroring the allowlist the CLI must apply.
+        if url == "cli":
+            body = await _json_body(request)
+            command = str(body.get("command", "")) if isinstance(body, dict) else ""
+            if not command.strip().startswith(("show", "display")):
+                return JSONResponse(
+                    {"error": f"refused non-read command: {command!r}"}, status_code=400
+                )
+            return Response(
+                content=mock.cli_output.get(nePk, f"# {nePk}: no running-config fixture\n"),
+                media_type="text/plain",
+            )
         store = mock.appliance_ecos.setdefault(nePk, {})
         # -- deployment (#12) --
         # deployment/validate is a virtual ECOS endpoint: it never touches
@@ -2283,6 +2470,82 @@ def create_app(state: MockState | None = None) -> FastAPI:
                 appliance["hasUnsavedChanges"] = True
         return Response(status_code=204)
 
+    # -- operational reports (#54) --------------------------------------------
+
+    @api.get("/gms/versions")
+    async def orchestrator_versions() -> Any:
+        """{current, installed[]} — `current` is the RUNNING Orchestrator."""
+        return mock.orchestrator_versions
+
+    @api.get("/appliancesSoftwareVersions")
+    async def appliance_software_versions(nePk: str, cached: bool) -> Any:
+        """Per-partition ECOS versions. Both query parameters are required by
+        the spec, so an omitted `cached` is a 422 here as it would be live —
+        a `--no-cache` flag must send cached=false, not drop the parameter."""
+        return mock.appliance_versions.get(nePk, [])
+
+    @api.get("/flow")
+    async def appliance_flows(
+        request: Request,
+        nePk: str,
+        maxFlows: int,
+        ip1: str | None = None,
+        ip2: str | None = None,
+        ipEitherFlag: bool = False,
+        overlays: str | None = None,
+    ) -> Any:
+        """Active flows with the server-side filters a report relies on.
+
+        `nePk` and `maxFlows` are required (FastAPI 422s without them, as the
+        real API 400s). `ipEitherFlag` is the one that matters: it matches an
+        address at *either* end, which is what makes `show flow <ip>` a server-
+        side query rather than a fetch-everything-and-filter.
+        """
+        rows = list(mock.flows.get(nePk, []))
+        if ip1 and ipEitherFlag:
+            rows = [r for r in rows if ip1 in (r.get("ip1"), r.get("ip2"))]
+        elif ip1:
+            rows = [r for r in rows if r.get("ip1") == ip1]
+        if ip2:
+            rows = [r for r in rows if r.get("ip2") == ip2]
+        if overlays:
+            wanted = {o.strip() for o in overlays.split(",") if o.strip()}
+            rows = [r for r in rows if r.get("overlayName") in wanted]
+        truncated = rows[:maxFlows]
+        passthrough = sum(1 for r in truncated if r.get("overlayName") == "Passthrough")
+        return {
+            "active": {
+                "total_flows": len(truncated),
+                "flows_optimized": len(truncated) - passthrough,
+                "flows_passthrough": passthrough,
+                "flows_management": 0,
+                "flows_with_issues": 0,
+                "flows_with_ignores": 0,
+                "stale_flows": 0,
+                "inconsistent_flows": 0,
+                "flows_asymmetric": 0,
+                "flows_firewall_dropped": 0,
+                "flows_ips_dropped": 0,
+                "flows_route_dropped": 0,
+            },
+            "flows": truncated,
+        }
+
+    @api.post("/broadcastCli")
+    async def broadcast_cli(request: Request) -> Any:
+        """Multi-appliance CLI. Returns a bare JSON string — the GUID — not an
+        object; poll it through /action/status?key= like any other action."""
+        body = await _json_body(request)
+        ne_pks = body.get("nePks", []) if isinstance(body, dict) else []
+        cmds = body.get("cmdList", []) if isinstance(body, dict) else []
+        if not isinstance(ne_pks, list) or not isinstance(cmds, list) or not cmds:
+            return JSONResponse(
+                {"error": "body must carry non-empty cmdList and nePks"}, status_code=400
+            )
+        return mock.new_action(ne_pks=[str(p) for p in ne_pks], name="broadcast cli")
+
+    # -- end operational reports (#54) ----------------------------------------
+
     @api.post("/appliance/saveChanges")
     async def save_changes(request: Request, nePk: str | None = None) -> Any:
         body = await _json_body(request)
@@ -2294,11 +2557,7 @@ def create_app(state: MockState | None = None) -> FastAPI:
             for appliance in mock.appliances:
                 if appliance.get("nePk") in ne_pks:
                     appliance["hasUnsavedChanges"] = False
-        return {
-            "clientKey": mock.new_action(
-                ne_pks=[str(p) for p in ne_pks], name="save changes"
-            )
-        }
+        return {"clientKey": mock.new_action(ne_pks=[str(p) for p in ne_pks], name="save changes")}
 
     # bgp (#16) and ospf (#17) Stage 2 moved to the generic /appliance/rest
     # proxy below (appliance_ecos store) — no dedicated orchestrator-level
@@ -2436,9 +2695,7 @@ def create_app(state: MockState | None = None) -> FastAPI:
     async def replace_overlay_priority(request: Request) -> Response:
         body = await _json_body(request)
         if not isinstance(body, dict):
-            return JSONResponse(
-                {"error": "body must map priority -> overlay id"}, status_code=400
-            )
+            return JSONResponse({"error": "body must map priority -> overlay id"}, status_code=400)
         # Real-Orchestrator rule (vendored SDK: "each overlay ID must have a
         # unique priority") — modeled so a resource that skipped its
         # pre-flight validation would get the 4xx it deserves here.
@@ -2572,9 +2829,7 @@ def create_app(state: MockState | None = None) -> FastAPI:
     async def create_region_associations(request: Request) -> Any:
         body = await _json_body(request)
         if not isinstance(body, list):
-            return JSONResponse(
-                {"error": "body must be [{nePk, regionId}, ...]"}, status_code=400
-            )
+            return JSONResponse({"error": "body must be [{nePk, regionId}, ...]"}, status_code=400)
         for entry in body:
             if not isinstance(entry, dict) or "nePk" not in entry or "regionId" not in entry:
                 continue
@@ -2643,9 +2898,7 @@ def create_app(state: MockState | None = None) -> FastAPI:
         if not name:
             return JSONResponse({"error": "group body must carry 'name'"}, status_code=400)
         if body.get("type") != type_code:
-            return JSONResponse(
-                {"error": f"group 'type' must be {type_code!r}"}, status_code=400
-            )
+            return JSONResponse({"error": f"group 'type' must be {type_code!r}"}, status_code=400)
         rules = body.get("rules")
         if not isinstance(rules, list):
             return JSONResponse({"error": "group body must carry 'rules'"}, status_code=400)
