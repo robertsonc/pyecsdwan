@@ -346,7 +346,18 @@ def _show_pending(state: ShellState) -> None:
 
 
 def _show_coverage(state: ShellState) -> None:
-    table = Table("kind", "scope", "reversibility", "tier")
+    """Summary only: kinds, their tier, and the endpoint-universe roll-up.
+
+    Deliberately narrower than ``ec-cli show coverage`` — the per-endpoint
+    view is 1800-odd rows and belongs in the scriptable CLI, not a prompt —
+    but the numbers come from the same helper so the two cannot disagree.
+    """
+    # Imported here (not at module scope) for the same reason `render` is:
+    # `pyecsdwan.cli.main` imports this module lazily, so a top-level import
+    # back into it would be circular.
+    from pyecsdwan.cli.main import coverage_summary_line
+
+    table = Table("kind", "scope", "reversibility", "tier", "endpoints")
     for kind in state.registry.kinds():
         resource = state.registry.get(kind)
         table.add_row(
@@ -354,8 +365,11 @@ def _show_coverage(state: ShellState) -> None:
             resource.scope.value,
             resource.reversibility.value,
             str(int(resource.tier)),
+            str(len(resource.endpoints)),
         )
     state.console.print(table)
+    state.console.print(coverage_summary_line(state.registry))
+    _info(state.console, "`ec-cli show coverage --endpoints` lists every known endpoint")
 
 
 def _show_generic(args: list[str], state: ShellState) -> None:
