@@ -326,3 +326,19 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   ruff pass fixes the file on disk. Found by generating all 837 write
   operations into the tree at once (#27); not fixed here because
   `tools/gen_models.py` was owned by parallel work.
+
+- **The mock's `GET /flow?overlays=` filter disagrees with the spec, and the
+  Orchestrator overlay inventory cannot supply what the spec wants.** The
+  vendored spec documents `overlays` as *overlay IDs* joined by `|`
+  (`"1|2"`); `mock/server.py` matches *overlay names* split on `,`. Sending
+  the spec's form returns nothing from the mock, and vice versa. Nothing
+  today uses the filter — `show flows summary` (#58) counts rows from one
+  read per appliance instead, for reasons documented in
+  `reports/flows.py` — so this is latent rather than broken. Whoever adds an
+  `--overlay` filter must resolve it against live gear first, and will also
+  hit the second half of the problem: `/gms/overlays/config` enumerates one
+  overlay (`CorpFabric`, id 1) while flow rows name three (`RealTime`,
+  `CriticalApps`, `Passthrough`), so there is no ID for most of what appears
+  in the data. Left alone deliberately — changing the mock's filter
+  semantics would move ground under parallel workers for a feature no
+  command asks for.

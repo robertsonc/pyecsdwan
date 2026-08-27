@@ -23,11 +23,31 @@ from pyecsdwan.reports.fanout import (
     unreachable,
     values,
 )
+from pyecsdwan.reports.flows import (
+    DEFAULT_MAX_FLOWS,
+    PASSTHROUGH,
+    FlowMatch,
+    FlowRow,
+    FlowSearch,
+    FlowsSummary,
+    build_flows_summary,
+    find_flows,
+    parse_query_ip,
+)
 
 __all__ = [
     "DEFAULT_CONCURRENCY",
+    "DEFAULT_MAX_FLOWS",
+    "PASSTHROUGH",
+    "FlowMatch",
+    "FlowRow",
+    "FlowSearch",
+    "FlowsSummary",
     "Outcome",
+    "build_flows_summary",
     "fan_out",
+    "find_flows",
+    "parse_query_ip",
     "unreachable",
     "values",
 ]
