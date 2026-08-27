@@ -63,6 +63,19 @@ KIND_TO_TEMPLATE_SECTIONS: dict[str, tuple[str, ...]] = {
     # selected was available this session; "natPools" is the natural
     # candidate (matches the ECOS path), same convention as the entries above.
     "appliance/nat-pools": ("natPools",),
+    # Policy maps + shapers (#33). "shaper" (pre-seeded above, used as-is by
+    # resources/shapers.py's outbound resource) is CONFIRMED real against a
+    # live Default Template Group's selected-section list. The four names
+    # below are UNVERIFIED: they follow the ECOS-path-matching convention
+    # that was confirmed for "securityMaps", but no live group selecting them
+    # was available this session. The inbound shaper claims the confirmed
+    # "shaper" section too — the Orchestrator's Shaper template covers both
+    # directions — so its ownership detection does not rest on the
+    # unverified half alone.
+    "appliance/qos-map": ("qosMaps",),
+    "appliance/optimization-map": ("optimizationMaps",),
+    "appliance/route-map": ("routeMaps",),
+    "appliance/inbound-shaper": ("shaper", "inboundShapers"),
 }
 
 
