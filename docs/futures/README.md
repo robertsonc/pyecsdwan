@@ -14,6 +14,27 @@ policy (read / write / destructive scopes, per-user, per-appliance), audits
 every call, and exposes a narrow API the CLI can target when the Orchestrator
 proxy is down or too slow. Until that exists, direct mode stays out.
 
+## Legacy MCP server: rebuild or archive? (issue #62)
+
+`contrib/mcp_server_legacy/` is quarantined — disabled by default, read-only
+when enabled, direct-to-appliance tools removed, TLS on, credentials out of
+tool arguments, and now covered by ruff/mypy/tests. What has *not* been
+decided is what it should become:
+
+* **Rebuild** it as a curated front end over `pyecsdwan.Resource`/`txn`, so an
+  agent gets the same plan/journal/ownership/rollback guarantees an operator
+  gets. Note this is not a port: the existing server wraps the vendored
+  `pyedgeconnect` reference SDK, not this product, so a rebuild is new code
+  against a different library. The natural shape is one tool per verb of the
+  existing contract (`plan`, `commit`, `compare`, `rollback`, `show`) rather
+  than one tool per endpoint — a few tools instead of 641.
+* **Archive** it as a separate raw-SDK project, out of this repository
+  entirely, and let this repo carry only the transactional surface.
+
+Either way the quarantine stands in the meantime. The thing that should *not*
+happen is the middle path it was on: a second product surface in the same
+repository with none of the same guarantees.
+
 ## Other deferred items
 
 - ~~**Tier-1 codegen**~~ — shipped as epic #6 (#25 `spec_sync.py`, #26

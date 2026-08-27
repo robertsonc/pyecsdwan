@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "QUARANTINED legacy MCP server (issue #62). Not part of the pyecsdwan",
+    "product: it wraps the vendored pyedgeconnect reference SDK, not",
+    "pyecsdwan, so nothing it does is transactional — no plan, no journal,",
+    "no rollback, no template-ownership check.",
+    "",
+    "It refuses to start without ECSDWAN_MCP_LEGACY_ENABLE=1. Enabled, it",
+    "exposes read-only Orchestrator tools. Direct-to-appliance tools are",
+    "removed entirely (#10). Write tools additionally require",
+    "ECSDWAN_MCP_LEGACY_ALLOW_WRITES=1 and are labelled Tier 0.",
+    "",
+    "Credentials are NEVER passed as tool arguments. Set ECSDWAN_API_KEY",
+    "here, or leave it unset and store the key in the OS keyring (service",
+    "'pyecsdwan', username = the Orchestrator host), which keeps it out of",
+    "this file entirely. There is no username/password path: that would mean",
+    "accepting a password as a tool argument.",
+    "",
+    "TLS verification is on. ECSDWAN_MCP_LEGACY_INSECURE=1 disables it and is",
+    "for a lab you own, never for production."
+  ],
+  "mcpServers": {
+    "pyecsdwan-legacy": {
+      "command": "python3",
+      "args": ["-m", "mcp_server_legacy"],
+      "cwd": "/path/to/pyecsdwan/contrib",
+      "env": {
+        "ECSDWAN_MCP_LEGACY_ENABLE": "1",
+        "ECSDWAN_ORCH_URL": "https://orchestrator.example.com"
+      }
+    }
+  }
+}

@@ -19,7 +19,7 @@ install: venv
 	@echo "Installed. Run ./ec-cli --help"
 
 lint:
-	$(VENV)/bin/ruff check src tests tools
+	$(VENV)/bin/ruff check src tests tools contrib
 
 type:
 	$(VENV)/bin/mypy

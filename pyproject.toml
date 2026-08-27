@@ -42,6 +42,13 @@ mock = [
     "fastapi~=0.141.1",
     "uvicorn~=0.52.4",
 ]
+# Quarantined legacy MCP server under contrib/ (#62). Not part of the product:
+# it wraps the vendored reference SDK, not pyecsdwan, and nothing it does is
+# transactional. Installing this extra does not enable it — see its README.
+mcp-legacy = [
+    "mcp~=1.20",
+    "requests~=2.32",
+]
 dev = [
     "pytest~=9.1",
     "respx~=0.23.1",
@@ -67,7 +74,7 @@ include = ["pyecsdwan*"]
 target-version = "py310"
 line-length = 100
 src = ["src", "tests"]
-extend-exclude = ["pyedgeconnect", "mcp_server", "examples", "docs"]
+extend-exclude = ["pyedgeconnect", "examples", "docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "S", "BLE", "RUF"]
@@ -84,18 +91,44 @@ python_version = "3.10"
 mypy_path = "src"
 # files instead of packages: mypy refuses to combine the two, and tools/
 # holds standalone strict-typed scripts the `make type` gate must cover too.
-files = ["src/pyecsdwan", "tools"]
+files = ["src/pyecsdwan", "tools", "contrib"]
 strict = true
 warn_unreachable = true
 # The vendored pyedgeconnect reference SDK and repo examples are not ours to type.
-exclude = "(pyedgeconnect|mcp_server|examples|build)/"
+exclude = "(pyedgeconnect|examples|build)/"
 
 [[tool.mypy.overrides]]
 module = ["keyring.*", "respx.*"]
 ignore_missing_imports = true
 
+# The quarantined legacy MCP server (#62) imports two packages this product
+# does not depend on: `mcp` (only in the mcp-legacy extra) and the vendored
+# reference SDK, which is not ours to type. Its *policy* module imports
+# neither, which is the point — the security-relevant half type-checks and
+# tests normally.
+[[tool.mypy.overrides]]
+module = ["mcp.*"]
+ignore_missing_imports = true
+
+# `exclude` keeps mypy from *collecting* the vendored SDK; it does not stop it
+# following an import into it. It is a third-party reference copy, not ours to
+# type or to fix.
+[[tool.mypy.overrides]]
+module = ["pyedgeconnect.*"]
+follow_imports = "skip"
+ignore_errors = true
+
+# FastMCP is untyped and is not a product dependency, so its decorator reads as
+# untyped here. Scoped to the one module that touches it.
+[[tool.mypy.overrides]]
+module = ["mcp_server_legacy.server"]
+disallow_untyped_decorators = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# contrib/ is not installed with the package, so the quarantine tests need it
+# on the path explicitly (#62).
+pythonpath = ["contrib"]
 addopts = "-q"
 markers = [
     "slow: end-to-end tests with real detached processes and sleeps",
