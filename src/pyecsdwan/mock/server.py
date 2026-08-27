@@ -905,6 +905,159 @@ def _seed_regional_overlays() -> dict[str, dict[str, Any]]:
 # -- end regions (#35) seed data ----------------------------------------------
 
 
+# -- acls / ipObjects / appExpress (#31) --------------------------------------
+#
+# Two scopes in one issue (see resources/acls.py):
+#   * ACLs are appliance-scope — GET/POST ECOS "acls" and GET
+#     "dependency/acl/{name}", dispatched out of the generic /appliance/rest
+#     proxy below (like subnets3, they need real behavior rather than the
+#     opaque per-url KV store).
+#   * ipObjects + appExpress are orchestrator-scope, with their own routes in
+#     the matching labeled block inside create_app().
+#
+# The ACL seed is the live-captured shape (rules carry the `self` echo and the
+# `gms_marked` flag so the strip/inject round-trip is exercised, and `qmap`/
+# `rmap` sit alongside `entry` so normalize()'s drop of the server-derived
+# reference info is exercised too). The ipObjects/appExpress seeds are
+# spec-derived: those collections were empty on the live lab.
+
+
+def _seed_acls() -> dict[str, dict[str, Any]]:
+    """Per-appliance ACL table, ECOS path 'acls' (#31, live-captured shape)."""
+    return {
+        "1.NE": {
+            "Overlay_RealTime": {
+                "entry": {
+                    "1000": {
+                        "self": 1000,
+                        "comment": "",
+                        "gms_marked": False,
+                        "permit": True,
+                        "application": "rtp",
+                    }
+                },
+                "qmap": {},
+                "rmap": {},
+            }
+        },
+        "3.NE": {
+            "Overlay_BulkApps": {
+                "entry": {
+                    "1000": {
+                        "self": 1000,
+                        "comment": "",
+                        "gms_marked": False,
+                        "permit": True,
+                        "application": "ftp",
+                    },
+                    "1010": {
+                        "self": 1010,
+                        "comment": "",
+                        "gms_marked": False,
+                        "permit": True,
+                        "application": "rsync",
+                    },
+                },
+                "qmap": {},
+                "rmap": {},
+            },
+            "Overlay_CriticalApps": {
+                "entry": {
+                    "1000": {
+                        "self": 1000,
+                        "comment": "",
+                        "gms_marked": False,
+                        "permit": True,
+                        "application": "sap",
+                    }
+                },
+                "qmap": {},
+                "rmap": {},
+            },
+        },
+        "5.NE": {},
+    }
+
+
+def _seed_acl_dependencies() -> dict[str, dict[str, Any]]:
+    """``GET dependency/acl/{name}`` payloads, keyed {nePk: {aclName: body}}.
+
+    Seeded empty: the live lab had no dependent objects to capture, so the
+    real response shape is unknown and resources/acls.py parses it
+    tolerantly. Tests populate this to exercise the in-use pre-flight.
+    """
+    return {"1.NE": {}, "3.NE": {}, "5.NE": {}}
+
+
+def _seed_address_groups() -> dict[str, Any]:
+    """``/ipObjects/addressGroup`` — spec-derived (live lab returned [])."""
+    return {
+        "Branch-Nets": {
+            "type": "AG",
+            "name": "Branch-Nets",
+            "rules": [
+                {
+                    "includedIPs": ["10.1.0.0/16", "10.2.0.0/16"],
+                    "excludedIPs": ["10.1.99.0/24"],
+                    "includedGroups": [],
+                    "comment": "branch subnets",
+                }
+            ],
+        }
+    }
+
+
+def _seed_service_groups() -> dict[str, Any]:
+    """``/ipObjects/serviceGroup`` — spec-derived (live lab returned [])."""
+    return {
+        "Web": {
+            "type": "SG",
+            "name": "Web",
+            "rules": [
+                {
+                    "protocol": "TCP",
+                    "icmpTypes": [],
+                    "icmpCodes": [],
+                    "includedPorts": ["443", "8000-8002"],
+                    "excludedPorts": [],
+                    "includedGroups": [],
+                    "excludedGroups": [],
+                    "comment": "web ports",
+                }
+            ],
+        }
+    }
+
+
+def _seed_app_express_groups() -> dict[str, Any]:
+    """``/applicationDefinition/appExpressGroup/config`` — spec-derived (live
+    lab returned {}). Keyed by lower-cased group name, per the spec."""
+    return {
+        "saas": {
+            "name": "SaaS",
+            "targetQoE": "EXCELLENT",
+            "overlayId": 1,
+            "eligibleTransportPaths": ["INET1", "MPLS1"],
+            "userQoEUpdateInterval": 300,
+            "pingQoEUpdateInterval": 60,
+            "pingInterval": 10,
+            "sourceLoopbacks": [],
+            "useSystemDnsServer": True,
+            "dnsServers": [],
+            "appExpressApps": ["office365"],
+        }
+    }
+
+
+def _seed_app_express_associations() -> list[dict[str, Any]]:
+    """``/applicationDefinition/appExpressGroup/association`` — spec-derived
+    (live lab returned []); the whole table is replaced by one POST."""
+    return [{"nePk": "1.NE", "appExpressGroupName": "SaaS"}]
+
+
+# -- end acls / ipObjects / appExpress (#31) seed data ------------------------
+
+
 # -- state -------------------------------------------------------------------
 
 
@@ -993,6 +1146,22 @@ class MockState:
     #: {overlayId: {regionId: overlay config}}, region-scope-merged by
     #: PUT /gms/overlays/config/regions.
     regional_overlays: dict[str, dict[str, Any]] = field(default_factory=_seed_regional_overlays)
+    # -- acls / ipObjects / appExpress (#31) --
+    #: Per-appliance ACL table ({nePk: {aclName: {entry, qmap, rmap}}}),
+    #: replaced wholesale by POST acls with options.merge=false.
+    acls: dict[str, dict[str, Any]] = field(default_factory=_seed_acls)
+    #: {nePk: {aclName: dependency payload}} served by GET
+    #: dependency/acl/{name}; seeded empty (see _seed_acl_dependencies).
+    acl_dependencies: dict[str, dict[str, Any]] = field(default_factory=_seed_acl_dependencies)
+    #: Orchestrator ip-object stores, keyed by group name.
+    address_groups: dict[str, Any] = field(default_factory=_seed_address_groups)
+    service_groups: dict[str, Any] = field(default_factory=_seed_service_groups)
+    #: AppExpress group configs keyed by lower-cased name, plus the flat
+    #: association array replaced wholesale by one POST.
+    app_express_groups: dict[str, Any] = field(default_factory=_seed_app_express_groups)
+    app_express_associations: list[dict[str, Any]] = field(
+        default_factory=_seed_app_express_associations
+    )
 
     def reset(self) -> None:
         """Restore every field to its seeded default (in place)."""
@@ -1088,6 +1257,83 @@ async def _subnets3_dispatch(request: Request, mock: MockState, ne_pk: str, url:
     return JSONResponse(
         {"error": f"unsupported subnets3 call: {request.method} {url}"}, status_code=400
     )
+
+
+# -- acls / ipObjects / appExpress (#31): ECOS acl + dependency dispatch ----
+#
+# Like subnets3 above, the two ACL ECOS paths need real behavior rather than
+# the opaque per-url KV store the generic proxy falls back to: POST carries
+# {data, options{merge, delDependent}} and the dependency endpoint is a
+# separate read used by the resource's removal pre-flight.
+
+_ACLS_ECOS_PATH = "acls"
+_ACL_DEPENDENCY_PREFIX = "dependency/acl/"
+
+
+def _acl_is_in_use(dependency_payload: Any) -> bool:
+    """Whether a dependency payload names anything at all.
+
+    A record like ``{"rmap": [], "qmap": {}}`` is *present but empty* — the
+    ACL is unreferenced. Only a non-empty member counts as in use.
+    """
+    if isinstance(dependency_payload, dict):
+        return any(bool(value) for value in dependency_payload.values())
+    return bool(dependency_payload)
+
+
+async def _acls_dispatch(request: Request, mock: MockState, ne_pk: str, url: str) -> Any:
+    table = mock.acls.setdefault(ne_pk, {})
+    if url.startswith(_ACL_DEPENDENCY_PREFIX):
+        if request.method != "GET":
+            return JSONResponse(
+                {"error": f"unsupported acl dependency call: {request.method} {url}"},
+                status_code=400,
+            )
+        acl_name = url[len(_ACL_DEPENDENCY_PREFIX) :]
+        return mock.acl_dependencies.get(ne_pk, {}).get(acl_name, {})
+    if request.method == "GET":
+        return table
+    if request.method == "POST":
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "acls body must be an object"}, status_code=400)
+        data = body.get("data")
+        options = body.get("options")
+        if not isinstance(data, dict) or not isinstance(options, dict):
+            return JSONResponse(
+                {"error": "acls body must carry 'data' and an 'options' object"},
+                status_code=400,
+            )
+        if "merge" not in options or "delDependent" not in options:
+            return JSONResponse(
+                {"error": "acls options must include 'merge' and 'delDependent'"},
+                status_code=400,
+            )
+        if not options.get("delDependent"):
+            # The appliance itself refuses to drop an ACL something still
+            # references unless delDependent is set — the raw rejection the
+            # resource's pre-flight exists to pre-empt.
+            in_use = sorted(
+                name
+                for name in set(table) - set(data)
+                if _acl_is_in_use(mock.acl_dependencies.get(ne_pk, {}).get(name))
+            )
+            if in_use:
+                return JSONResponse(
+                    {"error": f"ACL(s) in use: {', '.join(in_use)}"}, status_code=400
+                )
+        if options.get("merge"):
+            table.update(copy.deepcopy(data))
+        else:
+            mock.acls[ne_pk] = copy.deepcopy(data)
+        _mark_unsaved(mock, ne_pk)
+        return Response(status_code=204)
+    return JSONResponse(
+        {"error": f"unsupported acls call: {request.method} {url}"}, status_code=400
+    )
+
+
+# -- end acls / ipObjects / appExpress (#31) proxy dispatch -------------------
 
 
 def _action_records(key: str, action: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1562,6 +1808,9 @@ def create_app(state: MockState | None = None) -> FastAPI:
             _SUBNETS_DELETE_PATH,
         ):
             return await _subnets3_dispatch(request, mock, nePk, url)
+        # -- acls / ipObjects / appExpress (#31): real ACL + dependency behavior.
+        if url == _ACLS_ECOS_PATH or url.startswith(_ACL_DEPENDENCY_PREFIX):
+            return await _acls_dispatch(request, mock, nePk, url)
         store = mock.appliance_ecos.setdefault(nePk, {})
         # -- deployment (#12) --
         # deployment/validate is a virtual ECOS endpoint: it never touches
@@ -1873,6 +2122,111 @@ def create_app(state: MockState | None = None) -> FastAPI:
         return Response(status_code=204)
 
     # -- end regions (#35) ----------------------------------------------------
+
+    # -- acls / ipObjects / appExpress (#31) ----------------------------------
+    #
+    # Orchestrator-scope half of #31. (The ACL half is appliance-scope and is
+    # served through the /appliance/rest proxy above — see _acls_dispatch.)
+    # These shapes are spec-derived: all four collections were empty on the
+    # live lab, so the mock follows specs/orchestrator-openapi-7.2.0.json.
+
+    def _ip_object_get(store: dict[str, Any], name: str | None) -> Any:
+        if name is None:
+            return list(store.values())
+        record = store.get(name)
+        # GET ?name= is typed as a single object; an unknown name yields the
+        # empty object the resource reads as "absent".
+        return record if record is not None else {}
+
+    def _ip_object_write(store: dict[str, Any], body: Any, type_code: str) -> Response:
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "body must be a group object"}, status_code=400)
+        name = body.get("name")
+        if not name:
+            return JSONResponse({"error": "group body must carry 'name'"}, status_code=400)
+        if body.get("type") != type_code:
+            return JSONResponse(
+                {"error": f"group 'type' must be {type_code!r}"}, status_code=400
+            )
+        rules = body.get("rules")
+        if not isinstance(rules, list):
+            return JSONResponse({"error": "group body must carry 'rules'"}, status_code=400)
+        store[str(name)] = copy.deepcopy(body)
+        return Response(status_code=204)
+
+    @api.get("/ipObjects/addressGroup")
+    async def get_address_groups(name: str | None = None) -> Any:
+        return _ip_object_get(mock.address_groups, name)
+
+    @api.api_route("/ipObjects/addressGroup", methods=["POST", "PUT"])
+    async def write_address_group(request: Request) -> Response:
+        return _ip_object_write(mock.address_groups, await _json_body(request), "AG")
+
+    @api.delete("/ipObjects/addressGroup")
+    async def delete_address_group(name: str) -> Response:
+        mock.address_groups.pop(name, None)
+        return Response(status_code=204)
+
+    @api.get("/ipObjects/serviceGroup")
+    async def get_service_groups(name: str | None = None) -> Any:
+        return _ip_object_get(mock.service_groups, name)
+
+    @api.api_route("/ipObjects/serviceGroup", methods=["POST", "PUT"])
+    async def write_service_group(request: Request) -> Response:
+        return _ip_object_write(mock.service_groups, await _json_body(request), "SG")
+
+    @api.delete("/ipObjects/serviceGroup")
+    async def delete_service_group(name: str) -> Response:
+        mock.service_groups.pop(name, None)
+        return Response(status_code=204)
+
+    @api.get("/applicationDefinition/appExpressGroup/config")
+    async def get_app_express_groups() -> Any:
+        return mock.app_express_groups
+
+    @api.post("/applicationDefinition/appExpressGroup/config")
+    async def set_app_express_group(request: Request) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict) or not body.get("name"):
+            return JSONResponse(
+                {"error": "appExpress group body must carry 'name'"}, status_code=400
+            )
+        # The real API keys the table by the lower-cased group name; POST
+        # edits exactly one group and leaves the rest alone.
+        mock.app_express_groups[str(body["name"]).lower()] = copy.deepcopy(body)
+        return Response(status_code=204)
+
+    @api.delete("/applicationDefinition/appExpressGroup/config")
+    async def delete_app_express_group(groupName: str) -> Response:
+        mock.app_express_groups.pop(groupName.lower(), None)
+        mock.app_express_associations = [
+            a
+            for a in mock.app_express_associations
+            if str(a.get("appExpressGroupName", "")).lower() != groupName.lower()
+        ]
+        return Response(status_code=204)
+
+    @api.get("/applicationDefinition/appExpressGroup/association")
+    async def get_app_express_associations(groupName: str | None = None) -> Any:
+        if groupName is None:
+            return mock.app_express_associations
+        return [
+            a
+            for a in mock.app_express_associations
+            if str(a.get("appExpressGroupName", "")) == groupName
+        ]
+
+    @api.post("/applicationDefinition/appExpressGroup/association")
+    async def set_app_express_associations(request: Request) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, list):
+            return JSONResponse(
+                {"error": "association body must be the complete array"}, status_code=400
+            )
+        mock.app_express_associations = copy.deepcopy(body)
+        return Response(status_code=204)
+
+    # -- end acls / ipObjects / appExpress (#31) ------------------------------
 
     # -- catch-all (must be registered last on this router) -----------------
 
