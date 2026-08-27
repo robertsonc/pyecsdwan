@@ -89,7 +89,7 @@ _DELETE_USAGE = (
 )
 _SHOW_OPERATIONAL_USAGE = (
     "usage: show <appliances | journal | coverage | version | transactions pending | "
-    "run appliance <name> | flows summary | flow <ip> | <kind> [<name>]>"
+    "run [<section> | appliance <name>] | flows summary | flow <ip> | <kind> [<name>]>"
 )
 # `show flow` and `show flows` differ by one character and mean different
 # things, so each insists on its own shape rather than guessing at the other.
@@ -97,9 +97,9 @@ _SHOW_FLOWS_USAGE = "usage: show flows summary"
 _SHOW_FLOW_USAGE = "usage: show flow <ip>[/<prefix>]"
 _ROLLBACK_USAGE = "usage: rollback <n>  |  rollback pending"
 _SHOW_GENERIC_USAGE = "usage: show [appliance <name>] <kind> [<instance>]"
-#: #55 adds the fabric-wide bare `show run`; until then the only form is the
-#: per-appliance one, and this string is what names it.
-_SHOW_RUN_USAGE = "usage: show run appliance <name> [<name>...]"
+#: Both forms: the per-appliance CLI running-config (#56) and the fabric-wide
+#: configuration breakdown (#55), optionally scoped to one section.
+_SHOW_RUN_USAGE = "usage: show run appliance <name> [<name>...]  |  show run [<section>]"
 
 
 @dataclasses.dataclass
@@ -444,22 +444,28 @@ def _show_flow(args: list[str], state: ShellState) -> None:
 
     render_flow_search(state.console, flows_report.find_flows(state.ctx, args[0]))
 def _show_run(args: list[str], state: ShellState) -> None:
-    """``show run appliance <name> [<name>...]`` — appliance CLI running-config.
+    """``show run [<section>]`` and ``show run appliance <name> [<name>...]``.
 
-    Read-only: the command sent to each appliance is the vetted constant in
-    :mod:`pyecsdwan.reports.applianceconfig`; nothing here touches the
-    candidate, the journal or the transaction engine.
+    Bare (#55) it is the fabric configuration breakdown, optionally scoped to
+    one section; with ``appliance`` (#56) it is that appliance's own CLI
+    running-config.
 
-    **Seam for #55.** The fabric-wide bare ``show run`` lands in the ``if not
-    args`` branch below: replace the usage error with the fabric report and no
-    other line in this module changes.
+    Read-only on both paths: the fabric report is GETs only, and the command
+    sent to an appliance is the vetted constant in
+    :mod:`pyecsdwan.reports.applianceconfig`. Neither touches the candidate,
+    the journal or the transaction engine.
+
+    ``appliance`` is checked before the section names so the per-appliance
+    form keeps its own usage error — ``appliance`` and the ``appliances``
+    section differ by one character, and guessing between them would be worse
+    than saying which one was typed.
     """
     from pyecsdwan.reports import applianceconfig
 
-    if not args:
-        # <- #55: fabric-wide `show run` goes here.
-        raise ValueError(_SHOW_RUN_USAGE)
-    if args[0] != "appliance" or len(args) < 2:
+    if not args or args[0] != "appliance":
+        _show_fabric_config(args, state)
+        return
+    if len(args) < 2:
         raise ValueError(_SHOW_RUN_USAGE)
     names = args[1:]
     if len(names) == 1:
@@ -475,6 +481,25 @@ def _show_run(args: list[str], state: ShellState) -> None:
             _error(state.console, f"{outcome.item}: unreachable — {outcome.error}")
     if any(o.unreachable for o in outcomes):
         state.exit_code = 2
+
+
+def _show_fabric_config(args: list[str], state: ShellState) -> None:
+    """``show run [<section>]`` (#55) — the fabric configuration breakdown.
+
+    An unknown section names the valid ones and then the usage line, so a
+    typo is answered with what to type rather than with an empty report.
+    """
+    from pyecsdwan.cli.main import render_fabric_config
+    from pyecsdwan.reports import fabric
+
+    if len(args) > 1:
+        raise ValueError(_SHOW_RUN_USAGE)
+    section = args[0] if args else None
+    try:
+        fabric.resolve_sections(section)
+    except fabric.UnknownSection as exc:
+        raise ValueError(f"{exc}\n{_SHOW_RUN_USAGE}") from None
+    render_fabric_config(state.console, fabric.collect(state.ctx, section=section))
 
 
 def _print_appliance_config(state: ShellState, config: ApplianceConfig) -> None:
@@ -739,10 +764,12 @@ class ShellCompleter(Completer):
         if first == "show" and prior[1] == "flows" and len(prior) == 2:
             return ["summary"]
         if first == "show" and prior[1] == "run":
-            # `show run appliance <name>` (#56); #55's bare `show run` adds no
-            # completions of its own.
+            # Both forms: `appliance` opens the per-appliance running-config
+            # (#56), the section names scope the fabric breakdown (#55).
             if len(prior) == 2:
-                return ["appliance"]
+                from pyecsdwan.reports import fabric
+
+                return ["appliance", *fabric.SECTIONS]
             if prior[2] == "appliance":
                 return self._appliance_names()
         return []
