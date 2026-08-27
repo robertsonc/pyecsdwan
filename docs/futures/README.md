@@ -16,11 +16,12 @@ proxy is down or too slow. Until that exists, direct mode stays out.
 
 ## Other deferred items
 
-- **Tier-1 codegen** (pydantic models + plugin stubs from `specs/`, `ec-cli
-  show coverage` over generated stubs, promotion-checklist gating): epic #6,
-  issues #26–29. `tools/spec_sync.py` itself (fetch + diff the OpenAPI spec
-  against the `specs/` baseline) shipped and closed as #25 — this item is
-  now just the codegen/gating layer built on top of it.
+- ~~**Tier-1 codegen**~~ — shipped as epic #6 (#25 `spec_sync.py`, #26
+  `gen_models.py`, #27 `gen_plugin.py`, #28 `show coverage`, #29 the
+  promotion gate). What remains deferred from it: curating the generated
+  stubs (each is a Tier-1 → Tier-2 promotion of its own), and the two
+  emitter limits in the list below (the map-key heuristic, the `__all__`
+  ordering divergence).
 - **Fabric-wide drift report** (`ec-cli drift`): every curated kind × every
   appliance, diff against declared desired-state files; CI-friendly exit codes.
   Phase 3 / epic #8, not yet sharded into an issue.
@@ -312,8 +313,15 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   valid, drift-tolerant models; they just under-type. A value-shaped rule
   (all sibling values share one schema, key names vary) would catch the rest
   and is the obvious next iteration.
-- **`tools/README.md` still says model/stub codegen is "later work
-  (#26/#27)"**, which #26 has now made false. Left untouched on purpose: #27
-  lands in the same file this wave, and one worker rewriting that paragraph
-  would collide with the other. Whoever merges the pair should write the two
-  sections together.
+- **`gen_models.dunder_all_order` and ruff disagree on one family of names.**
+  The helper reproduces `RUF022`'s isort-style order by splitting digit runs
+  and comparing them as integers; ruff uses `strnatcmp` semantics, where a
+  digit run with a *leading zero* is compared as a fraction and sorts before
+  the whole numbers. So `..._081e94` (helper: 81) lands after `..._1e304d`
+  where ruff wants it before. Invisible to `gen_models.py` — its committed
+  samples carry no such slug — and invisible to a normal `gen_plugin.py` tree
+  of a handful of stubs. It only surfaces if hundreds of hash-disambiguated
+  stubs share `resources/generated/__init__.py`, and `gen_plugin.write()`'s
+  ruff pass fixes the file on disk. Found by generating all 837 write
+  operations into the tree at once (#27); not fixed here because
+  `tools/gen_models.py` was owned by parallel work.
