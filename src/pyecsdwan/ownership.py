@@ -99,6 +99,12 @@ KIND_TO_TEMPLATE_SECTIONS: dict[str, tuple[str, ...]] = {
     "appliance/banners": ("banners",),
     # No entry for "schedule-timezone": it is Orchestrator-scope config
     # (/gms/scheduleTimezone), not per-appliance, so no template owns it.
+    # ACLs (#31). UNVERIFIED section name, same convention as the two above:
+    # "acls" matches the ECOS path itself, but no live Default Template Group
+    # with an ACL section selected was available to confirm it. The resource
+    # prefers the per-rule gms_marked flag anyway (resources/acls.py), so this
+    # join only ever runs as the fallback.
+    "appliance/acl": ("acls",),
 }
 
 
