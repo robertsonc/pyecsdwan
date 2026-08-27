@@ -767,6 +767,41 @@ def _seed_appliance_ecos() -> dict[str, dict[str, Any]]:
     return out
 
 
+# -- priorities (#36) ---------------------------------------------------------
+#
+# Two orchestrator-scope, full-overwrite priority structures with genuinely
+# different shapes (see resources/priorities.py): a keyed map and an ordered
+# list. Routes live down in create_app next to the other orchestrator routes.
+
+
+def _seed_overlay_priority() -> dict[str, Any]:
+    """``/gms/overlays/priority``: ``{priority: overlayId}``.
+
+    Real captured shape is ``{"1": 1, "2": 2, "3": 3, "4": 4}`` on a
+    four-overlay fabric; this mock seeds exactly one overlay (id 1, see
+    ``_seed_overlays``), so the seeded map is its single-overlay counterpart.
+    Note the key is the *priority* and the value the *overlay id* — the
+    direction the OpenAPI spec, the vendored SDK and docs/research all state.
+    """
+    return {"1": 1}
+
+
+def _seed_template_group_priorities() -> list[str]:
+    """``/template/templateGroupsPriorities``: ordered group-name list.
+
+    Real captured shape, verbatim: ``{"priorities": ["Default Template
+    Group"]}``. The names are deliberately NOT cross-checked against
+    ``mock.template_groups`` (which starts empty) — the handler is
+    pass-through like every other one here, and the resource plugin does not
+    check existence either (a group can be created earlier in the same
+    changeset).
+    """
+    return ["Default Template Group"]
+
+
+# -- end priorities (#36) seed data ---------------------------------------------
+
+
 # -- state -------------------------------------------------------------------
 
 
@@ -831,6 +866,15 @@ class MockState:
     #: addrAllocated, addrDeleted}}) — mutated only by the reclaim
     #: endpoints' addrDeleted bookkeeping, never by POST /loopbackOrch.
     loopback_orch_pool: dict[str, Any] = field(default_factory=_seed_loopback_orch_pool)
+    # -- priorities (#36) --
+    #: Overlay route-map priority map ({priority: overlayId}), replaced
+    #: wholesale by POST /gms/overlays/priority.
+    overlay_priority: dict[str, Any] = field(default_factory=_seed_overlay_priority)
+    #: Ordered template-group apply order (list of group names), replaced
+    #: wholesale by POST /template/templateGroupsPriorities.
+    template_group_priorities: list[str] = field(
+        default_factory=_seed_template_group_priorities
+    )
 
     def reset(self) -> None:
         """Restore every field to its seeded default (in place)."""
@@ -1449,6 +1493,60 @@ def create_app(state: MockState | None = None) -> FastAPI:
         return Response(status_code=204)
 
     # -- end loopback (#18) ---------------------------------------------------
+
+    # -- priorities (#36) -----------------------------------------------------
+    #
+    # Both are orchestrator-scope singletons written by full overwrite.
+
+    @api.get("/gms/overlays/priority")
+    async def get_overlay_priority() -> Any:
+        return mock.overlay_priority
+
+    @api.post("/gms/overlays/priority")
+    async def replace_overlay_priority(request: Request) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "body must map priority -> overlay id"}, status_code=400
+            )
+        # Real-Orchestrator rule (vendored SDK: "each overlay ID must have a
+        # unique priority") — modeled so a resource that skipped its
+        # pre-flight validation would get the 4xx it deserves here.
+        seen: dict[str, str] = {}
+        for priority, overlay_id in body.items():
+            key = str(overlay_id)
+            if key in seen:
+                return JSONResponse(
+                    {
+                        "error": (
+                            f"overlay {key} is assigned priorities {seen[key]} and "
+                            f"{priority}; each overlay must have a unique priority"
+                        )
+                    },
+                    status_code=400,
+                )
+            seen[key] = str(priority)
+        mock.overlay_priority = {str(priority): value for priority, value in body.items()}
+        return Response(status_code=204)
+
+    @api.get("/template/templateGroupsPriorities")
+    async def get_template_group_priorities() -> Any:
+        return {"priorities": list(mock.template_group_priorities)}
+
+    @api.post("/template/templateGroupsPriorities")
+    async def replace_template_group_priorities(request: Request) -> Response:
+        body = await _json_body(request)
+        order = body.get("priorities") if isinstance(body, dict) else None
+        if not isinstance(order, list):
+            return JSONResponse(
+                {"error": "body must carry a 'priorities' list of group names"},
+                status_code=400,
+            )
+        # Order is the payload: stored verbatim, never sorted.
+        mock.template_group_priorities = [str(name) for name in order]
+        return Response(status_code=204)
+
+    # -- end priorities (#36) -------------------------------------------------
 
     # -- catch-all (must be registered last on this router) -----------------
 
