@@ -30,8 +30,29 @@ tested); `appliance/loopback` (#18, read+diff) + `loopback-orch`
 grounded — `dns`/`routes`/`shaper` section names confirmed live, the rest
 stay unverified placeholders.
 
-**Phase 3 — orchestrator-scope breadth, first item.** Orchestrator firewall
-zones (#30).
+**Phase 3 — orchestrator-scope breadth (#4), 8 of 9 issues.** Orchestrator
+firewall zones (#30); ACLs + IP objects + AppExpress groups (#31); NAT maps,
+pools and SNAT maps (#32); QoS/optimization/route maps + shapers (#33);
+regions, region associations and regional overlays (#35); overlay and
+template-group priorities (#36); internal subnets (#37); SNMP, logging,
+mgmt-services, banners and schedule-timezone (#38); interface-label advanced
+constraints (#39). Service orchestration (#34) is deferred — see the scope
+comment on that issue.
+
+**The epic's headline finding: "orchestrator-scope breadth" was a
+misnomer.** Most of these surfaces are **GET-only on the Orchestrator API**;
+the real write path is the appliance (ECOS) API through the
+`/appliance/rest` proxy. So #31's ACLs, all of #32, all five of #33, and
+four of #38's five landed appliance-scope, not orchestrator-scope. Several
+issue-texts also named paths that exist in neither vendored spec
+(`/route_policy`, `/optimization_policy`, `/nat_policy`, `/vrf_snat_maps`,
+`/vrf_dnat_maps`, `/acls/{name}`, `/third_party_services`, `/services`) —
+they are pyedgeconnect SDK module names, not REST paths. Corrected paths are
+recorded in each resource's module docstring.
+
+Every epic-#4 write path is spec-confirmed but **not live-write-tested** —
+session access was read-only throughout. See `docs/futures/README.md`
+§"Write semantics needing live confirmation" before trusting one.
 
 **Tier-1 spec pipeline, first tool.** `tools/spec_sync.py` — fetch + diff the
 published OpenAPI spec against the `specs/` baseline (#25). Codegen
@@ -81,10 +102,13 @@ sharded into issues when their phase starts.
 | Loopbacks / loopback orchestration | ✅ shipped (Phase 2, #18; per-appliance loopback is read+diff only, no write endpoint documented) |
 | Firewall zones (orchestrator scope + segment↔zone map) | ✅ shipped (Phase 3, #30) |
 | Firewall zones + security policy (appliance scope) | ✅ shipped (Phase 2, #19) |
-| ACLs / NAT / route-opt-QoS policy | 🔶 Phase 3 (#31–#33) |
-| Service orchestration associations | 🔶 Phase 3 (#34) |
-| Regions / regional overlays / priorities | 🔶 Phase 3 (#35, #36) |
-| Common settings (DNS/NTP/SNMP/logging) | 🔶 Phase 3 (#38) |
+| ACLs / IP objects / app-defs | ✅ shipped (#31; ACLs are appliance-scope — orchestrator `/acls` is GET-only) |
+| NAT policy / SNAT / DNAT maps | ✅ shipped (#32; appliance-scope. D-NAT has no write endpoint anywhere — read-only view) |
+| Route / optimization / QoS policy + shapers | ✅ shipped (#33; all five appliance-scope — orchestrator exposes them GET-only) |
+| Service orchestration associations | ⛔ deferred (#34 — ~100 endpoints across 8+ vendor integrations; an epic, not an issue. See the scope comment on the issue.) |
+| Regions / regional overlays / priorities | ✅ shipped (#35, #36) |
+| Internal subnets | ✅ shipped (#37; subnet-sharing options not modelable — write-only endpoint, no read path) |
+| Common settings (SNMP/logging/mgmt-services/banners/timezone) | ✅ shipped (#38; appliance-scope. DNS proxy/cache, `logging/remote`, NTP deferred) |
 | Appliance lifecycle (discovery/upgrade/backup/preconfig) | ⚙️ Epic #7 |
 | Fabric drift / declarative apply / dashboards | ⚙️ Epic #8 |
 | Any endpoint not yet curated | 🟢 reachable today via Tier-0 `ec-cli api` |

@@ -15,6 +15,7 @@ to ``False`` to disable the check entirely (useful in tests).
 from __future__ import annotations
 
 import copy
+import json
 import threading
 import time
 import uuid
@@ -742,6 +743,433 @@ def _seed_appliance_security_maps() -> dict[str, dict[str, Any]]:
 # -- end appliance zones/security-maps (#19) seed data ------------------------
 
 
+# -- policy maps / shapers (#33) ----------------------------------------------
+#
+# Five ECOS paths ("qosMaps", "optimizationMaps", "routeMaps", "shapers",
+# "inboundShapers") served through the generic appliance-proxy handler below,
+# same as vrrp (#14) and zones/securityMaps (#19) — no dedicated routes are
+# needed, only realistic seed data in the per-appliance ECOS store.
+#
+# Two distinct shapes live in this block (see resources/policy_maps.py and
+# resources/shapers.py): the three *maps* share the data/options envelope
+# (and its activeMap directive), while the two *shapers* are bare
+# interface-keyed tables with no envelope at all. The live traffic-class
+# subtree is ~34KB; it is trimmed here to classes 1-3 on a few interfaces,
+# which is representative of the shape without the bulk.
+
+
+def _seed_policy_map_envelope(active_map: str, maps: dict[str, Any]) -> dict[str, Any]:
+    """The data/options envelope all three policy-map endpoints return.
+
+    Real captured shape (#33, read-only against a live lab Orchestrator):
+    {"options": {"merge": ..., "activeMap": ..., "templateApply": ...},
+     "data": {mapName: {"prio": {priority: rule}}}}.
+    """
+    return {
+        "options": {"merge": True, "activeMap": active_map, "templateApply": False},
+        "data": copy.deepcopy(maps),
+    }
+
+
+def _seed_qos_maps() -> dict[str, dict[str, Any]]:
+    maps = {
+        "map1": {
+            "self": "map1",
+            "prio": {
+                "1000": {
+                    "self": 1000,
+                    "comment": "voice",
+                    "match": {"acl": "", "app": "sip"},
+                    "set": {"traffic_class": 1, "lan_qos": "trust-lan", "wan_qos": "trust-lan"},
+                },
+                "65535": {
+                    "self": 65535,
+                    "comment": "",
+                    "match": {"acl": ""},
+                    "set": {"traffic_class": 2, "lan_qos": "trust-lan"},
+                },
+            },
+        }
+    }
+    return {
+        "1.NE": _seed_policy_map_envelope("map1", maps),
+        # 3.NE carries a second, non-active map so activeMap has something to
+        # actually select between.
+        "3.NE": _seed_policy_map_envelope(
+            "map1",
+            {
+                **copy.deepcopy(maps),
+                "afterhours": {
+                    "self": "afterhours",
+                    "prio": {
+                        "65535": {
+                            "self": 65535,
+                            "comment": "",
+                            "match": {"acl": ""},
+                            "set": {"traffic_class": 4},
+                        }
+                    },
+                },
+            },
+        ),
+        "5.NE": {},
+    }
+
+
+def _seed_optimization_maps() -> dict[str, dict[str, Any]]:
+    maps = {
+        "map1": {
+            "self": "map1",
+            "prio": {
+                "65535": {
+                    "self": 65535,
+                    "comment": "",
+                    "match": {"acl": ""},
+                    "set": {"boost": "disable", "tcp_accel": "enable", "net_mem": "enable"},
+                }
+            },
+        }
+    }
+    return {"1.NE": _seed_policy_map_envelope("map1", maps), "3.NE": {}, "5.NE": {}}
+
+
+def _seed_route_maps() -> dict[str, dict[str, Any]]:
+    maps = {
+        "map1": {
+            "self": "map1",
+            "prio": {
+                "65535": {
+                    "self": 65535,
+                    "comment": "",
+                    "gms_marked": True,
+                    "match": {"acl": ""},
+                    "set": {"action": "auto_optimized", "fallback": "next_hop"},
+                }
+            },
+        }
+    }
+    return {"1.NE": _seed_policy_map_envelope("map1", maps), "3.NE": {}, "5.NE": {}}
+
+
+def _shaper_traffic_classes(names: tuple[str, str, str]) -> dict[str, Any]:
+    """Trimmed traffic-class subtree (live has 10 classes; 3 is enough to
+    exercise numeric key ordering and per-class passthrough)."""
+    return {
+        "1": {"name": names[0], "priority": 1, "min_bw": 10, "max_bw": 100,
+              "excess": 100, "max_wait": 100},
+        "2": {"name": names[1], "priority": 2, "min_bw": 5, "max_bw": 100,
+              "excess": 100, "max_wait": 200},
+        "10": {"name": names[2], "priority": 10, "min_bw": 0, "max_bw": 100,
+               "excess": 1, "max_wait": 1000},
+    }
+
+
+def _seed_shapers() -> dict[str, dict[str, Any]]:
+    """Outbound shapers, ECOS path 'shapers'. Real captured shape (#33): a
+    bare interface-keyed table, no data/options envelope."""
+    table = {
+        "default": {
+            "accuracy": 1000,
+            "dyn_bw_enable": False,
+            "enable": True,
+            "max_bw": 1000000,
+            "traffic-class": _shaper_traffic_classes(("realtime", "interactive", "default")),
+        },
+        "wan": {
+            "accuracy": 1000,
+            "dyn_bw_enable": True,
+            "enable": True,
+            "max_bw": 500000,
+            "traffic-class": _shaper_traffic_classes(("realtime", "interactive", "default")),
+        },
+        "lan0": {
+            "accuracy": 1000,
+            "dyn_bw_enable": False,
+            "enable": False,
+            "max_bw": 1000000,
+            "traffic-class": _shaper_traffic_classes(("realtime", "interactive", "default")),
+        },
+    }
+    return {
+        "1.NE": copy.deepcopy(table),
+        "3.NE": {"wan": copy.deepcopy(table["wan"])},
+        "5.NE": {},
+    }
+
+
+def _seed_inbound_shapers() -> dict[str, dict[str, Any]]:
+    """Inbound shapers, ECOS path 'inboundShapers'. Same interface-keyed
+    shape as 'shapers' plus a per-interface if_shaping_enable (#33)."""
+    table = {
+        "wan": {
+            "accuracy": 5000,
+            "dyn_bw_enable": False,
+            "enable": True,
+            "if_shaping_enable": True,
+            "max_bw": 200000,
+            "traffic-class": _shaper_traffic_classes(("realtime", "interactive", "default")),
+        },
+        "wan0": {
+            "accuracy": 5000,
+            "dyn_bw_enable": False,
+            "enable": False,
+            "if_shaping_enable": False,
+            "max_bw": 200000,
+            "traffic-class": _shaper_traffic_classes(("realtime", "interactive", "default")),
+        },
+    }
+    return {"1.NE": copy.deepcopy(table), "3.NE": {}, "5.NE": {}}
+
+
+# -- end policy maps / shapers (#33) seed data --------------------------------
+
+
+# -- internal subnets (#37) ---------------------------------------------------
+#
+# Orchestrator-scope singleton served by GET/POST /gms/internalSubnets2 (see
+# the routes block of the same label below). Seeded from the real captured
+# payload, including the live-only `segmentedIpv6Enabled` key that is absent
+# from the vendored spec — it exercises the resource's unknown-key passthrough.
+
+
+def _seed_internal_subnets() -> dict[str, Any]:
+    return {
+        "ipv4": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4"],
+        "ipv6": ["fe80::/10", "ff00::/8", "fc00::/7"],
+        "segmentIpv4": [],
+        "segmentIpv6": [],
+        "segmentedIpv6Enabled": True,
+        "nonDefaultRoutes": False,
+    }
+
+
+# -- end internal subnets (#37) seed data -------------------------------------
+
+
+# -- nat (#32) ----------------------------------------------------------------
+#
+# Two appliance-scope ECOS paths ("natMaps", "nat/natPools") ride the generic
+# /appliance/rest proxy, same as vrrp/zones/securityMaps — no dedicated route
+# is needed, only seed data merged in by _seed_appliance_ecos() below. The one
+# writable NAT endpoint on the Orchestrator API (/vrf/config/snatMaps) does
+# get a route block, down next to the other orchestrator routes.
+
+
+def _seed_nat_maps() -> dict[str, dict[str, Any]]:
+    """NAT policy-map table, ECOS path 'natMaps'.
+
+    Real captured envelope (#32, read-only against a live lab Orchestrator):
+    ``{"data": {"map1": {"self": "map1", "prio": {...}}}, "options": {...}}``.
+    The envelope, the `self` echo and the map->prio nesting are live-
+    confirmed; the individual rule fields below follow the appliance spec's
+    NatPolicyRule/BrNatPriority schemas. `options` is seeded with `activeMap`
+    only — that key is what resources/nat.py lifts into canonical state;
+    `merge`/`templateApply` are write-only directives and are covered by a
+    unit test rather than invented into a GET response here.
+    """
+    return {
+        "1.NE": {
+            "data": {
+                "map1": {
+                    "self": "map1",
+                    "prio": {
+                        "10": {
+                            "self": 10,
+                            "comment": "",
+                            "gms_marked": True,
+                            "match": {"acl": ""},
+                            "set": {"nat_dir": "none"},
+                        },
+                        "65535": {
+                            "self": 65535,
+                            "comment": "",
+                            "gms_marked": True,
+                            "match": {"acl": ""},
+                            "set": {"nat_dir": "none"},
+                        },
+                    },
+                }
+            },
+            "options": {"activeMap": "map1"},
+        },
+        "3.NE": {
+            "data": {
+                "map2": {
+                    "self": "map2",
+                    "prio": {
+                        "100": {
+                            "self": 100,
+                            "comment": "branch outbound",
+                            "gms_marked": False,
+                            "match": {"acl": ""},
+                            "set": {"nat_dir": "outbound"},
+                        }
+                    },
+                }
+            },
+            "options": {"activeMap": "map2"},
+        },
+        "5.NE": {},
+    }
+
+
+def _seed_nat_pools() -> dict[str, dict[str, Any]]:
+    """NAT pool table, ECOS path 'nat/natPools'.
+
+    SPEC-DERIVED (#32): the live lab returned ``{}`` here, so this follows
+    the appliance spec's NATPools/NATPool schema ({poolId: {name, subnet,
+    dir, pat, comment}}) rather than a captured payload.
+    """
+    return {
+        "1.NE": {
+            "1": {
+                "name": "pool1",
+                "subnet": "192.0.2.0/24",
+                "dir": "outbound",
+                "pat": 1,
+                "comment": "",
+            }
+        },
+        "3.NE": {},
+        "5.NE": {},
+    }
+
+
+def _seed_snat_maps() -> dict[str, Any]:
+    """Orchestrator-scope inter-segment S-NAT rules (/vrf/config/snatMaps).
+
+    SPEC-DERIVED (#32): the live lab returned ``{}``. Shape follows the
+    SnatMaps schema plus the vendored SDK's documented read-side extras
+    (gms_marked, comment). Only *disabled* pairs are listed — S-NAT between
+    segments is on by default.
+    """
+    return {"0_1": {"enable": False, "gms_marked": False, "comment": "no snat to guest"}}
+
+
+# -- end nat (#32) seed data ---------------------------------------------------
+# -- common settings (#38) ----------------------------------------------------
+#
+# SNMP, logging, management services and banners are appliance-scope singleton
+# settings documents: they ride the generic /appliance/rest proxy (the
+# appliance_ecos store) exactly like vrrp/zones/securityMaps, so no new
+# appliance route is needed here — only seed data, merged in by
+# _seed_appliance_ecos() below. Shapes are the ones captured read-only against
+# a live lab Orchestrator this session (see resources/common_settings.py).
+#
+# The Orchestrator schedule timezone is the one member of the group with a real
+# Orchestrator write path, so it does need its own route (down in create_app)
+# and its own MockState field.
+#
+# 1.NE / 3.NE are seeded populated; 5.NE is deliberately left out of every seed
+# below so tests have one appliance whose settings come back as the proxy's
+# empty-{} default and must normalize to documented defaults.
+
+
+def _seed_snmp() -> dict[str, dict[str, Any]]:
+    """ECOS 'snmp'. Live top-level key set, including the two keys the vendored
+    SNMP schema does not declare (hash_algs / priv_algs) — kept so the
+    unknown-key passthrough is actually exercised."""
+    return {
+        "1.NE": {
+            "access": {"rocommunity": "public"},
+            "auto_launch": True,
+            "listen": {"enable": True},
+            "syscontact": "netops@example.com",
+            "sysdescr": "HUB1 EdgeConnect",
+            "syslocation": "HQ",
+            "traps": {"enable": True, "trap_community": "public"},
+            "trapsink": {"sink": {"10.0.0.9": {"self": "10.0.0.9", "version": "v2c"}}},
+            "v3": {"users": {}},
+            "hash_algs": ["MD5", "SHA"],
+            "priv_algs": ["DES", "AES-128"],
+        },
+        "3.NE": {
+            "access": {"rocommunity": ""},
+            "auto_launch": False,
+            "listen": {"enable": False},
+            "syscontact": "",
+            "sysdescr": "BR1 EdgeConnect",
+            "syslocation": "Branch-1",
+            "traps": {"enable": False, "trap_community": "public"},
+            "trapsink": {"sink": {}},
+            "v3": {"users": {}},
+            "hash_algs": ["MD5", "SHA"],
+            "priv_algs": ["DES", "AES-128"],
+        },
+    }
+
+
+def _seed_logging_config() -> dict[str, dict[str, Any]]:
+    """ECOS 'logging/config'. 'ids' is live-present but spec-absent — seeded so
+    the passthrough is covered."""
+    return {
+        "1.NE": {
+            "min_priority": "Notice",
+            "threshold_size": 50,
+            "keep_number": 30,
+            "auditlog": "local0",
+            "flow": "local1",
+            "system": "local2",
+            "ids": "local3",
+            "logStatefulWanDrops": False,
+            "mask_enable": False,
+            "mask_ipv4": 24,
+            "format_log_enable": False,
+        },
+        "3.NE": {
+            "min_priority": "Error",
+            "threshold_size": 50,
+            "keep_number": 30,
+            "auditlog": "local0",
+            "flow": "local1",
+            "system": "local2",
+            "ids": "local3",
+            "logStatefulWanDrops": True,
+            "mask_enable": False,
+            "mask_ipv4": 24,
+            "format_log_enable": False,
+        },
+    }
+
+
+def _seed_mgmt_services() -> dict[str, dict[str, Any]]:
+    """ECOS 'mgmtServices'. Every service record carries the 'self' id echo the
+    live capture shows — resources/common_settings.py strips it on read (via
+    security_policy._strip_meta) and does not re-send it."""
+
+    def service(service_id: str, displayname: str, srcinf: str) -> dict[str, Any]:
+        return {"self": service_id, "displayname": displayname, "srcinf": srcinf}
+
+    services = {
+        "aaa": ("AAA", "mgmt0"),
+        "dhcrelay": ("DHCP Relay", ""),
+        "netflowd": ("NetFlow", "mgmt0"),
+        "node": ("Node", ""),
+        "ntpd": ("NTP", "mgmt0"),
+        "other": ("Other", ""),
+        "snmpd": ("SNMP", "mgmt0"),
+        "sshd": ("SSH", "mgmt0"),
+    }
+    table = {sid: service(sid, name, srcinf) for sid, (name, srcinf) in services.items()}
+    return {"1.NE": copy.deepcopy(table), "3.NE": copy.deepcopy(table)}
+
+
+def _seed_banners() -> dict[str, dict[str, Any]]:
+    """ECOS 'banners'. Live shape is exactly {"motd": ..., "issue": ...}."""
+    return {
+        "1.NE": {"motd": "Welcome to HUB1", "issue": "Authorized access only."},
+        "3.NE": {"motd": "", "issue": ""},
+    }
+
+
+def _seed_schedule_timezone() -> dict[str, Any]:
+    """GET/POST /gms/scheduleTimezone — Orchestrator scope, live shape."""
+    return {"defaultTimezone": "UTC"}
+
+
+# -- end common settings (#38) seed data --------------------------------------
+
+
 def _seed_appliance_ecos() -> dict[str, dict[str, Any]]:
     """Seed for the generic per-appliance ECOS store (``appliance_ecos``
     below). Extend with more ``{ecosPath: payload}`` entries as further
@@ -764,7 +1192,300 @@ def _seed_appliance_ecos() -> dict[str, dict[str, Any]]:
         out.setdefault(ne_pk, {})["ospf/config/system"] = system
     for ne_pk, interfaces in _seed_ospf_interfaces().items():
         out.setdefault(ne_pk, {})["ospf/config/interfaces"] = interfaces
+    # -- nat (#32) --
+    for ne_pk, nat_maps in _seed_nat_maps().items():
+        out.setdefault(ne_pk, {})["natMaps"] = nat_maps
+    for ne_pk, nat_pools in _seed_nat_pools().items():
+        out.setdefault(ne_pk, {})["nat/natPools"] = nat_pools
+    # -- policy maps / shapers (#33) --
+    for ne_pk, qos in _seed_qos_maps().items():
+        out.setdefault(ne_pk, {})["qosMaps"] = qos
+    for ne_pk, opt in _seed_optimization_maps().items():
+        out.setdefault(ne_pk, {})["optimizationMaps"] = opt
+    for ne_pk, route_maps in _seed_route_maps().items():
+        out.setdefault(ne_pk, {})["routeMaps"] = route_maps
+    for ne_pk, shaper in _seed_shapers().items():
+        out.setdefault(ne_pk, {})["shapers"] = shaper
+    for ne_pk, inbound in _seed_inbound_shapers().items():
+        out.setdefault(ne_pk, {})["inboundShapers"] = inbound
+    # -- common settings (#38) --
+    for ne_pk, snmp in _seed_snmp().items():
+        out.setdefault(ne_pk, {})["snmp"] = snmp
+    for ne_pk, logging_config in _seed_logging_config().items():
+        out.setdefault(ne_pk, {})["logging/config"] = logging_config
+    for ne_pk, mgmt_services in _seed_mgmt_services().items():
+        out.setdefault(ne_pk, {})["mgmtServices"] = mgmt_services
+    for ne_pk, banners in _seed_banners().items():
+        out.setdefault(ne_pk, {})["banners"] = banners
     return out
+
+
+# -- priorities (#36) ---------------------------------------------------------
+#
+# Two orchestrator-scope, full-overwrite priority structures with genuinely
+# different shapes (see resources/priorities.py): a keyed map and an ordered
+# list. Routes live down in create_app next to the other orchestrator routes.
+
+
+def _seed_overlay_priority() -> dict[str, Any]:
+    """``/gms/overlays/priority``: ``{priority: overlayId}``.
+
+    Real captured shape is ``{"1": 1, "2": 2, "3": 3, "4": 4}`` on a
+    four-overlay fabric; this mock seeds exactly one overlay (id 1, see
+    ``_seed_overlays``), so the seeded map is its single-overlay counterpart.
+    Note the key is the *priority* and the value the *overlay id* — the
+    direction the OpenAPI spec, the vendored SDK and docs/research all state.
+    """
+    return {"1": 1}
+
+
+def _seed_template_group_priorities() -> list[str]:
+    """``/template/templateGroupsPriorities``: ordered group-name list.
+
+    Real captured shape, verbatim: ``{"priorities": ["Default Template
+    Group"]}``. The names are deliberately NOT cross-checked against
+    ``mock.template_groups`` (which starts empty) — the handler is
+    pass-through like every other one here, and the resource plugin does not
+    check existence either (a group can be created earlier in the same
+    changeset).
+    """
+    return ["Default Template Group"]
+
+
+# -- end priorities (#36) seed data ---------------------------------------------
+# -- regions (#35) ------------------------------------------------------------
+#
+# Shapes seeded from the real payloads captured live (read-only) this session:
+#   GET /regions                     -> [{"regionId": 0, "regionName": "Default"}]
+#   GET /gms/overlays/config/regions -> {overlayId: {regionId: <overlay config>}}
+# The lab fabric only had the global region 0; a second region ("EMEA", id 1)
+# is seeded here so the region-scoped write can be *tested* for not clobbering
+# its neighbours, and so regionId 0 is distinguishable from a real region.
+#
+# match.overlayAcl is deliberately seeded as a JSON-encoded STRING with its
+# keys NOT in sorted order — that is what the real Orchestrator returns, and
+# it is the phantom-drift hazard resources/regions.py normalizes away.
+#
+# POST /gms/overlays/config/regions (the exhaustive array-of-map replace) is
+# deliberately NOT modeled: resources/regions.py never calls it, and modeling
+# it would mean inventing the array's overlay-identity convention, which the
+# vendored spec does not pin down.
+
+
+def _seed_regions() -> list[dict[str, Any]]:
+    return [
+        {"regionId": 0, "regionName": "Default"},
+        {"regionId": 1, "regionName": "EMEA"},
+    ]
+
+
+def _seed_region_appliances() -> dict[str, int]:
+    """{nePk: regionId} — every appliance starts in the global region 0."""
+    return {"1.NE": 0, "3.NE": 0, "5.NE": 0}
+
+
+def _overlay_acl(overlay_name: str) -> str:
+    """A JSON-encoded overlayAcl string, keys intentionally unsorted."""
+    return json.dumps(
+        {
+            "options": {"merge": True, "templateApply": False},
+            "data": {
+                f"Overlay_{overlay_name}": {
+                    "entry": {
+                        "1010": {"prot": "ip", "dscp": "ef", "misc": "", "self": True},
+                    }
+                }
+            },
+        },
+        sort_keys=False,
+    )
+
+
+def _regional_overlay_config(overlay_id: int, overlay_name: str, hubs: list[str]) -> dict[str, Any]:
+    """One regional overlay config, trimmed from the 27-field live payload to
+    the fields whose shapes were actually observed."""
+    return {
+        "name": overlay_name,
+        "id": overlay_id,
+        "topology": {
+            "topologyType": 1,
+            "hubs": hubs,
+            "useRegions": False,
+            "externalHubs": [],
+        },
+        "match": {"overlayAcl": _overlay_acl(overlay_name)},
+        "brownoutThresholds": {"latency": 150, "loss": 5, "jitter": 30},
+        "wanPorts": {"primary": ["1"], "secondary": [], "backup": []},
+        "bondingPolicy": 1,
+        "useBackupOnBrownout": False,
+        "useSecondaryOnBrownout": True,
+    }
+
+
+def _seed_regional_overlays() -> dict[str, dict[str, Any]]:
+    """{overlayId: {regionId: config}}; overlay "1" matches _seed_overlays()."""
+    return {
+        "1": {
+            "0": _regional_overlay_config(1, "CorpFabric", ["1.NE"]),
+            "1": _regional_overlay_config(1, "CorpFabric", ["3.NE"]),
+        }
+    }
+
+
+# -- end regions (#35) seed data ----------------------------------------------
+
+
+# -- acls / ipObjects / appExpress (#31) --------------------------------------
+#
+# Two scopes in one issue (see resources/acls.py):
+#   * ACLs are appliance-scope — GET/POST ECOS "acls" and GET
+#     "dependency/acl/{name}", dispatched out of the generic /appliance/rest
+#     proxy below (like subnets3, they need real behavior rather than the
+#     opaque per-url KV store).
+#   * ipObjects + appExpress are orchestrator-scope, with their own routes in
+#     the matching labeled block inside create_app().
+#
+# The ACL seed is the live-captured shape (rules carry the `self` echo and the
+# `gms_marked` flag so the strip/inject round-trip is exercised, and `qmap`/
+# `rmap` sit alongside `entry` so normalize()'s drop of the server-derived
+# reference info is exercised too). The ipObjects/appExpress seeds are
+# spec-derived: those collections were empty on the live lab.
+
+
+def _seed_acls() -> dict[str, dict[str, Any]]:
+    """Per-appliance ACL table, ECOS path 'acls' (#31, live-captured shape)."""
+    return {
+        "1.NE": {
+            "Overlay_RealTime": {
+                "entry": {
+                    "1000": {
+                        "self": 1000,
+                        "comment": "",
+                        "gms_marked": False,
+                        "permit": True,
+                        "application": "rtp",
+                    }
+                },
+                "qmap": {},
+                "rmap": {},
+            }
+        },
+        "3.NE": {
+            "Overlay_BulkApps": {
+                "entry": {
+                    "1000": {
+                        "self": 1000,
+                        "comment": "",
+                        "gms_marked": False,
+                        "permit": True,
+                        "application": "ftp",
+                    },
+                    "1010": {
+                        "self": 1010,
+                        "comment": "",
+                        "gms_marked": False,
+                        "permit": True,
+                        "application": "rsync",
+                    },
+                },
+                "qmap": {},
+                "rmap": {},
+            },
+            "Overlay_CriticalApps": {
+                "entry": {
+                    "1000": {
+                        "self": 1000,
+                        "comment": "",
+                        "gms_marked": False,
+                        "permit": True,
+                        "application": "sap",
+                    }
+                },
+                "qmap": {},
+                "rmap": {},
+            },
+        },
+        "5.NE": {},
+    }
+
+
+def _seed_acl_dependencies() -> dict[str, dict[str, Any]]:
+    """``GET dependency/acl/{name}`` payloads, keyed {nePk: {aclName: body}}.
+
+    Seeded empty: the live lab had no dependent objects to capture, so the
+    real response shape is unknown and resources/acls.py parses it
+    tolerantly. Tests populate this to exercise the in-use pre-flight.
+    """
+    return {"1.NE": {}, "3.NE": {}, "5.NE": {}}
+
+
+def _seed_address_groups() -> dict[str, Any]:
+    """``/ipObjects/addressGroup`` — spec-derived (live lab returned [])."""
+    return {
+        "Branch-Nets": {
+            "type": "AG",
+            "name": "Branch-Nets",
+            "rules": [
+                {
+                    "includedIPs": ["10.1.0.0/16", "10.2.0.0/16"],
+                    "excludedIPs": ["10.1.99.0/24"],
+                    "includedGroups": [],
+                    "comment": "branch subnets",
+                }
+            ],
+        }
+    }
+
+
+def _seed_service_groups() -> dict[str, Any]:
+    """``/ipObjects/serviceGroup`` — spec-derived (live lab returned [])."""
+    return {
+        "Web": {
+            "type": "SG",
+            "name": "Web",
+            "rules": [
+                {
+                    "protocol": "TCP",
+                    "icmpTypes": [],
+                    "icmpCodes": [],
+                    "includedPorts": ["443", "8000-8002"],
+                    "excludedPorts": [],
+                    "includedGroups": [],
+                    "excludedGroups": [],
+                    "comment": "web ports",
+                }
+            ],
+        }
+    }
+
+
+def _seed_app_express_groups() -> dict[str, Any]:
+    """``/applicationDefinition/appExpressGroup/config`` — spec-derived (live
+    lab returned {}). Keyed by lower-cased group name, per the spec."""
+    return {
+        "saas": {
+            "name": "SaaS",
+            "targetQoE": "EXCELLENT",
+            "overlayId": 1,
+            "eligibleTransportPaths": ["INET1", "MPLS1"],
+            "userQoEUpdateInterval": 300,
+            "pingQoEUpdateInterval": 60,
+            "pingInterval": 10,
+            "sourceLoopbacks": [],
+            "useSystemDnsServer": True,
+            "dnsServers": [],
+            "appExpressApps": ["office365"],
+        }
+    }
+
+
+def _seed_app_express_associations() -> list[dict[str, Any]]:
+    """``/applicationDefinition/appExpressGroup/association`` — spec-derived
+    (live lab returned []); the whole table is replaced by one POST."""
+    return [{"nePk": "1.NE", "appExpressGroupName": "SaaS"}]
+
+
+# -- end acls / ipObjects / appExpress (#31) seed data ------------------------
 
 
 # -- state -------------------------------------------------------------------
@@ -831,6 +1552,61 @@ class MockState:
     #: addrAllocated, addrDeleted}}) — mutated only by the reclaim
     #: endpoints' addrDeleted bookkeeping, never by POST /loopbackOrch.
     loopback_orch_pool: dict[str, Any] = field(default_factory=_seed_loopback_orch_pool)
+    # -- internal subnets (#37) --
+    #: Fabric-wide internal-subnet table, replaced wholesale by
+    #: POST /gms/internalSubnets2.
+    internal_subnets: dict[str, Any] = field(default_factory=_seed_internal_subnets)
+    # -- priorities (#36) --
+    #: Overlay route-map priority map ({priority: overlayId}), replaced
+    #: wholesale by POST /gms/overlays/priority.
+    overlay_priority: dict[str, Any] = field(default_factory=_seed_overlay_priority)
+    #: Ordered template-group apply order (list of group names), replaced
+    #: wholesale by POST /template/templateGroupsPriorities.
+    template_group_priorities: list[str] = field(
+        default_factory=_seed_template_group_priorities
+    )
+    # -- regions (#35) --
+    #: Network regions, the array shape GET /regions returns.
+    regions: list[dict[str, Any]] = field(default_factory=_seed_regions)
+    #: Next server-allocated regionId (there is no allocator endpoint; the
+    #: real Orchestrator hands the id out on POST /regions, as modeled here).
+    regions_next_id: int = 2
+    #: {nePk: regionId} — one region per appliance.
+    region_appliances: dict[str, int] = field(default_factory=_seed_region_appliances)
+    #: {overlayId: {regionId: overlay config}}, region-scope-merged by
+    #: PUT /gms/overlays/config/regions.
+    regional_overlays: dict[str, dict[str, Any]] = field(default_factory=_seed_regional_overlays)
+    # -- nat (#32) --
+    #: Fabric-wide disabled inter-segment S-NAT rules, replaced wholesale by
+    #: POST /vrf/config/snatMaps. The appliance-scope NAT tables (natMaps,
+    #: nat/natPools) need no field of their own — they ride appliance_ecos.
+    snat_maps: dict[str, Any] = field(default_factory=_seed_snat_maps)
+    #: Read-only inter-segment D-NAT view ({nePk: VRFPolicyMap}); there is no
+    #: D-NAT write endpoint in either spec.
+    dnat_maps: dict[str, Any] = field(
+        default_factory=lambda: {"1.NE": {"0_1": {"enable": True}}}
+    )
+    # -- common settings (#38) --
+    # snmp / logging/config / mgmtServices / banners are appliance-scope and
+    # live in appliance_ecos above (no dedicated fields). Only the Orchestrator
+    # schedule timezone needs its own state + route.
+    schedule_timezone: dict[str, Any] = field(default_factory=_seed_schedule_timezone)
+    # -- acls / ipObjects / appExpress (#31) --
+    #: Per-appliance ACL table ({nePk: {aclName: {entry, qmap, rmap}}}),
+    #: replaced wholesale by POST acls with options.merge=false.
+    acls: dict[str, dict[str, Any]] = field(default_factory=_seed_acls)
+    #: {nePk: {aclName: dependency payload}} served by GET
+    #: dependency/acl/{name}; seeded empty (see _seed_acl_dependencies).
+    acl_dependencies: dict[str, dict[str, Any]] = field(default_factory=_seed_acl_dependencies)
+    #: Orchestrator ip-object stores, keyed by group name.
+    address_groups: dict[str, Any] = field(default_factory=_seed_address_groups)
+    service_groups: dict[str, Any] = field(default_factory=_seed_service_groups)
+    #: AppExpress group configs keyed by lower-cased name, plus the flat
+    #: association array replaced wholesale by one POST.
+    app_express_groups: dict[str, Any] = field(default_factory=_seed_app_express_groups)
+    app_express_associations: list[dict[str, Any]] = field(
+        default_factory=_seed_app_express_associations
+    )
 
     def reset(self) -> None:
         """Restore every field to its seeded default (in place)."""
@@ -926,6 +1702,83 @@ async def _subnets3_dispatch(request: Request, mock: MockState, ne_pk: str, url:
     return JSONResponse(
         {"error": f"unsupported subnets3 call: {request.method} {url}"}, status_code=400
     )
+
+
+# -- acls / ipObjects / appExpress (#31): ECOS acl + dependency dispatch ----
+#
+# Like subnets3 above, the two ACL ECOS paths need real behavior rather than
+# the opaque per-url KV store the generic proxy falls back to: POST carries
+# {data, options{merge, delDependent}} and the dependency endpoint is a
+# separate read used by the resource's removal pre-flight.
+
+_ACLS_ECOS_PATH = "acls"
+_ACL_DEPENDENCY_PREFIX = "dependency/acl/"
+
+
+def _acl_is_in_use(dependency_payload: Any) -> bool:
+    """Whether a dependency payload names anything at all.
+
+    A record like ``{"rmap": [], "qmap": {}}`` is *present but empty* — the
+    ACL is unreferenced. Only a non-empty member counts as in use.
+    """
+    if isinstance(dependency_payload, dict):
+        return any(bool(value) for value in dependency_payload.values())
+    return bool(dependency_payload)
+
+
+async def _acls_dispatch(request: Request, mock: MockState, ne_pk: str, url: str) -> Any:
+    table = mock.acls.setdefault(ne_pk, {})
+    if url.startswith(_ACL_DEPENDENCY_PREFIX):
+        if request.method != "GET":
+            return JSONResponse(
+                {"error": f"unsupported acl dependency call: {request.method} {url}"},
+                status_code=400,
+            )
+        acl_name = url[len(_ACL_DEPENDENCY_PREFIX) :]
+        return mock.acl_dependencies.get(ne_pk, {}).get(acl_name, {})
+    if request.method == "GET":
+        return table
+    if request.method == "POST":
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "acls body must be an object"}, status_code=400)
+        data = body.get("data")
+        options = body.get("options")
+        if not isinstance(data, dict) or not isinstance(options, dict):
+            return JSONResponse(
+                {"error": "acls body must carry 'data' and an 'options' object"},
+                status_code=400,
+            )
+        if "merge" not in options or "delDependent" not in options:
+            return JSONResponse(
+                {"error": "acls options must include 'merge' and 'delDependent'"},
+                status_code=400,
+            )
+        if not options.get("delDependent"):
+            # The appliance itself refuses to drop an ACL something still
+            # references unless delDependent is set — the raw rejection the
+            # resource's pre-flight exists to pre-empt.
+            in_use = sorted(
+                name
+                for name in set(table) - set(data)
+                if _acl_is_in_use(mock.acl_dependencies.get(ne_pk, {}).get(name))
+            )
+            if in_use:
+                return JSONResponse(
+                    {"error": f"ACL(s) in use: {', '.join(in_use)}"}, status_code=400
+                )
+        if options.get("merge"):
+            table.update(copy.deepcopy(data))
+        else:
+            mock.acls[ne_pk] = copy.deepcopy(data)
+        _mark_unsaved(mock, ne_pk)
+        return Response(status_code=204)
+    return JSONResponse(
+        {"error": f"unsupported acls call: {request.method} {url}"}, status_code=400
+    )
+
+
+# -- end acls / ipObjects / appExpress (#31) proxy dispatch -------------------
 
 
 def _action_records(key: str, action: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1042,11 +1895,54 @@ def create_app(state: MockState | None = None) -> FastAPI:
             }
         return out
 
+    # -- interface-labels constraints (#39) --
+    # The real Orchestrator rejects a label table that reuses an id across
+    # wan+lan, and refuses to drop a label an overlay still references unless
+    # deleteDependencies=true. Enforced here so the client-side pre-flight in
+    # resources/interface_labels.py is genuinely proven to fire *first*: a
+    # test that ever sees one of these 400s means the pre-flight missed.
+
+    def _overlay_label_ids() -> set[str]:
+        """Label ids referenced by any overlay (wanPorts + local breakout)."""
+        used: set[str] = set()
+        for overlay in mock.overlays.values():
+            ports = overlay.get("wanPorts")
+            if isinstance(ports, dict):
+                for key in ("primary", "secondary", "backup", "crossConnect"):
+                    used |= {str(i) for i in ports.get(key) or []}
+            policy = overlay.get("internetPolicy")
+            if isinstance(policy, dict) and isinstance(policy.get("localBreakout"), dict):
+                for key in ("primary", "backup"):
+                    used |= {str(i) for i in policy["localBreakout"].get(key) or []}
+        return used
+
     @api.post("/gms/interfaceLabels")
-    async def replace_interface_labels(request: Request) -> Response:
+    async def replace_interface_labels(
+        request: Request, deleteDependencies: bool = False
+    ) -> Response:
         body = await _json_body(request)
         if not isinstance(body, dict):
             return JSONResponse({"error": "body must be a wan/lan label object"}, status_code=400)
+        sides = {side: {str(k) for k in (body.get(side) or {})} for side in ("wan", "lan")}
+        clash = sorted(sides["wan"] & sides["lan"])
+        if clash:
+            return JSONResponse(
+                {"error": f"label id(s) {', '.join(clash)} are used in both wan and lan"},
+                status_code=400,
+            )
+        if not deleteDependencies:
+            before = {
+                str(k) for side in ("wan", "lan") for k in (mock.interface_labels.get(side) or {})
+            }
+            in_use = sorted((before - sides["wan"] - sides["lan"]) & _overlay_label_ids())
+            if in_use:
+                return JSONResponse(
+                    {
+                        "error": f"label id(s) {', '.join(in_use)} are in use by an "
+                        f"overlay; retry with deleteDependencies=true"
+                    },
+                    status_code=400,
+                )
         mock.interface_labels = body
         return Response(status_code=200)
 
@@ -1357,6 +2253,9 @@ def create_app(state: MockState | None = None) -> FastAPI:
             _SUBNETS_DELETE_PATH,
         ):
             return await _subnets3_dispatch(request, mock, nePk, url)
+        # -- acls / ipObjects / appExpress (#31): real ACL + dependency behavior.
+        if url == _ACLS_ECOS_PATH or url.startswith(_ACL_DEPENDENCY_PREFIX):
+            return await _acls_dispatch(request, mock, nePk, url)
         store = mock.appliance_ecos.setdefault(nePk, {})
         # -- deployment (#12) --
         # deployment/validate is a virtual ECOS endpoint: it never touches
@@ -1449,6 +2348,383 @@ def create_app(state: MockState | None = None) -> FastAPI:
         return Response(status_code=204)
 
     # -- end loopback (#18) ---------------------------------------------------
+
+    # -- internal subnets (#37) -----------------------------------------------
+    #
+    # Orchestrator scope (not the appliance proxy): one fabric-wide table,
+    # read whole and replaced whole. The POST stores the body verbatim so a
+    # test can observe that unknown keys survive the round trip.
+
+    @api.get("/gms/internalSubnets2")
+    async def get_internal_subnets() -> Any:
+        return mock.internal_subnets
+
+    @api.post("/gms/internalSubnets2")
+    async def replace_internal_subnets(request: Request) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "body must be an internal-subnets object"}, status_code=400
+            )
+        mock.internal_subnets = dict(body)
+        return Response(status_code=204)
+
+    # -- end internal subnets (#37) -------------------------------------------
+
+    # -- nat (#32) ------------------------------------------------------------
+    #
+    # The appliance-scope NAT tables (ECOS "natMaps", "nat/natPools") need no
+    # route: they ride the generic /appliance/rest proxy above, seeded by
+    # _seed_appliance_ecos(). Only the writable orchestrator endpoint and the
+    # read-only D-NAT view live here.
+
+    @api.get("/vrf/config/snatMaps")
+    async def get_snat_maps() -> Any:
+        return mock.snat_maps
+
+    @api.post("/vrf/config/snatMaps")
+    async def replace_snat_maps(request: Request) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "body must map '<srcVrfId>_<dstVrfId>' -> {enable: bool}"},
+                status_code=400,
+            )
+        mock.snat_maps = {str(pair): rule for pair, rule in body.items()}
+        return Response(status_code=204)
+
+    @api.get("/dnatMaps")
+    async def get_dnat_maps(nePk: str, cached: str = "false") -> Any:
+        return mock.dnat_maps.get(nePk, {})
+
+    # -- end nat (#32) --------------------------------------------------------
+    # -- common settings (#38) ------------------------------------------------
+    #
+    # snmp / logging/config / mgmtServices / banners need no routes here: they
+    # are appliance-scope and ride the generic /appliance/rest proxy above,
+    # backed by the appliance_ecos store (seeded by _seed_appliance_ecos).
+    # Only the Orchestrator schedule timezone is orchestrator-writable.
+
+    @api.get("/gms/scheduleTimezone")
+    async def get_schedule_timezone() -> Any:
+        return mock.schedule_timezone
+
+    @api.post("/gms/scheduleTimezone")
+    async def set_schedule_timezone(request: Request) -> Response:
+        # Body shape is the SDK's {"defaultTimezone": tz} object, not the
+        # spec's bare string — see resources/common_settings.py.
+        body = await _json_body(request)
+        if not isinstance(body, dict) or not body.get("defaultTimezone"):
+            return JSONResponse(
+                {"error": "body must be {'defaultTimezone': '<Country/Location>'}"},
+                status_code=400,
+            )
+        mock.schedule_timezone = dict(body)
+        return Response(status_code=204)
+
+    # -- end common settings (#38) --------------------------------------------
+
+    # -- priorities (#36) -----------------------------------------------------
+    #
+    # Both are orchestrator-scope singletons written by full overwrite.
+
+    @api.get("/gms/overlays/priority")
+    async def get_overlay_priority() -> Any:
+        return mock.overlay_priority
+
+    @api.post("/gms/overlays/priority")
+    async def replace_overlay_priority(request: Request) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "body must map priority -> overlay id"}, status_code=400
+            )
+        # Real-Orchestrator rule (vendored SDK: "each overlay ID must have a
+        # unique priority") — modeled so a resource that skipped its
+        # pre-flight validation would get the 4xx it deserves here.
+        seen: dict[str, str] = {}
+        for priority, overlay_id in body.items():
+            key = str(overlay_id)
+            if key in seen:
+                return JSONResponse(
+                    {
+                        "error": (
+                            f"overlay {key} is assigned priorities {seen[key]} and "
+                            f"{priority}; each overlay must have a unique priority"
+                        )
+                    },
+                    status_code=400,
+                )
+            seen[key] = str(priority)
+        mock.overlay_priority = {str(priority): value for priority, value in body.items()}
+        return Response(status_code=204)
+
+    @api.get("/template/templateGroupsPriorities")
+    async def get_template_group_priorities() -> Any:
+        return {"priorities": list(mock.template_group_priorities)}
+
+    @api.post("/template/templateGroupsPriorities")
+    async def replace_template_group_priorities(request: Request) -> Response:
+        body = await _json_body(request)
+        order = body.get("priorities") if isinstance(body, dict) else None
+        if not isinstance(order, list):
+            return JSONResponse(
+                {"error": "body must carry a 'priorities' list of group names"},
+                status_code=400,
+            )
+        # Order is the payload: stored verbatim, never sorted.
+        mock.template_group_priorities = [str(name) for name in order]
+        return Response(status_code=204)
+
+    # -- end priorities (#36) -------------------------------------------------
+    # -- regions (#35) --------------------------------------------------------
+
+    def _region_record(region_id: int) -> dict[str, Any] | None:
+        for region in mock.regions:
+            if int(region["regionId"]) == region_id:
+                return region
+        return None
+
+    def _association(ne_pk: str) -> dict[str, Any]:
+        region_id = int(mock.region_appliances.get(ne_pk, 0))
+        record = _region_record(region_id)
+        return {
+            "nePk": ne_pk,
+            "regionId": region_id,
+            "regionName": str(record["regionName"]) if record else "",
+        }
+
+    @api.get("/regions")
+    async def get_regions(regionId: int | None = None) -> Any:
+        if regionId is None:
+            return mock.regions
+        return [r for r in mock.regions if int(r["regionId"]) == regionId]
+
+    @api.post("/regions")
+    async def create_region(request: Request) -> Any:
+        body = await _json_body(request)
+        if not isinstance(body, dict) or not body.get("regionName"):
+            return JSONResponse({"error": "body must be {regionName: ...}"}, status_code=400)
+        region_id = mock.regions_next_id
+        mock.regions_next_id += 1
+        # Unknown fields pass through, like every other handler here.
+        mock.regions.append({**body, "regionId": region_id, "regionName": str(body["regionName"])})
+        return JSONResponse({"regionId": region_id}, status_code=200)
+
+    @api.put("/regions")
+    async def update_region(request: Request, regionId: int) -> Any:
+        record = _region_record(regionId)
+        if record is None:
+            return JSONResponse({"error": f"no region {regionId}"}, status_code=404)
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "body must be a region object"}, status_code=400)
+        record.update({**body, "regionId": regionId})
+        return JSONResponse(record, status_code=200)
+
+    @api.delete("/regions")
+    async def delete_region(regionId: int) -> Response:
+        if regionId == 0:
+            return JSONResponse(
+                {"error": "the global region (regionId 0) cannot be deleted"}, status_code=400
+            )
+        record = _region_record(regionId)
+        if record is None:
+            return JSONResponse({"error": f"no region {regionId}"}, status_code=404)
+        mock.regions = [r for r in mock.regions if int(r["regionId"]) != regionId]
+        # Appliances fall back to the global region; regional overlay entries
+        # for the region go with it.
+        for ne_pk, assigned in list(mock.region_appliances.items()):
+            if int(assigned) == regionId:
+                mock.region_appliances[ne_pk] = 0
+        for by_region in mock.regional_overlays.values():
+            by_region.pop(str(regionId), None)
+        return Response(status_code=204)
+
+    @api.get("/regions/appliances/regionId")
+    async def get_region_appliances_by_region(regionId: int) -> Any:
+        return [
+            _association(ne_pk)
+            for ne_pk, assigned in sorted(mock.region_appliances.items())
+            if int(assigned) == regionId
+        ]
+
+    @api.get("/regions/appliances")
+    async def get_region_appliances(nePk: str | None = None) -> Any:
+        if nePk is None:
+            return [_association(pk) for pk in sorted(mock.region_appliances)]
+        if nePk not in mock.region_appliances:
+            return JSONResponse({"error": f"no appliance {nePk!r}"}, status_code=404)
+        return _association(nePk)
+
+    @api.put("/regions/appliances")
+    async def update_region_association(request: Request, nePk: str) -> Any:
+        body = await _json_body(request)
+        if not isinstance(body, dict) or "regionId" not in body:
+            return JSONResponse({"error": "body must be {regionId: int}"}, status_code=400)
+        region_id = int(body["regionId"])
+        if _region_record(region_id) is None:
+            return JSONResponse({"error": f"no region {region_id}"}, status_code=404)
+        mock.region_appliances[nePk] = region_id
+        return Response(status_code=204)
+
+    @api.post("/regions/appliances")
+    async def create_region_associations(request: Request) -> Any:
+        body = await _json_body(request)
+        if not isinstance(body, list):
+            return JSONResponse(
+                {"error": "body must be [{nePk, regionId}, ...]"}, status_code=400
+            )
+        for entry in body:
+            if not isinstance(entry, dict) or "nePk" not in entry or "regionId" not in entry:
+                continue
+            mock.region_appliances[str(entry["nePk"])] = int(entry["regionId"])
+        return Response(status_code=204)
+
+    @api.get("/gms/overlays/config/regions")
+    async def get_regional_overlays(
+        overlayId: str | None = None, regionId: str | None = None
+    ) -> Any:
+        out: dict[str, dict[str, Any]] = {}
+        for oid, by_region in mock.regional_overlays.items():
+            if overlayId is not None and str(overlayId) != oid:
+                continue
+            entries = {
+                rid: cfg
+                for rid, cfg in by_region.items()
+                if regionId is None or str(regionId) == rid
+            }
+            if entries:
+                out[oid] = entries
+        return out
+
+    @api.put("/gms/overlays/config/regions")
+    async def modify_regional_overlays(request: Request) -> Response:
+        """Region-scoped update: only the (overlayId, regionId) pairs named in
+        the body are replaced; every other entry is left untouched. This is the
+        merge reading of the spec's "update an existing overlay configuration"
+        — resources/regions.py deliberately sends the whole merged table so it
+        stays correct under the replace reading too (see its module docstring).
+        """
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "body must map overlayId -> {regionId: config}"}, status_code=400
+            )
+        for overlay_id, by_region in body.items():
+            if not isinstance(by_region, dict):
+                continue
+            target = mock.regional_overlays.setdefault(str(overlay_id), {})
+            for region_id, config in by_region.items():
+                target[str(region_id)] = config
+        return Response(status_code=204)
+
+    # -- end regions (#35) ----------------------------------------------------
+
+    # -- acls / ipObjects / appExpress (#31) ----------------------------------
+    #
+    # Orchestrator-scope half of #31. (The ACL half is appliance-scope and is
+    # served through the /appliance/rest proxy above — see _acls_dispatch.)
+    # These shapes are spec-derived: all four collections were empty on the
+    # live lab, so the mock follows specs/orchestrator-openapi-7.2.0.json.
+
+    def _ip_object_get(store: dict[str, Any], name: str | None) -> Any:
+        if name is None:
+            return list(store.values())
+        record = store.get(name)
+        # GET ?name= is typed as a single object; an unknown name yields the
+        # empty object the resource reads as "absent".
+        return record if record is not None else {}
+
+    def _ip_object_write(store: dict[str, Any], body: Any, type_code: str) -> Response:
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "body must be a group object"}, status_code=400)
+        name = body.get("name")
+        if not name:
+            return JSONResponse({"error": "group body must carry 'name'"}, status_code=400)
+        if body.get("type") != type_code:
+            return JSONResponse(
+                {"error": f"group 'type' must be {type_code!r}"}, status_code=400
+            )
+        rules = body.get("rules")
+        if not isinstance(rules, list):
+            return JSONResponse({"error": "group body must carry 'rules'"}, status_code=400)
+        store[str(name)] = copy.deepcopy(body)
+        return Response(status_code=204)
+
+    @api.get("/ipObjects/addressGroup")
+    async def get_address_groups(name: str | None = None) -> Any:
+        return _ip_object_get(mock.address_groups, name)
+
+    @api.api_route("/ipObjects/addressGroup", methods=["POST", "PUT"])
+    async def write_address_group(request: Request) -> Response:
+        return _ip_object_write(mock.address_groups, await _json_body(request), "AG")
+
+    @api.delete("/ipObjects/addressGroup")
+    async def delete_address_group(name: str) -> Response:
+        mock.address_groups.pop(name, None)
+        return Response(status_code=204)
+
+    @api.get("/ipObjects/serviceGroup")
+    async def get_service_groups(name: str | None = None) -> Any:
+        return _ip_object_get(mock.service_groups, name)
+
+    @api.api_route("/ipObjects/serviceGroup", methods=["POST", "PUT"])
+    async def write_service_group(request: Request) -> Response:
+        return _ip_object_write(mock.service_groups, await _json_body(request), "SG")
+
+    @api.delete("/ipObjects/serviceGroup")
+    async def delete_service_group(name: str) -> Response:
+        mock.service_groups.pop(name, None)
+        return Response(status_code=204)
+
+    @api.get("/applicationDefinition/appExpressGroup/config")
+    async def get_app_express_groups() -> Any:
+        return mock.app_express_groups
+
+    @api.post("/applicationDefinition/appExpressGroup/config")
+    async def set_app_express_group(request: Request) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, dict) or not body.get("name"):
+            return JSONResponse(
+                {"error": "appExpress group body must carry 'name'"}, status_code=400
+            )
+        # The real API keys the table by the lower-cased group name; POST
+        # edits exactly one group and leaves the rest alone.
+        mock.app_express_groups[str(body["name"]).lower()] = copy.deepcopy(body)
+        return Response(status_code=204)
+
+    @api.delete("/applicationDefinition/appExpressGroup/config")
+    async def delete_app_express_group(groupName: str) -> Response:
+        mock.app_express_groups.pop(groupName.lower(), None)
+        mock.app_express_associations = [
+            a
+            for a in mock.app_express_associations
+            if str(a.get("appExpressGroupName", "")).lower() != groupName.lower()
+        ]
+        return Response(status_code=204)
+
+    @api.get("/applicationDefinition/appExpressGroup/association")
+    async def get_app_express_associations(groupName: str | None = None) -> Any:
+        if groupName is None:
+            return mock.app_express_associations
+        return [
+            a
+            for a in mock.app_express_associations
+            if str(a.get("appExpressGroupName", "")) == groupName
+        ]
+
+    @api.post("/applicationDefinition/appExpressGroup/association")
+    async def set_app_express_associations(request: Request) -> Response:
+        body = await _json_body(request)
+        if not isinstance(body, list):
+            return JSONResponse(
+                {"error": "association body must be the complete array"}, status_code=400
+            )
+        mock.app_express_associations = copy.deepcopy(body)
+        return Response(status_code=204)
+
+    # -- end acls / ipObjects / appExpress (#31) ------------------------------
 
     # -- catch-all (must be registered last on this router) -----------------
 

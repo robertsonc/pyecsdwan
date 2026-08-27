@@ -53,6 +53,58 @@ KIND_TO_TEMPLATE_SECTIONS: dict[str, tuple[str, ...]] = {
     # name candidate (matches the ECOS path), same UNVERIFIED convention as
     # appliance/deployment above.
     "appliance/zones": ("zones",),
+    # NAT (#32). The pre-seeded bare "appliance/nat" above is left untouched
+    # (Branch NAT, ECOS "nat/maps", may yet claim it): one kind cannot name
+    # the two distinct appliance NAT resources that landed here, which have
+    # different endpoints. Section name for the policy-map table CONFIRMED
+    # real in the sense that it matches the ECOS path itself, "natMaps".
+    "appliance/nat-maps": ("natMaps",),
+    # UNVERIFIED — no live Default Template Group with a NAT-pool section
+    # selected was available this session; "natPools" is the natural
+    # candidate (matches the ECOS path), same convention as the entries above.
+    "appliance/nat-pools": ("natPools",),
+    # Policy maps + shapers (#33). "shaper" (pre-seeded above, used as-is by
+    # resources/shapers.py's outbound resource) is CONFIRMED real against a
+    # live Default Template Group's selected-section list. The four names
+    # below are UNVERIFIED: they follow the ECOS-path-matching convention
+    # that was confirmed for "securityMaps", but no live group selecting them
+    # was available this session. The inbound shaper claims the confirmed
+    # "shaper" section too — the Orchestrator's Shaper template covers both
+    # directions — so its ownership detection does not rest on the
+    # unverified half alone.
+    "appliance/qos-map": ("qosMaps",),
+    "appliance/optimization-map": ("optimizationMaps",),
+    "appliance/route-map": ("routeMaps",),
+    "appliance/inbound-shaper": ("shaper", "inboundShapers"),
+    # -- appliance-common settings (#38) ------------------------------------
+    # LIVE-CONFIRMED, unlike most entries above. A real Default Template
+    # Group's selected-section list was probed read-only this session and
+    # answered with exactly: adminDistance, cli, dns, datetime, logging,
+    # mgmtServices, routes, secureWebServicesConfig, shaper, snmp, webconfig.
+    # The three section names below are drawn verbatim from that list — they
+    # are not section-name guesses and should not be re-flagged UNVERIFIED.
+    # Two more names from that same confirmed list are worth recording for
+    # whoever extends this catalog next (issue #20): "dns" — already claimed
+    # by the pre-seeded "appliance/dns" entry above, which that probe
+    # therefore also confirms (left untouched rather than duplicated here) —
+    # and "datetime", the section a per-appliance NTP/time resource should
+    # claim once one exists.
+    "appliance/snmp": ("snmp",),
+    "appliance/logging": ("logging",),
+    "appliance/mgmt-services": ("mgmtServices",),
+    # UNVERIFIED — "banners" is NOT in the confirmed section list above, so
+    # this is a section-name candidate (it matches the ECOS path itself),
+    # same convention as appliance/deployment and appliance/zones. The
+    # Orchestrator UI may fold login banners into another section entirely.
+    "appliance/banners": ("banners",),
+    # No entry for "schedule-timezone": it is Orchestrator-scope config
+    # (/gms/scheduleTimezone), not per-appliance, so no template owns it.
+    # ACLs (#31). UNVERIFIED section name, same convention as the two above:
+    # "acls" matches the ECOS path itself, but no live Default Template Group
+    # with an ACL section selected was available to confirm it. The resource
+    # prefers the per-rule gms_marked flag anyway (resources/acls.py), so this
+    # join only ever runs as the fallback.
+    "appliance/acl": ("acls",),
 }
 
 
