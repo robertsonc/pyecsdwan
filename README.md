@@ -22,7 +22,7 @@ never had:
 
 The repo also vendors the upstream
 [pyedgeconnect SDK](docs/pyedgeconnect-README.md) as the endpoint reference the
-plugins are built from, and OpenAPI 7.2.0 specs under `specs/` as the
+plugins are built from, and OpenAPI 7.2.0 specs under `src/pyecsdwan/_specs/` as the
 spec-ingestion baseline.
 
 ## Install

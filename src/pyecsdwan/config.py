@@ -9,7 +9,8 @@ precedence order:
 
 State lives under ``~/.pyecsdwan/`` (override root with ``ECSDWAN_HOME`` for
 tests): ``journal/`` transaction journals, ``candidate/`` candidate
-changesets, ``cache/`` resolver caches.
+changesets, ``cache/`` resolver caches, ``locks/`` host-scoped advisory
+locks.
 """
 
 from __future__ import annotations
@@ -44,6 +45,10 @@ def cache_root() -> Path:
     return state_root() / "cache"
 
 
+def lock_root() -> Path:
+    return state_root() / "locks"
+
+
 def ensure_dirs() -> None:
     # chmod after mkdir: mkdir(mode=) only applies to the leaf and is subject
     # to umask, and a pre-existing dir (backup restore, older layout) keeps
@@ -52,7 +57,7 @@ def ensure_dirs() -> None:
     root = state_root()
     root.mkdir(parents=True, exist_ok=True)
     root.chmod(0o700)
-    for d in (journal_root(), candidate_root(), cache_root()):
+    for d in (journal_root(), candidate_root(), cache_root(), lock_root()):
         d.mkdir(parents=True, exist_ok=True)
         d.chmod(0o700)
 

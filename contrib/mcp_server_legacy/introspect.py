@@ -26,7 +26,7 @@ def _parse_summary(docstring: str) -> str:
     if not docstring:
         return ""
     # Take everything up to the first RST directive or blank line
-    lines = []
+    lines: list[str] = []
     for line in docstring.split("\n"):
         stripped = line.strip()
         if stripped.startswith("..") or stripped.startswith(":param"):
@@ -38,7 +38,7 @@ def _parse_summary(docstring: str) -> str:
     return " ".join(lines)
 
 
-def _python_type_to_json_schema(annotation) -> dict:
+def _python_type_to_json_schema(annotation: Any) -> dict[str, Any]:
     """Convert a Python type annotation to a JSON schema type dict."""
     if annotation is inspect.Parameter.empty or annotation is None:
         return {"type": "string"}
@@ -62,7 +62,7 @@ def _python_type_to_json_schema(annotation) -> dict:
         return {"type": "string"}
 
 
-def get_public_methods(cls) -> list[dict[str, Any]]:
+def get_public_methods(cls: type) -> list[dict[str, Any]]:
     """Extract all public methods from a class with their metadata.
 
     Returns a list of dicts with keys:
@@ -71,7 +71,7 @@ def get_public_methods(cls) -> list[dict[str, Any]]:
       - doc: full docstring
       - parameters: list of param dicts with name, type, required, default, description
     """
-    methods = []
+    methods: list[dict[str, Any]] = []
 
     for name, method in inspect.getmembers(cls, predicate=inspect.isfunction):
         # Skip private/magic methods

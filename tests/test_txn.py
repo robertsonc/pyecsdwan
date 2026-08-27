@@ -22,6 +22,7 @@ from pyecsdwan.contract import (
     Tier,
 )
 from pyecsdwan.journal import TxnJournal, TxnState, list_txns
+from pyecsdwan.locking import LockBusy
 from pyecsdwan.registry import Registry
 
 
@@ -298,3 +299,144 @@ def test_delete_resource_roundtrip(world: dict[str, Any]) -> None:
     restore = txn.rollback_history_txn(world["ctx"], world["registry"], world["settings"], n=1)
     assert restore.ok
     assert world["server"].store["alpha:gone"] == {"v": 1}
+
+
+# -- concurrency and commit-time drift (issue #63) ---------------------------
+
+
+def _external_writer_adds_mtu(world: dict[str, Any]) -> None:
+    """Someone else — a UI operator, a template push, another CLI — writes to
+    the same object between plan and commit."""
+    world["server"].store["alpha:one"] = {"mtu": 9000}
+
+
+def test_commit_aborts_when_server_state_moved_since_compare(world: dict[str, Any]) -> None:
+    world["candidate"].set_path(Ref("alpha", "one"), ["speed"], 10)
+    plan = _plan(world)
+    _external_writer_adds_mtu(world)
+
+    report = txn.commit(world["ctx"], world["registry"], plan, world["settings"])
+
+    assert not report.ok
+    assert report.state == "DRIFT"
+    assert "alpha:one" in " ".join(report.messages)
+    assert "--rebase" in " ".join(report.messages)
+    # The point of aborting: it happens before the first write, so the
+    # concurrent writer's change is still there afterwards.
+    assert world["server"].write_count == 0
+    assert world["server"].store["alpha:one"] == {"mtu": 9000}
+
+    journal = list_txns()[0]
+    assert journal.meta.state == TxnState.AUDIT_ONLY
+    assert "DRIFT_ABORT" in [e["event"] for e in journal.events()]
+
+
+def test_commit_rebase_remerges_intent_over_the_concurrent_change(
+    world: dict[str, Any],
+) -> None:
+    """``--rebase`` re-merges staged intent over what the server holds now.
+
+    Re-diffing the plan-time desired state would delete ``mtu`` — the very
+    lost update the drift check exists to prevent, arrived at by consent.
+    """
+    world["candidate"].set_path(Ref("alpha", "one"), ["speed"], 10)
+    plan = _plan(world)
+    _external_writer_adds_mtu(world)
+
+    report = txn.commit(world["ctx"], world["registry"], plan, world["settings"], rebase=True)
+
+    assert report.ok and report.state == TxnState.CONFIRMED
+    assert world["server"].store["alpha:one"] == {"mtu": 9000, "speed": 10}
+    assert any("--rebase" in m for m in report.messages)
+    assert "DRIFT_REBASED" in [e["event"] for e in list_txns()[0].events()]
+
+
+def test_commit_proceeds_normally_when_nothing_moved(world: dict[str, Any]) -> None:
+    # The drift check must not fire on an unchanged server, or every commit
+    # would need --rebase and the flag would mean nothing.
+    world["candidate"].set_path(Ref("alpha", "one"), ["speed"], 10)
+    report = txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"])
+    assert report.ok and report.state == TxnState.CONFIRMED
+
+
+def test_a_second_commit_cannot_interleave(world: dict[str, Any], lock_holder: Any) -> None:
+    world["candidate"].set_path(Ref("alpha", "one"), ["speed"], 10)
+    plan = _plan(world)
+    lock_holder(world["settings"].host, "commit")
+    with pytest.raises(LockBusy) as excinfo:
+        txn.commit(world["ctx"], world["registry"], plan, world["settings"], lock_timeout=0.2)
+    assert "commit lock" in str(excinfo.value)
+    # Refused before writing anything, and before opening a journal.
+    assert world["server"].write_count == 0
+    assert list_txns() == []
+
+
+def test_confirm_takes_the_commit_lock(world: dict[str, Any], lock_holder: Any) -> None:
+    world["candidate"].set_path(Ref("alpha", "one"), ["speed"], 10)
+    report = txn.commit(
+        world["ctx"], world["registry"], _plan(world), world["settings"], confirm_minutes=5
+    )
+    assert report.state == TxnState.APPLIED_UNCONFIRMED
+    holder = lock_holder(world["settings"].host, "commit")
+    with pytest.raises(LockBusy):
+        txn.confirm_pending(world["settings"], lock_timeout=0.2)
+    holder.kill()
+    holder.wait(timeout=10)
+    # Still confirmable once the lock is free — refusing must not strand it.
+    assert txn.confirm_pending(world["settings"]).ok
+
+
+def test_rollback_takes_the_commit_lock(world: dict[str, Any], lock_holder: Any) -> None:
+    world["candidate"].set_path(Ref("alpha", "one"), ["speed"], 10)
+    assert txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"]).ok
+    holder = lock_holder(world["settings"].host, "commit")
+    with pytest.raises(LockBusy):
+        txn.rollback_history_txn(
+            world["ctx"], world["registry"], world["settings"], 1, lock_timeout=0.2
+        )
+    assert world["server"].store["alpha:one"] == {"speed": 10}  # untouched
+    holder.kill()
+    holder.wait(timeout=10)
+    assert txn.rollback_history_txn(world["ctx"], world["registry"], world["settings"], 1).ok
+
+
+def test_watchdog_revert_takes_the_commit_lock(
+    world: dict[str, Any], lock_holder: Any
+) -> None:
+    """The watchdog's revert coordinates through the same lock.
+
+    It waits far longer for it than an interactive command would, but it does
+    take it: a revert interleaving with a commit already in flight would
+    snapshot and restore half of that commit's work.
+    """
+    world["candidate"].set_path(Ref("alpha", "one"), ["speed"], 10)
+    report = txn.commit(
+        world["ctx"], world["registry"], _plan(world), world["settings"], confirm_minutes=5
+    )
+    txn_dir = list_txns()[0].dir
+    assert report.state == TxnState.APPLIED_UNCONFIRMED
+
+    holder = lock_holder(world["settings"].host, "commit")
+    with pytest.raises(LockBusy):
+        txn.revert_txn_dir(
+            txn_dir,
+            "deadline",
+            ctx=world["ctx"],
+            registry=world["registry"],
+            lock_timeout=0.2,
+        )
+    assert world["server"].store["alpha:one"] == {"speed": 10}  # not yet reverted
+    holder.kill()
+    holder.wait(timeout=10)
+
+    result = txn.revert_txn_dir(
+        txn_dir, "deadline", ctx=world["ctx"], registry=world["registry"]
+    )
+    assert result.ok and "alpha:one" not in world["server"].store
+
+
+def test_revert_default_lock_wait_is_generous() -> None:
+    # A watchdog that gave up because another commit was running would leave
+    # the unconfirmed change applied — the one outcome the confirm window
+    # exists to prevent.
+    assert txn.REVERT_LOCK_TIMEOUT >= 600.0

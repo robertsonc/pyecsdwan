@@ -1,7 +1,8 @@
 """Machine-generated pydantic models and typed client bindings (issue #26).
 
 Everything under ``models/`` and ``bindings/`` is emitted by
-``tools/gen_models.py`` from the vendored OpenAPI baselines in ``specs/``.
+``tools/gen_models.py`` from the vendored OpenAPI baselines in
+``src/pyecsdwan/_specs/``.
 Do not hand-edit those modules: regenerate them instead. The one hand-written
 module here is :mod:`pyecsdwan.generated._base`, which holds the shared
 pydantic configuration and the runtime helpers the bindings call, so a policy

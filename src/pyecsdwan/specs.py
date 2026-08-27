@@ -1,6 +1,7 @@
 """Shared read-only view over the vendored API specs (epic #6).
 
-One place that knows how to find ``specs/``, parse the two OpenAPI baselines,
+One place that knows how to find the vendored baselines, parse the two OpenAPI
+specs,
 and enumerate the endpoint universe. Everything in the Tier-1 pipeline reads
 through here so the CLI, the codegen tools, and the coverage report can never
 disagree about what an endpoint *is*:
@@ -12,7 +13,7 @@ disagree about what an endpoint *is*:
 Two deliberate design points:
 
 * **Offline by construction.** Nothing here touches the network. A missing
-  ``specs/`` directory degrades to an empty universe rather than raising, so
+  baseline directory degrades to an empty universe rather than raising, so
   ``show coverage`` still works from an installed wheel that ships no specs.
 * **Path normalization is the join key.** The specs, the Postman collections,
   and a live URL all spell path parameters differently (``{nePk}``, ``:nePk``,
@@ -77,18 +78,19 @@ def endpoint_key(scope: str, method: str, path: str) -> str:
 def specs_dir() -> Path | None:
     """Locate the vendored spec directory, or ``None`` when unavailable.
 
-    Order: ``$ECSDWAN_SPECS_DIR`` -> ``<package>/_specs`` (present only if a
-    build ships them as package data) -> the repo-root ``specs/`` directory.
+    Order: ``$ECSDWAN_SPECS_DIR`` -> ``<package>/_specs``.
+
+    The baselines live *inside* the package (issue #65). They used to sit at
+    the repository root, which meant a wheel shipped without them and an
+    installed ``show coverage`` reported an empty endpoint universe as though
+    that were the answer.
     """
     override = os.environ.get(ENV_SPECS_DIR)
     if override:
         candidate = Path(override)
         return candidate if candidate.is_dir() else None
-    here = Path(__file__).resolve()
-    for candidate in (here.parent / "_specs", here.parents[2] / "specs"):
-        if candidate.is_dir():
-            return candidate
-    return None
+    packaged = Path(__file__).resolve().parent / "_specs"
+    return packaged if packaged.is_dir() else None
 
 
 def baseline_path(scope: Scope) -> Path | None:

@@ -14,6 +14,35 @@ policy (read / write / destructive scopes, per-user, per-appliance), audits
 every call, and exposes a narrow API the CLI can target when the Orchestrator
 proxy is down or too slow. Until that exists, direct mode stays out.
 
+## Legacy MCP server: rebuild or archive? (issue #62)
+
+`contrib/mcp_server_legacy/` is quarantined — disabled by default, read-only
+when enabled, direct-to-appliance tools removed, TLS on, credentials out of
+tool arguments, and now covered by ruff/mypy/tests. What has *not* been
+decided is what it should become:
+
+* **Rebuild** it as a curated front end over `pyecsdwan.Resource`/`txn`, so an
+  agent gets the same plan/journal/ownership/rollback guarantees an operator
+  gets. Note this is not a port: the existing server wraps the vendored
+  `pyedgeconnect` reference SDK, not this product, so a rebuild is new code
+  against a different library. The natural shape is one tool per verb of the
+  existing contract (`plan`, `commit`, `compare`, `rollback`, `show`) rather
+  than one tool per endpoint — a few tools instead of 641.
+* **Archive** it as a separate raw-SDK project, out of this repository
+  entirely, and let this repo carry only the transactional surface.
+
+Either way the quarantine stands in the meantime. The thing that should *not*
+happen is the middle path it was on: a second product surface in the same
+repository with none of the same guarantees.
+
+## CONTRIBUTING.md is the upstream project's, not this one's
+
+`CONTRIBUTING.md` still describes `black`, `flake8` and PyCharm — it was
+inherited from the vendored `pyedgeconnect` project and describes neither this
+repository's tooling (ruff, mypy `--strict`, pytest) nor its workflow. Noticed
+while wiring up CI for #65 and deliberately left alone there: it is
+documentation reconciliation, which is issue #68's subject.
+
 ## Other deferred items
 
 - ~~**Tier-1 codegen**~~ — shipped as epic #6 (#25 `spec_sync.py`, #26
@@ -271,7 +300,8 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   which is version order only while releases stay single-digit: a future
   `payload-examples-9.10.json` would sort *before* `payload-examples-9.6.json`
   and silently lose. Harmless today — `tools/postman_sync.py` refuses to leave
-  more than one artifact in `specs/` — but the selection wants a version-aware
+  more than one artifact in `src/pyecsdwan/_specs/` — but the selection wants a
+  version-aware
   sort before 9.10 ships. Found while building #51; not fixed here because
   `specs.py` was owned by parallel work.
 - **`loopback.reclaim_deleted_ips()` builds a path that does not exist.** It

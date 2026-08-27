@@ -29,7 +29,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from pyecsdwan import config, runtime, specs, txn
+from pyecsdwan import config, locking, runtime, specs, txn
 from pyecsdwan import registry as registry_mod
 from pyecsdwan.candidate import CandidateCorruptError, CandidateStore
 from pyecsdwan.cli import render
@@ -378,6 +378,16 @@ def commit(
             help="Allow tier-0/1 resources inside a commit-confirm window.",
         ),
     ] = False,
+    rebase: Annotated[
+        bool,
+        typer.Option(
+            "--rebase",
+            help=(
+                "Re-merge staged intent over the server's current state when it "
+                "moved since compare, instead of refusing."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Apply the candidate changeset (a bare commit inside a confirm window confirms)."""
     state = _state(ctx)
@@ -393,7 +403,7 @@ def commit(
         # staged new changes or passed options, they meant a fresh commit —
         # refuse rather than silently confirming and dropping the new work.
         options_passed = bool(
-            confirm_minutes or force or override_template or allow_untransactional
+            confirm_minutes or force or override_template or allow_untransactional or rebase
         )
         if len(candidate) or options_passed:
             _fail(
@@ -418,6 +428,7 @@ def commit(
         force=force,
         override_template=override_template,
         allow_untransactional=allow_untransactional,
+        rebase=rebase,
     )
     if report.ok:
         candidate.clear()
@@ -506,6 +517,43 @@ def show_appliances(ctx: typer.Context) -> None:
 def show_journal() -> None:
     """All journaled transactions, newest first."""
     render.render_journal_table(console, list_txns())
+
+
+def render_locks_table(
+    out: Console, rows: list[tuple[str, locking.LockOwner | None, bool]]
+) -> None:
+    """Render host-scoped lock state (#63). Shared by the subcommand and the shell."""
+    if not rows:
+        out.print("no locks")
+        return
+    table = Table(title=f"locks ({len(rows)})")
+    table.add_column("lock")
+    table.add_column("state")
+    table.add_column("holder")
+    table.add_column("since")
+    for name, owner, held in rows:
+        state_cell = Text("HELD", style="bold yellow") if held else Text("free", style="dim")
+        if owner is None:
+            holder = _ABSENT
+        elif held:
+            holder = Text(owner.describe(), style="dim")
+        else:
+            # The file outlives the lock, so this is the *last* holder, not a
+            # current one. Labelled, because an unlabelled pid reads as truth.
+            holder = Text(f"(last: {owner.describe()})", style="dim")
+        since = Text(owner.acquired_utc, style="dim") if owner is not None else _ABSENT
+        table.add_row(name, state_cell, holder, since)
+    out.print(table)
+
+
+@show_app.command("locks")
+def show_locks() -> None:
+    """Host-scoped candidate/commit locks, and who holds them (#63).
+
+    The lock file outlives the lock on the flock path, so "a file exists" is
+    not an answer. Each row is probed by trying to take the lock.
+    """
+    render_locks_table(console, locking.active_locks())
 
 
 @show_app.command("pending")
@@ -875,7 +923,7 @@ def show_coverage(
 ) -> None:
     """Resource kinds, the endpoints they cover, and the transactional tier.
 
-    Offline: reads the vendored ``specs/`` baselines and the plugin registry,
+    Offline: reads the vendored ``_specs/`` baselines and the plugin registry,
     never the Orchestrator.
     """
     registry = _registry_only()
@@ -964,7 +1012,8 @@ def show_coverage(
 
 def _no_specs_message() -> str:
     return (
-        "no API specs vendored (looked for specs/*-openapi-*.json, or "
+        "no API specs vendored (looked for _specs/*-openapi-*.json inside the "
+        "package, or "
         f"${specs.ENV_SPECS_DIR}); per-endpoint coverage is unavailable — "
         "the resource-kind table above is complete on its own"
     )

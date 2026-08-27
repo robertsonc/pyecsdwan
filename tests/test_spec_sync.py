@@ -1,6 +1,6 @@
 """Unit tests for tools/spec_sync.py: offline OpenAPI fetch + diff + update.
 
-Everything runs against local fixtures or the vendored specs/ baseline —
+Everything runs against local fixtures or the vendored _specs/ baseline —
 never a live Orchestrator. The committed fixture pair under
 tests/fixtures/spec_sync/ carries exactly one added endpoint, proving the
 detection required by issue #25 (and feeding epic #6 DoD).
@@ -20,7 +20,7 @@ import respx
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SPEC_SYNC = REPO_ROOT / "tools" / "spec_sync.py"
-REAL_SPECS_DIR = REPO_ROOT / "specs"
+REAL_SPECS_DIR = REPO_ROOT / "src" / "pyecsdwan" / "_specs"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "spec_sync"
 FIXTURE_SPECS_DIR = FIXTURES / "specs"
 FIXTURE_BASELINE = FIXTURE_SPECS_DIR / "orchestrator-openapi-0.9.0.json"

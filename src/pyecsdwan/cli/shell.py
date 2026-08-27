@@ -33,7 +33,7 @@ from prompt_toolkit.history import FileHistory
 from rich.console import Console
 from rich.table import Table
 
-from pyecsdwan import __version__, config, journal, txn
+from pyecsdwan import __version__, config, journal, locking, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.contract import Ctx, Ref, Scope
 from pyecsdwan.registry import Registry
@@ -67,6 +67,7 @@ _SHOW_SPECIALS: tuple[str, ...] = (
     "flow",
     "flows",
     "journal",
+    "locks",
     "run",
     "transactions",
     "version",
@@ -76,6 +77,7 @@ _COMMIT_FLAGS: dict[str, str] = {
     "force": "force",
     "override-template": "override_template",
     "allow-untransactional": "allow_untransactional",
+    "rebase": "rebase",
 }
 _INT_RE = re.compile(r"^[+-]?\d+$")
 
@@ -88,8 +90,9 @@ _DELETE_USAGE = (
     "delete appliance <appliance-name> <kind> <name> [<path...>]"
 )
 _SHOW_OPERATIONAL_USAGE = (
-    "usage: show <appliances | journal | coverage | version | transactions pending | "
-    "run [<section> | appliance <name>] | flows summary | flow <ip> | <kind> [<name>]>"
+    "usage: show <appliances | journal | locks | coverage | version | "
+    "transactions pending | run [<section> | appliance <name>] | flows summary | "
+    "flow <ip> | <kind> [<name>]>"
 )
 # `show flow` and `show flows` differ by one character and mean different
 # things, so each insists on its own shape rather than guessing at the other.
@@ -223,7 +226,7 @@ def _parse_commit_args(tokens: list[str]) -> tuple[int | None, dict[str, bool]]:
         else:
             raise ValueError(
                 f"unknown commit option {word!r} — expected: confirm <minutes>, "
-                f"force, override-template, allow-untransactional"
+                f"force, override-template, allow-untransactional, rebase"
             )
     return confirm_minutes, flags
 
@@ -327,6 +330,12 @@ def _show_operational(args: list[str], state: ShellState) -> None:
         from pyecsdwan.cli.render import render_journal_table
 
         render_journal_table(state.console, journal.list_txns())
+    elif head == "locks":
+        from pyecsdwan.cli.main import render_locks_table
+
+        if args[1:]:
+            raise ValueError("usage: show locks")
+        render_locks_table(state.console, locking.active_locks())
     elif head == "transactions":
         if args[1:] != ["pending"]:
             raise ValueError("usage: show transactions pending")
@@ -633,6 +642,7 @@ def _cmd_commit(tokens: list[str], state: ShellState) -> None:
             or flags["force"]
             or flags["override_template"]
             or flags["allow_untransactional"]
+            or flags["rebase"]
         )
         if len(state.candidate) or options_passed:
             _error(
