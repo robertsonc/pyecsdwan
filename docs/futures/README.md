@@ -35,6 +35,14 @@ Either way the quarantine stands in the meantime. The thing that should *not*
 happen is the middle path it was on: a second product surface in the same
 repository with none of the same guarantees.
 
+## CONTRIBUTING.md is the upstream project's, not this one's
+
+`CONTRIBUTING.md` still describes `black`, `flake8` and PyCharm — it was
+inherited from the vendored `pyedgeconnect` project and describes neither this
+repository's tooling (ruff, mypy `--strict`, pytest) nor its workflow. Noticed
+while wiring up CI for #65 and deliberately left alone there: it is
+documentation reconciliation, which is issue #68's subject.
+
 ## Other deferred items
 
 - ~~**Tier-1 codegen**~~ — shipped as epic #6 (#25 `spec_sync.py`, #26
@@ -292,7 +300,8 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   which is version order only while releases stay single-digit: a future
   `payload-examples-9.10.json` would sort *before* `payload-examples-9.6.json`
   and silently lose. Harmless today — `tools/postman_sync.py` refuses to leave
-  more than one artifact in `specs/` — but the selection wants a version-aware
+  more than one artifact in `src/pyecsdwan/_specs/` — but the selection wants a
+  version-aware
   sort before 9.10 ships. Found while building #51; not fixed here because
   `specs.py` was owned by parallel work.
 - **`loopback.reclaim_deleted_ips()` builds a path that does not exist.** It

@@ -1,4 +1,7 @@
-"""Fetch + diff OpenAPI specs against the ``specs/`` baseline (issue #25).
+"""Fetch + diff OpenAPI specs against the vendored baseline (issue #25).
+
+The baselines live inside the package at ``src/pyecsdwan/_specs/`` so they ship
+in the wheel (issue #65).
 
 Tier-1 spec-ingestion entry point (docs/plugin-promotion.md): pull the
 Orchestrator's published OpenAPI/Swagger document (and the appliance one where
@@ -42,7 +45,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_SPECS_DIR = REPO_ROOT / "specs"
+DEFAULT_SPECS_DIR = REPO_ROOT / "src" / "pyecsdwan" / "_specs"
 
 TARGETS = ("orchestrator", "appliance")
 ENV_SOURCE = {t: f"ECSDWAN_SPEC_SOURCE_{t.upper()}" for t in TARGETS}
@@ -325,7 +328,7 @@ def write_baseline(
     Written byte-compatibly with the existing baselines: single-line compact
     JSON, ASCII-escaped, no trailing newline. The file is named after
     ``info.version``; a previous baseline with a different version is removed
-    so ``specs/`` keeps exactly one baseline per target. Returns
+    so the baseline directory keeps exactly one per target. Returns
     (written path, sanitized fields, removed superseded path or None).
     """
     sanitized, touched = sanitize_spec(fetched, target)

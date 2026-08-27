@@ -55,7 +55,8 @@ session access was read-only throughout. See `docs/futures/README.md`
 §"Write semantics needing live confirmation" before trusting one.
 
 **Tier-1 spec pipeline (#6) — complete.** `tools/spec_sync.py` fetches and
-diffs the published OpenAPI spec against the `specs/` baseline (#25).
+diffs the published OpenAPI spec against the `src/pyecsdwan/_specs/`
+baseline (#25).
 `pyecsdwan/specs.py` is the one read-only view over the two vendored
 baselines — 1833 operations, bounded cycle-safe `$ref` resolution, and the
 path normalization every source joins on. `tools/gen_models.py` emits
@@ -66,7 +67,7 @@ universe by tier (#28), and the promotion checklist is machine-enforced by
 `make check` rather than advisory (#29).
 
 `tools/postman_sync.py` distils the vendor's published Postman collections
-for 9.3–9.6 into `specs/payload-examples-9.6.json` (#51). It adds no endpoint
+for 9.3–9.6 into `src/pyecsdwan/_specs/payload-examples-9.6.json` (#51). It adds no endpoint
 breadth — the 7.2.0 baselines are already a superset — but supplies request
 payload shape for 128 of the 169 write operations the specs leave untyped.
 
@@ -85,7 +86,52 @@ next-boot partitions with skew detection, #57), `show flows summary` (#58) and
 concurrency-capped, failure-isolating fan-out: one unreachable appliance is a
 marked row, never a lost report.
 
-`make check` gate: ruff + mypy `--strict` + tests, all green.
+**Production hardening, first tranche (epic #9).** The two P0s from the
+audit batch, plus the gate that keeps them true.
+
+*Concurrency (#63).* The transaction guarantees assumed this CLI was the sole
+writer. Atomic replacement stops a *torn* candidate, not a *lost* one: two
+shells that both loaded at T0 and saved at T1 and T2 left only the second
+one's work. `locking.py` adds host-scoped advisory locks — `flock`, so the
+kernel drops them on SIGKILL and a stale lock is structurally impossible
+rather than merely detected, with an `O_EXCL` + start-token fallback for
+platforms without it. Candidate mutation is now a locked *read-modify-write*
+cycle: serializing the writes alone does not fix a lost update, and there is a
+test pinned to that distinction. Commit, confirm, revert and rollback share
+one commit lock; the detached watchdog's revert takes it too but waits far
+longer, because a watchdog that gave up would leave an unconfirmed change
+applied. Commit-time drift now **fails closed** — the engine used to notice
+that server state had moved since compare, recompute the diff and carry on,
+folding another operator's change into this one's changeset; `--rebase` opts
+in and re-merges intent over current state. `show locks` reports holders.
+
+*MCP trust boundary (#62).* `mcp_server/` reflectively exposed every public
+method of the vendored `pyedgeconnect` SDK — 641 on `Orchestrator`, ~250 of
+them writes — with no transaction, TLS verification off, and credentials as
+tool arguments. It was never a front end over this product: it wraps the
+reference SDK, not `pyecsdwan`. Quarantined to `contrib/mcp_server_legacy/`:
+disabled unless explicitly enabled, direct-to-appliance tools removed outright
+(#10), TLS on, credentials from environment/keyring only, reads by default and
+writes behind a second opt-in labelled Tier 0. Classification is by the verbs
+each method actually issues, not its name — 53 `get_*` methods issue POSTs.
+Rebuild-over-`txn` versus archive-as-a-separate-project is still open; see
+`docs/futures/README.md`.
+
+*CI and packaging (#65).* The gate ran locally and nowhere else.
+`.github/workflows/ci.yml` runs ruff + mypy `--strict` + pytest on 3.10/3.11/
+3.12 for every push and pull request, then builds an sdist and wheel and
+installs it into a clean environment to exercise the CLI from outside the
+source tree. That second job exists because of a bug the first cannot see:
+the OpenAPI baselines lived at the repository root and never reached the
+wheel, so an installed `show coverage` reported an empty endpoint universe —
+not an error, a confident wrong answer. They now live in
+`src/pyecsdwan/_specs/` and ship as declared package data, with
+`include-package-data` turned **off** so what lands in a wheel is a reviewed
+declaration rather than a side effect of what happens to be tracked by git.
+`make smoke` runs the same wheel check locally.
+
+`make check` gate: ruff + mypy `--strict` + tests, all green — now enforced by
+CI on every push and pull request, not only locally.
 
 ## Coverage model (why parity is incremental but safe from day one)
 
@@ -109,7 +155,7 @@ So *anything and everything* is reachable now via Tier 0; curated plugins
 | **Tier-1 spec pipeline** (#6) ✅ | `tools/spec_sync.py`, model/binding/stub codegen, `show coverage`, promotion gating | #25–#29 |
 | **Fleet lifecycle** (#7) | discovery/approval, decommission cascade, preconfig, backup/restore, upgrades, licensing — IRREVERSIBLE class | in-epic checklist |
 | **Fabric ops & observability** (#8) | `drift`, declarative bulk apply, JSON Schema, dashboard-parity views | #54 (✅ shipped) + in-epic checklist |
-| **Production hardening** (#9) | live session-login, systemd watchdog backend, keyring, audit export | in-epic checklist |
+| **Production hardening** (#9) | concurrency, MCP trust boundary, CI/packaging, async-job fail-closed, evidence ladder, retry policy | #62–#68 (#62, #63, #65 ✅ shipped) |
 | **(v2) RBAC broker** (#10) | direct-to-appliance access, gated — explicitly out of v1 scope | in-epic checklist |
 
 The near-term epics (#3, #4, #5, #6) are sharded into child sub-issues; #5 and
@@ -145,6 +191,6 @@ sharded into issues when their phase starts.
 
 Legend: ✅ done · 🔷 Phase 2 · 🔶 Phase 3 · ⚙️ operational epic · 🟢 Tier-0 now.
 
-`ec-cli show coverage --endpoints` now reads the `specs/` baseline directly
+`ec-cli show coverage --endpoints` now reads the vendored baseline directly
 (#28), so this table is a narrative summary — the command is the source of
 truth for what is covered at which tier.

@@ -923,7 +923,7 @@ def show_coverage(
 ) -> None:
     """Resource kinds, the endpoints they cover, and the transactional tier.
 
-    Offline: reads the vendored ``specs/`` baselines and the plugin registry,
+    Offline: reads the vendored ``_specs/`` baselines and the plugin registry,
     never the Orchestrator.
     """
     registry = _registry_only()
@@ -1012,7 +1012,8 @@ def show_coverage(
 
 def _no_specs_message() -> str:
     return (
-        "no API specs vendored (looked for specs/*-openapi-*.json, or "
+        "no API specs vendored (looked for _specs/*-openapi-*.json inside the "
+        "package, or "
         f"${specs.ENV_SPECS_DIR}); per-endpoint coverage is unavailable — "
         "the resource-kind table above is complete on its own"
     )

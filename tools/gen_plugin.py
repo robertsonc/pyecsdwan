@@ -17,7 +17,8 @@ Usage::
     python tools/gen_plugin.py --from-diff drift.json
 
 The last three lines are the epic's end-to-end path: ``spec_sync`` detects an
-added endpoint, ``--update`` vendors it into ``specs/`` (nothing can be
+added endpoint, ``--update`` vendors it into ``src/pyecsdwan/_specs/`` (nothing
+can be
 generated from an operation the baseline does not carry yet), and
 ``--from-diff`` reads the same JSON report back and emits one stub per added
 *write* endpoint. ``tests/test_gen_plugin.py`` drives exactly that sequence
@@ -1308,7 +1309,7 @@ def added_endpoints(report: dict[str, Any]) -> list[specs.Endpoint]:
     comes from the target key. Anything that does not resolve is dropped by
     :func:`plan_from_diff`, which reports it: the usual cause is running
     ``--from-diff`` before ``spec_sync.py --update`` has vendored the new
-    operation into ``specs/``, and there is nothing to generate from an
+    operation into the vendored baselines, and there is nothing to generate from an
     operation the baseline does not carry.
     """
     found: list[specs.Endpoint] = []

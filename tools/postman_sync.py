@@ -9,7 +9,7 @@ which are ~5 MB each and are deliberately *not* vendored.
 
 What the collections are actually good for
 ------------------------------------------
-Not endpoint breadth. Measured against the vendored ``specs/*-openapi-7.2.0``
+Not endpoint breadth. Measured against the vendored ``_specs/*-openapi-7.2.0``
 baselines (with every path-parameter dialect normalized), the 9.6 collections
 contribute exactly **one** endpoint the baselines lack
 (``GET /stats/infrastructure/reportLoaderUrl``) while omitting 58 the baselines
@@ -79,7 +79,7 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_SPECS_DIR = REPO_ROOT / "specs"
+DEFAULT_SPECS_DIR = REPO_ROOT / "src" / "pyecsdwan" / "_specs"
 
 #: Releases in ascending order; ``since`` resolution depends on this order.
 RELEASES: tuple[str, ...] = ("9.3", "9.4", "9.5", "9.6")
@@ -442,7 +442,8 @@ def find_artifact(specs_dir: Path) -> Path | None:
 def write_artifact(artifact: JsonDict, specs_dir: Path) -> tuple[Path, Path | None]:
     """Write the artifact, named after the newest release it covers.
 
-    Stored the way ``specs/*.json`` already are: compact, single line, sorted
+    Stored the way the other ``_specs/*.json`` already are: compact, single line,
+    sorted
     keys. Sorting is what keeps a regeneration diff reviewable. Returns
     (written path, superseded path or None).
     """

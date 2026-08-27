@@ -70,6 +70,21 @@ Homepage = "https://github.com/robertsonc/pyecsdwan"
 where = ["src"]
 include = ["pyecsdwan*"]
 
+[tool.setuptools]
+# Explicit, not inherited. With setuptools' default (`true`), package data
+# ships because the file happens to be tracked by git and reached the sdist —
+# so what lands in a wheel is decided by `git add`, and an untracked file is
+# omitted silently. Declaring the contents below makes it reviewable instead.
+include-package-data = false
+
+# `py.typed` keeps the package typed for downstream consumers. The OpenAPI
+# baselines and the Postman-derived payload examples are the source of truth
+# `show coverage` reads: a wheel without them reported an empty endpoint
+# universe as if that were the answer (issue #65).
+# `tests/test_packaging.py` fails if a data file on disk is not covered here.
+[tool.setuptools.package-data]
+pyecsdwan = ["py.typed", "_specs/*.json", "_specs/*.md"]
+
 [tool.ruff]
 target-version = "py310"
 line-length = 100

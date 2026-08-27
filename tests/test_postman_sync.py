@@ -20,7 +20,7 @@ from pyecsdwan import specs
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 POSTMAN_SYNC = REPO_ROOT / "tools" / "postman_sync.py"
-REAL_SPECS_DIR = REPO_ROOT / "specs"
+REAL_SPECS_DIR = REPO_ROOT / "src" / "pyecsdwan" / "_specs"
 
 
 def _load_module():
