@@ -188,6 +188,17 @@ class Bgp(Resource):
         "POSTs the complete system object and the complete neighbor table, "
         "never a partial patch."
     )
+    #: Config is read+written through the appliance proxy; the state and allVrfs
+    #: views are Orchestrator-side reads only (see module docstring).
+    endpoints = (
+        "appliance GET /bgp/config/system",
+        "appliance POST /bgp/config/system",
+        "appliance GET /bgp/config/neighbor",
+        "appliance POST /bgp/config/neighbor",
+        "orchestrator GET /bgp/state",
+        "orchestrator GET /bgp/config/allVrfs/system",
+        "orchestrator GET /bgp/config/allVrfs/neighbor",
+    )
 
     # -- appliance resolution --------------------------------------------------
 

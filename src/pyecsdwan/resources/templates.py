@@ -52,6 +52,13 @@ class TemplateGroup(Resource):
         "templates: map of template section name -> valObject payload "
         "(section names as in the Orchestrator UI / Default Template Group)"
     )
+    #: Create uses templateCreate; update/delete use templateGroups.
+    endpoints = (
+        "orchestrator GET /template/templateGroups",
+        "orchestrator POST /template/templateGroups",
+        "orchestrator DELETE /template/templateGroups",
+        "orchestrator POST /template/templateCreate",
+    )
 
     def fetch(self, ctx: Ctx, ref: Ref) -> RawState:
         try:
@@ -136,6 +143,10 @@ class TemplateAssociation(Resource):
     tier = Tier.CURATED
     dependencies = ("template-group",)
     desired_state_doc = "template_groups: complete list of group names for the appliance"
+    endpoints = (
+        "orchestrator GET /template/applianceAssociation",
+        "orchestrator POST /template/applianceAssociation",
+    )
 
     def fetch(self, ctx: Ctx, ref: Ref) -> RawState:
         ne_pk = ctx.resolver.ne_pk_for(ref.name)

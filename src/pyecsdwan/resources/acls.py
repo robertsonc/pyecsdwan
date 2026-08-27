@@ -309,6 +309,12 @@ class Acls(Resource):
         "GET dependency/acl/<name> reports as in use is refused unless "
         "delDependent: true is staged."
     )
+    #: ECOS ACL table (full-replace POST) plus the read-only dependency probe.
+    endpoints = (
+        "appliance GET /acls",
+        "appliance POST /acls",
+        "appliance GET /dependency/acl/{aclName}",
+    )
 
     @staticmethod
     def _ne_pk(ctx: Ctx, ref: Ref) -> str:
@@ -739,6 +745,13 @@ class IpAddressGroup(_IpObjectGroup):
         "and the spec. Every group needs at least one include list or include "
         "group or the Orchestrator rejects it with HTTP 400."
     )
+    #: Orchestrator address-group object lifecycle.
+    endpoints = (
+        "orchestrator GET /ipObjects/addressGroup",
+        "orchestrator POST /ipObjects/addressGroup",
+        "orchestrator PUT /ipObjects/addressGroup",
+        "orchestrator DELETE /ipObjects/addressGroup",
+    )
 
 
 class IpServiceGroup(_IpObjectGroup):
@@ -762,6 +775,13 @@ class IpServiceGroup(_IpObjectGroup):
         "icmpTypes: [...], icmpCodes: [...], comment: str}] — name and type "
         "('SG') come from the ref and the spec. protocol is required on every "
         "rule; the port/group fields are ignored by the server when it is ICMP."
+    )
+    #: Orchestrator service-group object lifecycle.
+    endpoints = (
+        "orchestrator GET /ipObjects/serviceGroup",
+        "orchestrator POST /ipObjects/serviceGroup",
+        "orchestrator PUT /ipObjects/serviceGroup",
+        "orchestrator DELETE /ipObjects/serviceGroup",
     )
 
 
@@ -788,6 +808,12 @@ class AppExpressGroup(Resource):
         "bool, dnsServers: [str], appExpressApps: [str], pingInterval / "
         "pingQoEUpdateInterval / userQoEUpdateInterval: number}. GET returns "
         "every group keyed by lower-cased name; POST edits one group."
+    )
+    #: AppExpress group definitions.
+    endpoints = (
+        "orchestrator GET /applicationDefinition/appExpressGroup/config",
+        "orchestrator POST /applicationDefinition/appExpressGroup/config",
+        "orchestrator DELETE /applicationDefinition/appExpressGroup/config",
     )
 
     # -- read side ------------------------------------------------------------
@@ -933,6 +959,11 @@ class AppExpressAssociation(Resource):
         "associations: [{appliance: <hostname> | nePk: <pk>, "
         "appExpressGroupName: <group>}] — the complete table; canonical state "
         "speaks nePks (stable across renames), hostnames are resolved for you."
+    )
+    #: AppExpress group -> appliance associations.
+    endpoints = (
+        "orchestrator GET /applicationDefinition/appExpressGroup/association",
+        "orchestrator POST /applicationDefinition/appExpressGroup/association",
     )
 
     def fetch(self, ctx: Ctx, ref: Ref) -> RawState:

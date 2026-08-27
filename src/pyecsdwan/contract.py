@@ -238,6 +238,9 @@ class Resource:
     deletable: bool = True
     #: Optional JSON-schema-ish hint used by the CLI for YAML input validation.
     desired_state_doc: str = ""
+    #: Spec endpoints this resource covers, as ``"<scope> <METHOD> <path>"``
+    #: keys (see ``pyecsdwan.specs.endpoint_key``). Drives ``show coverage``.
+    endpoints: tuple[str, ...] = ()
 
     # -- mandatory plugin surface -------------------------------------------
 

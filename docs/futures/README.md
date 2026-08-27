@@ -16,11 +16,12 @@ proxy is down or too slow. Until that exists, direct mode stays out.
 
 ## Other deferred items
 
-- **Tier-1 codegen** (pydantic models + plugin stubs from `specs/`, `ec-cli
-  show coverage` over generated stubs, promotion-checklist gating): epic #6,
-  issues #26–29. `tools/spec_sync.py` itself (fetch + diff the OpenAPI spec
-  against the `specs/` baseline) shipped and closed as #25 — this item is
-  now just the codegen/gating layer built on top of it.
+- ~~**Tier-1 codegen**~~ — shipped as epic #6 (#25 `spec_sync.py`, #26
+  `gen_models.py`, #27 `gen_plugin.py`, #28 `show coverage`, #29 the
+  promotion gate). What remains deferred from it: curating the generated
+  stubs (each is a Tier-1 → Tier-2 promotion of its own), and the two
+  emitter limits in the list below (the map-key heuristic, the `__all__`
+  ordering divergence).
 - **Fabric-wide drift report** (`ec-cli drift`): every curated kind × every
   appliance, diff against declared desired-state files; CI-friendly exit codes.
   Phase 3 / epic #8, not yet sharded into an issue.
@@ -265,3 +266,187 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   ref.name)` while its `normalize()` doesn't strip `name`** — if a desired
   state ever lacks `name`, post-apply `verify()` would see the injected key
   as drift. Not hit today because intent always carries a name.
+- **`specs.payload_examples()` picks the payload-example artifact by
+  lexicographic glob order** (`sorted(...)[-1]` over `payload-examples-*.json`),
+  which is version order only while releases stay single-digit: a future
+  `payload-examples-9.10.json` would sort *before* `payload-examples-9.6.json`
+  and silently lose. Harmless today — `tools/postman_sync.py` refuses to leave
+  more than one artifact in `specs/` — but the selection wants a version-aware
+  sort before 9.10 ships. Found while building #51; not fixed here because
+  `specs.py` was owned by parallel work.
+- **`loopback.reclaim_deleted_ips()` builds a path that does not exist.** It
+  calls `DELETE /loopbackOrch/pool/reclaim/{id}` when given a `loopback_id`,
+  but neither vendored baseline has that path — the Orchestrator spec's
+  `DELETE /loopbackOrch/pool/reclaim` takes `id` as a **required query
+  parameter** ("Reclaim all deleted ip addresses or Reclaim deleted ip address
+  by id"). Both call forms are therefore wrong: the by-id one 404s, and the
+  "all" one omits a parameter the spec marks required. Found by #28's
+  declared-endpoints-exist-in-spec check; the function is a maintenance
+  helper no `apply()` path reaches, so it was left alone rather than fixed
+  in a coverage change. `Resource.endpoints` for `loopback-orch` declares only
+  the real `DELETE /loopbackOrch/pool/reclaim`.
+- **`appliance POST /virtualif/loopback` exists but `appliance/loopback` still
+  refuses to write.** The module says "no documented endpoint" for the write
+  path and `apply()` raises; the appliance baseline does list POST (and
+  per-interface POST/DELETE on `/virtualif/loopback/{loopbackName}`). Worth
+  re-checking against live gear — it may be promotable from IRREVERSIBLE
+  read-only to a full curated resource.
+- **`security-policy` and `appliance/vrrp` implement no `list_refs()`**, so
+  `ec-cli show <kind>` and any registry-wide sweep (drift reports, the #29
+  promotion gate) cannot enumerate them and must be handed a ref. For
+  `security-policy` that is arguably unavoidable — the Orchestrator exposes no
+  endpoint listing the configured `srcSeg_dstSeg` pairs, so enumeration would
+  mean guessing from the segment table. For `appliance/vrrp` it is a cost
+  decision: enumerating means one proxy GET per appliance. Both are declared
+  with their reasons in `PROBE_REFS` in `tests/test_promotion.py`; if either
+  grows a `list_refs()`, that entry must be deleted (the suite asserts it).
+- **The `gen_models.py` map-key heuristic is name-shaped, and a few vendor
+  spellings slip past it** (issue #26). A `properties` block is read as a
+  mapping when *every* key is all digits, angle-bracketed, an appliance
+  primary key (`1.NE`) or an IPv4 literal — which covers the ~485 map-shaped
+  blocks in the two baselines. It still reads three families as records:
+  ASCII placeholder keys the vendor wrote without brackets (`x.x.x.x`,
+  `x.x.x.x/x`, `a number from 1 to 1000`), interface-name keys (`lan0`/`lan1`
+  in `poe/config`, arguably real fields), and the 32 *mixed* blocks like
+  `{"<nePk>": ..., "header": ...}`, where the map-shaped names are dropped
+  and absorbed by `extra="allow"` rather than typed. All three still produce
+  valid, drift-tolerant models; they just under-type. A value-shaped rule
+  (all sibling values share one schema, key names vary) would catch the rest
+  and is the obvious next iteration.
+
+- **`gen_models.dunder_all_order` and ruff disagree on one family of names.**
+  The helper reproduces `RUF022`'s isort-style order by splitting digit runs
+  and comparing them as integers; ruff uses `strnatcmp` semantics, where a
+  digit run with a *leading zero* is compared as a fraction and sorts before
+  the whole numbers. So `..._081e94` (helper: 81) lands after `..._1e304d`
+  where ruff wants it before. Invisible to `gen_models.py` — its committed
+  samples carry no such slug — and invisible to a normal `gen_plugin.py` tree
+  of a handful of stubs. It only surfaces if hundreds of hash-disambiguated
+  stubs share `resources/generated/__init__.py`, and `gen_plugin.write()`'s
+  ruff pass fixes the file on disk. Found by generating all 837 write
+  operations into the tree at once (#27); not fixed here because
+  `tools/gen_models.py` was owned by parallel work.
+
+- **The mock's `GET /flow?overlays=` filter disagrees with the spec, and the
+  Orchestrator overlay inventory cannot supply what the spec wants.** The
+  vendored spec documents `overlays` as *overlay IDs* joined by `|`
+  (`"1|2"`); `mock/server.py` matches *overlay names* split on `,`. Sending
+  the spec's form returns nothing from the mock, and vice versa. Nothing
+  today uses the filter — `show flows summary` (#58) counts rows from one
+  read per appliance instead, for reasons documented in
+  `reports/flows.py` — so this is latent rather than broken. Whoever adds an
+  `--overlay` filter must resolve it against live gear first, and will also
+  hit the second half of the problem: `/gms/overlays/config` enumerates one
+  overlay (`CorpFabric`, id 1) while flow rows name three (`RealTime`,
+  `CriticalApps`, `Passthrough`), so there is no ID for most of what appears
+  in the data. Left alone deliberately — changing the mock's filter
+  semantics would move ground under parallel workers for a feature no
+  command asks for.
+- **The CLI passthrough allowlist has no `debug` read verbs, and that gap is a
+  judgement call worth revisiting against a live appliance** (issue #56).
+  `pyecsdwan.reports.applianceconfig.ALLOWED_VERBS` is `{show, display}`. The
+  brief asked for "the `debug`-style read commands the vendor tool permits",
+  but the vendored 9.6 payload examples show the appliance's `debug` namespace
+  is not read-only — `DELETE /debug/generic/{}` deletes a module's data, and
+  `GET /oro/debug/closeGrpcConnection` mutates behind a read-shaped verb — and
+  on ECOS the `debug` CLI verb arms debug logging, which is appliance state
+  and a load hazard on a busy box. Deny-by-default therefore refused all of
+  them rather than guessing which are inert. If someone enumerates the exact
+  read-only `debug` subcommands against a live appliance (or reads them out of
+  `EC_SD-WAN_Expert` directly), they can be added as *exact two-token heads*
+  (`debug <subcommand>`), never as a bare `debug` verb — the verb set is
+  matched with `==` precisely so a namespace cannot be opened wholesale.
+- **`POST /broadcastCli` cannot render config text, only confirm execution**
+  (issue #56). It answers with a bare GUID; neither the vendored Orchestrator
+  OpenAPI (`/broadcastCli` -> `text/plain` string) nor the payload examples
+  document any endpoint that returns the per-appliance command output, and
+  `docs/research/appliance-config.md` records the same ("Text response, no
+  per-appliance status from broadcastCli"). So `show run appliance A B` reads
+  text per appliance through the proxy `cli` path via the bounded fan-out, and
+  `--broadcast` is the opt-in "run this read across these appliances and
+  confirm it ran" form. If a later Orchestrator release exposes broadcast
+  output retrieval, `broadcast_read_command` is the one function that changes.
+- **`show run`'s security section derives its segment pairs instead of listing
+  them, and reads deployment through the appliance proxy rather than the
+  Orchestrator-scope endpoint** (issue #55). Two endpoint findings, both
+  recorded here because a later Orchestrator release could make either moot:
+  (1) `GET /vrf/config/securityPolicies` *requires* a `map` query parameter
+  (`<srcSegment>_<dstSegment>`), so there is no "list every orchestrated
+  policy" read. `reports/fabric.py` therefore derives the pairs from
+  `resources/zones.py`'s `segment_zone_map()` view (`GET /zones/vrfZonesMap`)
+  and bounds the cross product at `MAX_POLICY_READS`, falling back to
+  intra-segment pairs — stated in-band — past that. The vendored spec does
+  carry `GET /vrf/config/securityPoliciesSegments` ("Gets all security maps",
+  an array of `<src>_<dst>` strings), which would replace the derivation with
+  one call; it is not implemented by `mock/server.py`, so adopting it needs a
+  mock endpoint (and ideally a live capture) first. (2) The spec's
+  Orchestrator-scope `GET /deployment` requires **both** `nePk` and `cached`
+  (an omitted `cached` is a 422, exactly as with
+  `/appliancesSoftwareVersions`) and is likewise absent from the mock;
+  `reports/fabric.py` reads the same object over the appliance proxy path
+  `resources/deployment.py` already owns. If the orchestrator-scope form is
+  ever preferred (it is one call per appliance either way), the change is
+  confined to `fabric.appliance_deployment`.
+
+## Epic #54 (operational show commands) — deferred work
+
+### Move the report renderers into `cli/render.py`
+
+`render_version_report`, `render_flows_summary`, `render_flow_search` and
+`render_fabric_config` live in `cli/main.py`; `render.py`'s own docstring says
+it holds the presentation-only helpers shared by the subcommands and the
+shell, which is exactly what these are. The shell currently imports them back
+out of `main.py`, which works but reads backwards.
+
+**It is a refactor, not a move.** I attempted it and reverted. The four public
+functions are 178 lines, but they pull 13 more symbols with them —
+`_render_overlays`, `_render_templates`, `_render_security`,
+`_render_inventory`, `_render_deployment`, `_version_table`, `_bounded_note`,
+`_human_bytes`, `_human_uptime`, `_DEGRADED_STYLE`, `_NEXT_BOOT_STYLE`,
+`_SKEW_STYLE`, and `err_console` (a `main.py` object). `render.py` would also
+have to import `pyecsdwan.reports`, which `main.py` already imports at module
+load, so the import graph needs checking for a cycle before anyone starts.
+
+Worth doing when someone next touches that area with room to do it properly.
+Not worth doing halfway.
+
+### `GET /vrf/config/securityPoliciesSegments` — adopted, with a caveat
+
+Now used by `reports/fabric.py` to read the configured segment pairs in one
+call instead of deriving an O(n²) cross product. The bounded derivation
+remains as the fallback because the endpoint is not on every Orchestrator
+release. **Neither path has been exercised against real gear** — the mock
+implements the endpoint as this repo reads the spec, which is not the same as
+the vendor implementing it that way.
+
+### `ipEitherFlag` semantics are assumed, not verified
+
+`reports/flows.py` and the mock both take `ipEitherFlag=true` to mean "match
+the address at either end", which is what the parameter name says and what
+makes `show flow <ip>` a server-side query. The spec's own description says
+the opposite — *"If true, ip1 will be treated as the source IP, and ip2 will
+be treated as the destination IP"* — which describes directional matching.
+
+One of the two is wrong and nobody has tested it live. If the description
+turns out to be right, `show flow <ip>` silently misses every flow where the
+queried address is the destination. **Confirm this before trusting the
+command on a production fabric**: run `show flow <ip>` for an address you know
+appears as a destination, and check it comes back.
+
+### Orchestrator-scope `GET /deployment` is unused
+
+Both `nePk` and `cached` are required (the same trap
+`/appliancesSoftwareVersions` carries), and the mock implements no
+orchestrator-scope `/deployment` at all. `reports/fabric.py` reads the same
+object through the appliance proxy, as `resources/deployment.py` does. If the
+orchestrator-scope path is ever wanted, the mock needs the route first.
+
+### Smaller items
+
+- `show flows summary` counts rows because `active` carries no per-overlay
+  breakdown. A cell bounded by `--max-flows` renders as `2+` and the footer
+  says so; if the API ever grows a per-overlay summary, the counting can go.
+- The mock's `overlays` filter on `GET /flow` splits names on `,` while the
+  spec says IDs split on `|`. Nothing uses it. Reconcile if anything starts to.
+- Zone and VRF ids in flow rows are rendered as integers; no name lookup.
+- `--section` on `show run` takes one name, not a repeatable list.

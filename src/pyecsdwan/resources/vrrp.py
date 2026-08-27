@@ -173,6 +173,10 @@ class Vrrp(Resource):
         "identity. Server-reported state (mode, master_transitions, uptime, vmac, "
         "priorityState, masterip, vipowner) is read-only and stripped on read."
     )
+    endpoints = (
+        "appliance GET /vrrp",
+        "appliance POST /vrrp",
+    )
 
     @staticmethod
     def _ne_pk(ctx: Ctx, ref: Ref) -> str:

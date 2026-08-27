@@ -23,7 +23,7 @@ import dataclasses
 import re
 import shlex
 from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from prompt_toolkit import PromptSession
@@ -37,6 +37,10 @@ from pyecsdwan import __version__, config, journal, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.contract import Ctx, Ref, Scope
 from pyecsdwan.registry import Registry
+from pyecsdwan.reports import versions
+
+if TYPE_CHECKING:
+    from pyecsdwan.reports.applianceconfig import ApplianceConfig
 
 MODE_OPERATIONAL = "operational"
 MODE_CONFIG = "config"
@@ -57,7 +61,16 @@ _CONFIG_COMMANDS: tuple[str, ...] = (
     "show",
     "top",
 )
-_SHOW_SPECIALS: tuple[str, ...] = ("appliances", "coverage", "journal", "transactions")
+_SHOW_SPECIALS: tuple[str, ...] = (
+    "appliances",
+    "coverage",
+    "flow",
+    "flows",
+    "journal",
+    "run",
+    "transactions",
+    "version",
+)
 #: CLI token -> txn.commit() keyword argument.
 _COMMIT_FLAGS: dict[str, str] = {
     "force": "force",
@@ -75,10 +88,18 @@ _DELETE_USAGE = (
     "delete appliance <appliance-name> <kind> <name> [<path...>]"
 )
 _SHOW_OPERATIONAL_USAGE = (
-    "usage: show <appliances | journal | coverage | transactions pending | <kind> [<name>]>"
+    "usage: show <appliances | journal | coverage | version | transactions pending | "
+    "run [<section> | appliance <name>] | flows summary | flow <ip> | <kind> [<name>]>"
 )
+# `show flow` and `show flows` differ by one character and mean different
+# things, so each insists on its own shape rather than guessing at the other.
+_SHOW_FLOWS_USAGE = "usage: show flows summary"
+_SHOW_FLOW_USAGE = "usage: show flow <ip>[/<prefix>]"
 _ROLLBACK_USAGE = "usage: rollback <n>  |  rollback pending"
 _SHOW_GENERIC_USAGE = "usage: show [appliance <name>] <kind> [<instance>]"
+#: Both forms: the per-appliance CLI running-config (#56) and the fabric-wide
+#: configuration breakdown (#55), optionally scoped to one section.
+_SHOW_RUN_USAGE = "usage: show run appliance <name> [<name>...]  |  show run [<section>]"
 
 
 @dataclasses.dataclass
@@ -312,6 +333,14 @@ def _show_operational(args: list[str], state: ShellState) -> None:
         _show_pending(state)
     elif head == "coverage":
         _show_coverage(state)
+    elif head == "version":
+        _show_version(state)
+    elif head == "flows":
+        _show_flows_summary(args[1:], state)
+    elif head == "flow":
+        _show_flow(args[1:], state)
+    elif head == "run":
+        _show_run(args[1:], state)
     else:
         _show_generic(args, state)
 
@@ -346,7 +375,18 @@ def _show_pending(state: ShellState) -> None:
 
 
 def _show_coverage(state: ShellState) -> None:
-    table = Table("kind", "scope", "reversibility", "tier")
+    """Summary only: kinds, their tier, and the endpoint-universe roll-up.
+
+    Deliberately narrower than ``ec-cli show coverage`` — the per-endpoint
+    view is 1800-odd rows and belongs in the scriptable CLI, not a prompt —
+    but the numbers come from the same helper so the two cannot disagree.
+    """
+    # Imported here (not at module scope) for the same reason `render` is:
+    # `pyecsdwan.cli.main` imports this module lazily, so a top-level import
+    # back into it would be circular.
+    from pyecsdwan.cli.main import coverage_summary_line
+
+    table = Table("kind", "scope", "reversibility", "tier", "endpoints")
     for kind in state.registry.kinds():
         resource = state.registry.get(kind)
         table.add_row(
@@ -354,8 +394,125 @@ def _show_coverage(state: ShellState) -> None:
             resource.scope.value,
             resource.reversibility.value,
             str(int(resource.tier)),
+            str(len(resource.endpoints)),
         )
     state.console.print(table)
+    state.console.print(coverage_summary_line(state.registry))
+    _info(state.console, "`ec-cli show coverage --endpoints` lists every known endpoint")
+
+
+def _show_version(state: ShellState) -> None:
+    """Orchestrator version plus per-appliance partition versions (#57).
+
+    Read-only, and identical to ``ec-cli show version`` with no flags: the
+    renderer is imported from :mod:`pyecsdwan.cli.main` — for the same reason
+    ``coverage_summary_line`` is — so the prompt and the scriptable CLI cannot
+    drift into reporting different versions.
+    """
+    from pyecsdwan.cli.main import render_version_report
+
+    report = versions.collect(state.ctx)
+    render_version_report(state.console, report)
+    _info(
+        state.console,
+        "`ec-cli show version --no-cache` re-reads each appliance instead of the cache",
+    )
+def _show_flows_summary(args: list[str], state: ShellState) -> None:
+    """``show flows summary`` (#58) — the per-appliance x per-overlay matrix.
+
+    The literal ``summary`` subcommand is required: a bare ``show flows``
+    would otherwise be one keystroke away from ``show flow`` and quietly do
+    the wrong thing.
+    """
+    if args != ["summary"]:
+        raise ValueError(_SHOW_FLOWS_USAGE)
+    from pyecsdwan.cli.main import render_flows_summary
+    from pyecsdwan.reports import flows as flows_report
+
+    render_flows_summary(state.console, flows_report.build_flows_summary(state.ctx))
+
+
+def _show_flow(args: list[str], state: ShellState) -> None:
+    """``show flow <ip>`` (#59) — every flow touching one address, fabric-wide.
+
+    A bare ``show flow`` is a usage error, never silently the summary.
+    """
+    if len(args) != 1:
+        raise ValueError(_SHOW_FLOW_USAGE)
+    from pyecsdwan.cli.main import render_flow_search
+    from pyecsdwan.reports import flows as flows_report
+
+    render_flow_search(state.console, flows_report.find_flows(state.ctx, args[0]))
+def _show_run(args: list[str], state: ShellState) -> None:
+    """``show run [<section>]`` and ``show run appliance <name> [<name>...]``.
+
+    Bare (#55) it is the fabric configuration breakdown, optionally scoped to
+    one section; with ``appliance`` (#56) it is that appliance's own CLI
+    running-config.
+
+    Read-only on both paths: the fabric report is GETs only, and the command
+    sent to an appliance is the vetted constant in
+    :mod:`pyecsdwan.reports.applianceconfig`. Neither touches the candidate,
+    the journal or the transaction engine.
+
+    ``appliance`` is checked before the section names so the per-appliance
+    form keeps its own usage error — ``appliance`` and the ``appliances``
+    section differ by one character, and guessing between them would be worse
+    than saying which one was typed.
+    """
+    from pyecsdwan.reports import applianceconfig
+
+    if not args or args[0] != "appliance":
+        _show_fabric_config(args, state)
+        return
+    if len(args) < 2:
+        raise ValueError(_SHOW_RUN_USAGE)
+    names = args[1:]
+    if len(names) == 1:
+        _print_appliance_config(state, applianceconfig.fetch_running_config(state.ctx, names[0]))
+        return
+    outcomes = applianceconfig.fetch_running_configs(state.ctx, names)
+    for index, outcome in enumerate(outcomes):
+        if index:
+            state.console.print()
+        if outcome.value is not None:
+            _print_appliance_config(state, outcome.value)
+        else:
+            _error(state.console, f"{outcome.item}: unreachable — {outcome.error}")
+    if any(o.unreachable for o in outcomes):
+        state.exit_code = 2
+
+
+def _show_fabric_config(args: list[str], state: ShellState) -> None:
+    """``show run [<section>]`` (#55) — the fabric configuration breakdown.
+
+    An unknown section names the valid ones and then the usage line, so a
+    typo is answered with what to type rather than with an empty report.
+    """
+    from pyecsdwan.cli.main import render_fabric_config
+    from pyecsdwan.reports import fabric
+
+    if len(args) > 1:
+        raise ValueError(_SHOW_RUN_USAGE)
+    section = args[0] if args else None
+    try:
+        fabric.resolve_sections(section)
+    except fabric.UnknownSection as exc:
+        raise ValueError(f"{exc}\n{_SHOW_RUN_USAGE}") from None
+    render_fabric_config(state.console, fabric.collect(state.ctx, section=section))
+
+
+def _print_appliance_config(state: ShellState, config: ApplianceConfig) -> None:
+    state.console.print(
+        f"# {config.appliance} ({config.ne_pk}) — {config.command}",
+        style="bold",
+        markup=False,
+        highlight=False,
+    )
+    # soft_wrap: a wrapped running-config line is a corrupted one.
+    state.console.print(
+        config.text.rstrip("\n"), markup=False, highlight=False, soft_wrap=True
+    )
 
 
 def _show_generic(args: list[str], state: ShellState) -> None:
@@ -601,6 +758,20 @@ class ShellCompleter(Completer):
                 return kinds
         if first == "show" and prior[1] == "transactions" and len(prior) == 2:
             return ["pending"]
+        # `flows` completes to its one subcommand; `flow` takes a free-form
+        # address, so it deliberately offers nothing rather than suggesting
+        # `summary` and inviting the two to be confused.
+        if first == "show" and prior[1] == "flows" and len(prior) == 2:
+            return ["summary"]
+        if first == "show" and prior[1] == "run":
+            # Both forms: `appliance` opens the per-appliance running-config
+            # (#56), the section names scope the fabric breakdown (#55).
+            if len(prior) == 2:
+                from pyecsdwan.reports import fabric
+
+                return ["appliance", *fabric.SECTIONS]
+            if prior[2] == "appliance":
+                return self._appliance_names()
         return []
 
     def _appliance_names(self) -> list[str]:

@@ -151,6 +151,16 @@ class Ospf(Resource):
         "never a partial patch. Per-area settings (ospf/config/areas) are "
         "not modeled by this resource — only per-interface area membership."
     )
+    #: Config via the proxy; the three state views are Orchestrator reads.
+    endpoints = (
+        "appliance GET /ospf/config/system",
+        "appliance POST /ospf/config/system",
+        "appliance GET /ospf/config/interfaces",
+        "appliance POST /ospf/config/interfaces",
+        "orchestrator GET /ospf/state/system",
+        "orchestrator GET /ospf/state/interfaces",
+        "orchestrator GET /ospf/state/neighbors",
+    )
 
     # -- appliance resolution --------------------------------------------------
 
