@@ -269,6 +269,10 @@ class OverlayPriority(Resource):
         "plan time. Each overlay may hold exactly one priority. Full "
         "overwrite: POST /gms/overlays/priority always carries the whole map."
     )
+    endpoints = (
+        "orchestrator GET /gms/overlays/priority",
+        "orchestrator POST /gms/overlays/priority",
+    )
 
     # -- read side ------------------------------------------------------------
 
@@ -426,6 +430,10 @@ class TemplateGroupPriority(Resource):
         "a real change. Each group may appear at most once; groups left out "
         "are applied in no deterministic order. Full overwrite: POST "
         "/template/templateGroupsPriorities always carries the whole list."
+    )
+    endpoints = (
+        "orchestrator GET /template/templateGroupsPriorities",
+        "orchestrator POST /template/templateGroupsPriorities",
     )
 
     # -- read side ------------------------------------------------------------

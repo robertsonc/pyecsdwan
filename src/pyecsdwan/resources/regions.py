@@ -293,6 +293,12 @@ class Region(Resource):
         "region) is server-managed and cannot be deleted. Unknown fields "
         "pass through."
     )
+    endpoints = (
+        "orchestrator GET /regions",
+        "orchestrator POST /regions",
+        "orchestrator PUT /regions",
+        "orchestrator DELETE /regions",
+    )
 
     # -- read side ------------------------------------------------------------
 
@@ -461,6 +467,12 @@ class RegionAssociation(Resource):
         f"{GLOBAL_REGION_ID}. Canonical state is {{regionId: '<id>'}}: the "
         "id is stable across region renames, and the server's denormalized "
         "regionName is dropped so a rename cannot show up as phantom drift."
+    )
+    #: Per-appliance PUT only; the bulk POST form is deliberately unused.
+    endpoints = (
+        "orchestrator GET /regions/appliances",
+        "orchestrator PUT /regions/appliances",
+        "orchestrator GET /regions/appliances/regionId",
     )
 
     # -- read side ------------------------------------------------------------
@@ -665,6 +677,10 @@ class RegionalOverlay(Resource):
         "through. match.overlayAcl is a JSON-encoded string on the wire and is "
         "held parsed in canonical state (re-encoded on write). Server "
         f"bookkeeping ({', '.join(_OVERLAY_SERVER_FIELDS)}) is stripped."
+    )
+    endpoints = (
+        "orchestrator GET /gms/overlays/config/regions",
+        "orchestrator PUT /gms/overlays/config/regions",
     )
 
     # -- read side ------------------------------------------------------------

@@ -194,6 +194,10 @@ class InterfaceLabels(Resource):
         "refused unless deleteDependencies: true is staged, which also "
         "detaches removed labels from " + _CASCADE_TARGETS + "."
     )
+    endpoints = (
+        "orchestrator GET /gms/interfaceLabels",
+        "orchestrator POST /gms/interfaceLabels",
+    )
 
     def fetch(self, ctx: Ctx, ref: Ref) -> RawState:
         raw = ctx.client.get(_PATH)

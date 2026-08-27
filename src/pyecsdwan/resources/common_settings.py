@@ -411,6 +411,10 @@ class Snmp(_ApplianceSetting):
         "Full-object replace against ECOS 'snmp'; unknown keys (live-only "
         "hash_algs/priv_algs) are preserved."
     )
+    endpoints = (
+        "appliance GET /snmp",
+        "appliance POST /snmp",
+    )
 
     def normalize(self, raw: RawState) -> CanonicalState:
         data = _document(raw, "snmp")
@@ -496,6 +500,10 @@ class Logging(_ApplianceSetting):
         "unknown keys (live-only 'ids') are preserved. Remote receivers "
         "(ECOS 'logging/remote') are a separate, not-yet-modeled resource."
     )
+    endpoints = (
+        "appliance GET /logging/config",
+        "appliance POST /logging/config",
+    )
 
     def normalize(self, raw: RawState) -> CanonicalState:
         data = _document(raw, "logging config")
@@ -541,6 +549,10 @@ class MgmtServices(_ApplianceSetting):
         "POST body type declares only displayname/srcinf). Full-object replace "
         "against ECOS 'mgmtServices'."
     )
+    endpoints = (
+        "appliance GET /mgmtServices",
+        "appliance POST /mgmtServices",
+    )
 
     def normalize(self, raw: RawState) -> CanonicalState:
         data = _document(raw, "mgmt services")
@@ -575,6 +587,10 @@ class Banners(_ApplianceSetting):
         "shown before it. Both are free text and are stored verbatim — no "
         "trimming or newline rewriting, because a banner's exact whitespace is "
         "what the operator sees. Full-object replace against ECOS 'banners'."
+    )
+    endpoints = (
+        "appliance GET /banners",
+        "appliance POST /banners",
     )
 
     def normalize(self, raw: RawState) -> CanonicalState:
@@ -613,6 +629,10 @@ class ScheduleTimezone(Resource):
         "defaultTimezone: the timezone scheduled jobs and reports run in, in "
         "Country/Location form (e.g. 'US/East-Indiana') or 'UTC'. Applies as a "
         "full-object POST to /gms/scheduleTimezone."
+    )
+    endpoints = (
+        "orchestrator GET /gms/scheduleTimezone",
+        "orchestrator POST /gms/scheduleTimezone",
     )
 
     def fetch(self, ctx: Ctx, ref: Ref) -> RawState:

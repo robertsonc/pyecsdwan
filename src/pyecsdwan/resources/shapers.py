@@ -322,6 +322,12 @@ class Shapers(_Shapers):
     ecos_path = "shapers"
     label = "shapers"
     desired_state_doc = _desired_doc("shapers")
+    #: trafficclass is the shared read-only name table.
+    endpoints = (
+        "appliance GET /shapers",
+        "appliance POST /shapers",
+        "appliance GET /trafficclass",
+    )
 
 
 class InboundShapers(_Shapers):
@@ -329,6 +335,10 @@ class InboundShapers(_Shapers):
     ecos_path = "inboundShapers"
     label = "inbound shapers"
     desired_state_doc = _desired_doc("inboundShapers")
+    endpoints = (
+        "appliance GET /inboundShapers",
+        "appliance POST /inboundShapers",
+    )
 
 
 # -- read-only views ----------------------------------------------------------

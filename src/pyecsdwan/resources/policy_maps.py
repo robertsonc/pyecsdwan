@@ -418,6 +418,11 @@ class QosMaps(_PolicyMaps):
     ecos_path = "qosMaps"
     label = "qos maps"
     desired_state_doc = _desired_doc("qosMaps")
+    endpoints = (
+        "appliance GET /qosMaps",
+        "appliance POST /qosMaps",
+        "appliance GET /qosMaps/defaultRules",
+    )
 
 
 class OptimizationMaps(_PolicyMaps):
@@ -425,6 +430,11 @@ class OptimizationMaps(_PolicyMaps):
     ecos_path = "optimizationMaps"
     label = "optimization maps"
     desired_state_doc = _desired_doc("optimizationMaps")
+    endpoints = (
+        "appliance GET /optimizationMaps",
+        "appliance POST /optimizationMaps",
+        "appliance GET /optimizationMaps/defaultRules",
+    )
 
 
 class RouteMaps(_PolicyMaps):
@@ -432,6 +442,11 @@ class RouteMaps(_PolicyMaps):
     ecos_path = "routeMaps"
     label = "route maps"
     desired_state_doc = _desired_doc("routeMaps")
+    #: No defaultRules endpoint exists for route maps (see default_rules()).
+    endpoints = (
+        "appliance GET /routeMaps",
+        "appliance POST /routeMaps",
+    )
 
 
 # -- read-only views ----------------------------------------------------------

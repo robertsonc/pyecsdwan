@@ -223,6 +223,10 @@ class InternalSubnets(Resource):
         "classified as internet traffic and the table is pushed to every "
         "appliance, so applies are a full-object replace of the whole list."
     )
+    endpoints = (
+        "orchestrator GET /gms/internalSubnets2",
+        "orchestrator POST /gms/internalSubnets2",
+    )
 
     # -- read side ------------------------------------------------------------
 
