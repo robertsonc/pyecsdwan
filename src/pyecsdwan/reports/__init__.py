@@ -16,6 +16,15 @@ per-appliance fan-out every fleet-wide report needs.
 
 from __future__ import annotations
 
+from pyecsdwan.reports.applianceconfig import (
+    ApplianceConfig,
+    BroadcastResult,
+    CommandRefused,
+    broadcast_running_config,
+    fetch_running_config,
+    fetch_running_configs,
+    validate_command,
+)
 from pyecsdwan.reports.fanout import (
     DEFAULT_CONCURRENCY,
     Outcome,
@@ -26,8 +35,15 @@ from pyecsdwan.reports.fanout import (
 
 __all__ = [
     "DEFAULT_CONCURRENCY",
+    "ApplianceConfig",
+    "BroadcastResult",
+    "CommandRefused",
     "Outcome",
+    "broadcast_running_config",
     "fan_out",
+    "fetch_running_config",
+    "fetch_running_configs",
     "unreachable",
+    "validate_command",
     "values",
 ]
