@@ -88,7 +88,23 @@ ec-cli api get /appliance       # Tier-0 raw passthrough (audit-journaled)
 ec-cli api post /gms/interfaceLabels --body labels.json
 ec-cli api get /systemInfo --appliance BR1-EC     # via appliance proxy
 ec-cli show coverage            # every kind: scope / reversibility / tier
+ec-cli show coverage --endpoints --tier 2         # every spec endpoint x tier
+ec-cli plugin promote appliance/bgp               # run the Tier-2 checklist
 ```
+
+## Tier-1 spec pipeline (`tools/`)
+
+```bash
+python tools/spec_sync.py --diff                  # spec drift vs specs/
+python tools/postman_sync.py --diff               # vendor payload examples
+python tools/gen_models.py  --scope appliance --method POST --path /bgp/config/system
+python tools/gen_plugin.py  --scope appliance --method POST --path /bgp/config/system
+```
+
+`gen_models` emits pydantic models + a typed client binding for one spec
+operation; `gen_plugin` wraps those in a Tier-1 `Resource` stub whose
+`normalize()` raises `NotCurated` until a human curates it. See
+`docs/plugin-promotion.md`.
 
 ## Safety model, in one table
 
