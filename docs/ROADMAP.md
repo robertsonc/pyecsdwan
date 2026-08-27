@@ -130,6 +130,18 @@ not an error, a confident wrong answer. They now live in
 declaration rather than a side effect of what happens to be tracked by git.
 `make smoke` runs the same wheel check locally.
 
+**CLI information architecture, design phase (epic #70).** The `show` root
+means four different things — operational state, normalized configuration,
+staged candidate, native vendor text — and the command does not say which.
+Three design artifacts, no code: a ratifiable project constitution and
+brownfield Spec Kit workflow (#75, `.specify/`), a primary-source design corpus
+resolving nine dimensions into decisions across Junos, Cisco NSO, gNMI, IOS,
+NVUE, kubectl and EdgeConnect's own constraints (#73,
+`docs/design-corpus/cli/`), and the versioned grammar itself (#71,
+`specs/001-cli-command-taxonomy/`). **Implementation is gated**: the epic
+states no migration begins until the grammar and acceptance table are approved,
+and two decisions are escalated to the owner rather than defaulted.
+
 `make check` gate: ruff + mypy `--strict` + tests, all green — now enforced by
 CI on every push and pull request, not only locally.
 
@@ -156,6 +168,7 @@ So *anything and everything* is reachable now via Tier 0; curated plugins
 | **Fleet lifecycle** (#7) | discovery/approval, decommission cascade, preconfig, backup/restore, upgrades, licensing — IRREVERSIBLE class | in-epic checklist |
 | **Fabric ops & observability** (#8) | `drift`, declarative bulk apply, JSON Schema, dashboard-parity views | #54 (✅ shipped) + in-epic checklist |
 | **Production hardening** (#9) | concurrency, MCP trust boundary, CI/packaging, async-job fail-closed, evidence ladder, retry policy | #62–#68 (#62, #63, #65 ✅ shipped) |
+| **CLI information architecture** (#70) | intent-separated command taxonomy, spec-driven design; constitution + design corpus + grammar | #71–#78 (#73, #75 ✅ drafted; #71 ✅ spec, awaiting approval) |
 | **(v2) RBAC broker** (#10) | direct-to-appliance access, gated — explicitly out of v1 scope | in-epic checklist |
 
 The near-term epics (#3, #4, #5, #6) are sharded into child sub-issues; #5 and
