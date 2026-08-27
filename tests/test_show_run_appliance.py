@@ -457,12 +457,20 @@ def test_cli_broadcast_timeout_exits_nonzero(
     assert "TIMEOUT" in result.output
 
 
-def test_cli_show_run_alone_is_the_seam_for_55(fabric: dict[str, Any]) -> None:
-    """`show run` is a Typer group whose only subcommand is `appliance`; #55
-    gives it an `invoke_without_command=True` callback and nothing else moves."""
+def test_cli_show_run_alone_is_the_fabric_report(fabric: dict[str, Any]) -> None:
+    """The #55/#56 split at the CLI: `show run` is the group's
+    `invoke_without_command=True` callback (the fabric configuration
+    breakdown), `show run appliance <name>` is its subcommand. This file owns
+    the subcommand half; `tests/test_show_run.py` owns the report itself.
+
+    Was a "Missing command" assertion until #55 filled the callback in — the
+    seam existed precisely so this test would have to be changed on purpose.
+    """
     result = _cli(fabric)
-    assert result.exit_code != 0
-    assert "Missing command" in result.output or "Usage" in result.output
+    assert result.exit_code == 0, result.output
+    # The fabric report, not this file's per-appliance running-config.
+    assert "overlays" in result.output
+    assert "running-config" not in result.output
 
 
 # -- shell --------------------------------------------------------------------
@@ -496,11 +504,16 @@ def test_shell_show_run_appliance_handles_several_names(shell_state: ShellState)
     assert "# BR2-EC running-config" in out
 
 
-def test_shell_bare_show_run_is_the_seam_for_55(shell_state: ShellState) -> None:
-    """Until #55 lands, the bare form is a usage line naming the one form that
-    exists — not a crash, and not a silently empty report."""
+def test_shell_bare_show_run_is_the_fabric_report(shell_state: ShellState) -> None:
+    """The same split in the shell: bare `show run` is #55's fabric report,
+    and it reaches it through the branch that used to raise the usage error.
+
+    Asserted the usage line until #55 landed — changed on purpose, and kept
+    here so the two halves of `show run` stay pinned from both entry points.
+    """
     out = _shell(shell_state, "show run")
-    assert "usage: show run appliance <name>" in out
+    assert "overlays" in out
+    assert "usage:" not in out
 
 
 def test_shell_show_run_garbage_is_a_usage_error(shell_state: ShellState) -> None:
@@ -520,7 +533,11 @@ def test_shell_show_run_leaves_no_candidate_or_journal(shell_state: ShellState) 
 
 
 def test_shell_completes_show_run_appliance_names(shell_state: ShellState) -> None:
+    """A third seam test: `show run` used to complete to `appliance` and
+    nothing else, because #55's bare form took no arguments. It now also takes
+    a section name (`show run overlays`), so the completer offers both — see
+    tests/test_show_run.py for the section half."""
     completer = ShellCompleter(shell_state)
     assert "run" in completer._options(["show"])
-    assert completer._options(["show", "run"]) == ["appliance"]
+    assert "appliance" in completer._options(["show", "run"])
     assert "BR1-EC" in completer._options(["show", "run", "appliance"])
