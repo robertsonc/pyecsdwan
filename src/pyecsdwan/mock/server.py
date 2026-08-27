@@ -765,6 +765,129 @@ def _seed_internal_subnets() -> dict[str, Any]:
 # -- end internal subnets (#37) seed data -------------------------------------
 
 
+# -- common settings (#38) ----------------------------------------------------
+#
+# SNMP, logging, management services and banners are appliance-scope singleton
+# settings documents: they ride the generic /appliance/rest proxy (the
+# appliance_ecos store) exactly like vrrp/zones/securityMaps, so no new
+# appliance route is needed here — only seed data, merged in by
+# _seed_appliance_ecos() below. Shapes are the ones captured read-only against
+# a live lab Orchestrator this session (see resources/common_settings.py).
+#
+# The Orchestrator schedule timezone is the one member of the group with a real
+# Orchestrator write path, so it does need its own route (down in create_app)
+# and its own MockState field.
+#
+# 1.NE / 3.NE are seeded populated; 5.NE is deliberately left out of every seed
+# below so tests have one appliance whose settings come back as the proxy's
+# empty-{} default and must normalize to documented defaults.
+
+
+def _seed_snmp() -> dict[str, dict[str, Any]]:
+    """ECOS 'snmp'. Live top-level key set, including the two keys the vendored
+    SNMP schema does not declare (hash_algs / priv_algs) — kept so the
+    unknown-key passthrough is actually exercised."""
+    return {
+        "1.NE": {
+            "access": {"rocommunity": "public"},
+            "auto_launch": True,
+            "listen": {"enable": True},
+            "syscontact": "netops@example.com",
+            "sysdescr": "HUB1 EdgeConnect",
+            "syslocation": "HQ",
+            "traps": {"enable": True, "trap_community": "public"},
+            "trapsink": {"sink": {"10.0.0.9": {"self": "10.0.0.9", "version": "v2c"}}},
+            "v3": {"users": {}},
+            "hash_algs": ["MD5", "SHA"],
+            "priv_algs": ["DES", "AES-128"],
+        },
+        "3.NE": {
+            "access": {"rocommunity": ""},
+            "auto_launch": False,
+            "listen": {"enable": False},
+            "syscontact": "",
+            "sysdescr": "BR1 EdgeConnect",
+            "syslocation": "Branch-1",
+            "traps": {"enable": False, "trap_community": "public"},
+            "trapsink": {"sink": {}},
+            "v3": {"users": {}},
+            "hash_algs": ["MD5", "SHA"],
+            "priv_algs": ["DES", "AES-128"],
+        },
+    }
+
+
+def _seed_logging_config() -> dict[str, dict[str, Any]]:
+    """ECOS 'logging/config'. 'ids' is live-present but spec-absent — seeded so
+    the passthrough is covered."""
+    return {
+        "1.NE": {
+            "min_priority": "Notice",
+            "threshold_size": 50,
+            "keep_number": 30,
+            "auditlog": "local0",
+            "flow": "local1",
+            "system": "local2",
+            "ids": "local3",
+            "logStatefulWanDrops": False,
+            "mask_enable": False,
+            "mask_ipv4": 24,
+            "format_log_enable": False,
+        },
+        "3.NE": {
+            "min_priority": "Error",
+            "threshold_size": 50,
+            "keep_number": 30,
+            "auditlog": "local0",
+            "flow": "local1",
+            "system": "local2",
+            "ids": "local3",
+            "logStatefulWanDrops": True,
+            "mask_enable": False,
+            "mask_ipv4": 24,
+            "format_log_enable": False,
+        },
+    }
+
+
+def _seed_mgmt_services() -> dict[str, dict[str, Any]]:
+    """ECOS 'mgmtServices'. Every service record carries the 'self' id echo the
+    live capture shows — resources/common_settings.py strips it on read (via
+    security_policy._strip_meta) and does not re-send it."""
+
+    def service(service_id: str, displayname: str, srcinf: str) -> dict[str, Any]:
+        return {"self": service_id, "displayname": displayname, "srcinf": srcinf}
+
+    services = {
+        "aaa": ("AAA", "mgmt0"),
+        "dhcrelay": ("DHCP Relay", ""),
+        "netflowd": ("NetFlow", "mgmt0"),
+        "node": ("Node", ""),
+        "ntpd": ("NTP", "mgmt0"),
+        "other": ("Other", ""),
+        "snmpd": ("SNMP", "mgmt0"),
+        "sshd": ("SSH", "mgmt0"),
+    }
+    table = {sid: service(sid, name, srcinf) for sid, (name, srcinf) in services.items()}
+    return {"1.NE": copy.deepcopy(table), "3.NE": copy.deepcopy(table)}
+
+
+def _seed_banners() -> dict[str, dict[str, Any]]:
+    """ECOS 'banners'. Live shape is exactly {"motd": ..., "issue": ...}."""
+    return {
+        "1.NE": {"motd": "Welcome to HUB1", "issue": "Authorized access only."},
+        "3.NE": {"motd": "", "issue": ""},
+    }
+
+
+def _seed_schedule_timezone() -> dict[str, Any]:
+    """GET/POST /gms/scheduleTimezone — Orchestrator scope, live shape."""
+    return {"defaultTimezone": "UTC"}
+
+
+# -- end common settings (#38) seed data --------------------------------------
+
+
 def _seed_appliance_ecos() -> dict[str, dict[str, Any]]:
     """Seed for the generic per-appliance ECOS store (``appliance_ecos``
     below). Extend with more ``{ecosPath: payload}`` entries as further
@@ -787,6 +910,15 @@ def _seed_appliance_ecos() -> dict[str, dict[str, Any]]:
         out.setdefault(ne_pk, {})["ospf/config/system"] = system
     for ne_pk, interfaces in _seed_ospf_interfaces().items():
         out.setdefault(ne_pk, {})["ospf/config/interfaces"] = interfaces
+    # -- common settings (#38) --
+    for ne_pk, snmp in _seed_snmp().items():
+        out.setdefault(ne_pk, {})["snmp"] = snmp
+    for ne_pk, logging_config in _seed_logging_config().items():
+        out.setdefault(ne_pk, {})["logging/config"] = logging_config
+    for ne_pk, mgmt_services in _seed_mgmt_services().items():
+        out.setdefault(ne_pk, {})["mgmtServices"] = mgmt_services
+    for ne_pk, banners in _seed_banners().items():
+        out.setdefault(ne_pk, {})["banners"] = banners
     return out
 
 
@@ -993,6 +1125,11 @@ class MockState:
     #: {overlayId: {regionId: overlay config}}, region-scope-merged by
     #: PUT /gms/overlays/config/regions.
     regional_overlays: dict[str, dict[str, Any]] = field(default_factory=_seed_regional_overlays)
+    # -- common settings (#38) --
+    # snmp / logging/config / mgmtServices / banners are appliance-scope and
+    # live in appliance_ecos above (no dedicated fields). Only the Orchestrator
+    # schedule timezone needs its own state + route.
+    schedule_timezone: dict[str, Any] = field(default_factory=_seed_schedule_timezone)
 
     def reset(self) -> None:
         """Restore every field to its seeded default (in place)."""
@@ -1676,6 +1813,32 @@ def create_app(state: MockState | None = None) -> FastAPI:
         return Response(status_code=204)
 
     # -- end internal subnets (#37) -------------------------------------------
+
+    # -- common settings (#38) ------------------------------------------------
+    #
+    # snmp / logging/config / mgmtServices / banners need no routes here: they
+    # are appliance-scope and ride the generic /appliance/rest proxy above,
+    # backed by the appliance_ecos store (seeded by _seed_appliance_ecos).
+    # Only the Orchestrator schedule timezone is orchestrator-writable.
+
+    @api.get("/gms/scheduleTimezone")
+    async def get_schedule_timezone() -> Any:
+        return mock.schedule_timezone
+
+    @api.post("/gms/scheduleTimezone")
+    async def set_schedule_timezone(request: Request) -> Response:
+        # Body shape is the SDK's {"defaultTimezone": tz} object, not the
+        # spec's bare string — see resources/common_settings.py.
+        body = await _json_body(request)
+        if not isinstance(body, dict) or not body.get("defaultTimezone"):
+            return JSONResponse(
+                {"error": "body must be {'defaultTimezone': '<Country/Location>'}"},
+                status_code=400,
+            )
+        mock.schedule_timezone = dict(body)
+        return Response(status_code=204)
+
+    # -- end common settings (#38) --------------------------------------------
 
     # -- priorities (#36) -----------------------------------------------------
     #
