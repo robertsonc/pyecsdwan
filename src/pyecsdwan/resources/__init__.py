@@ -3,6 +3,7 @@
 from pyecsdwan.resources import (
     appliance_zones,
     bgp,
+    common_settings,
     deployment,
     dhcp,
     interface_labels,
@@ -25,6 +26,7 @@ from pyecsdwan.resources import (
 __all__ = [
     "appliance_zones",
     "bgp",
+    "common_settings",
     "deployment",
     "dhcp",
     "interface_labels",

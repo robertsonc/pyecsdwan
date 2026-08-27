@@ -76,6 +76,29 @@ KIND_TO_TEMPLATE_SECTIONS: dict[str, tuple[str, ...]] = {
     "appliance/optimization-map": ("optimizationMaps",),
     "appliance/route-map": ("routeMaps",),
     "appliance/inbound-shaper": ("shaper", "inboundShapers"),
+    # -- appliance-common settings (#38) ------------------------------------
+    # LIVE-CONFIRMED, unlike most entries above. A real Default Template
+    # Group's selected-section list was probed read-only this session and
+    # answered with exactly: adminDistance, cli, dns, datetime, logging,
+    # mgmtServices, routes, secureWebServicesConfig, shaper, snmp, webconfig.
+    # The three section names below are drawn verbatim from that list — they
+    # are not section-name guesses and should not be re-flagged UNVERIFIED.
+    # Two more names from that same confirmed list are worth recording for
+    # whoever extends this catalog next (issue #20): "dns" — already claimed
+    # by the pre-seeded "appliance/dns" entry above, which that probe
+    # therefore also confirms (left untouched rather than duplicated here) —
+    # and "datetime", the section a per-appliance NTP/time resource should
+    # claim once one exists.
+    "appliance/snmp": ("snmp",),
+    "appliance/logging": ("logging",),
+    "appliance/mgmt-services": ("mgmtServices",),
+    # UNVERIFIED — "banners" is NOT in the confirmed section list above, so
+    # this is a section-name candidate (it matches the ECOS path itself),
+    # same convention as appliance/deployment and appliance/zones. The
+    # Orchestrator UI may fold login banners into another section entirely.
+    "appliance/banners": ("banners",),
+    # No entry for "schedule-timezone": it is Orchestrator-scope config
+    # (/gms/scheduleTimezone), not per-appliance, so no template owns it.
 }
 
 
