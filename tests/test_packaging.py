@@ -56,7 +56,21 @@ def test_the_endpoint_universe_is_not_empty(monkeypatch) -> None:
 
 
 def test_the_baselines_are_no_longer_at_the_repository_root() -> None:
-    assert not (REPO_ROOT / "specs").exists()
+    """The invariant is about the *baselines*, not about the directory name.
+
+    This originally asserted that no `specs/` directory existed at the root,
+    which was true when #65 moved the baselines into the package and wrong as
+    soon as #75 adopted Spec Kit — `specs/` now means feature specifications
+    and has nothing to do with OpenAPI. Assert the thing that actually matters:
+    no baseline file sits outside the package, where no wheel would ship it.
+    """
+    strays = [
+        str(path.relative_to(REPO_ROOT))
+        for pattern in ("*-openapi-*.json", "payload-examples-*.json")
+        for path in list(REPO_ROOT.glob(pattern)) + list(REPO_ROOT.glob(f"specs/{pattern}"))
+    ]
+    assert not strays, f"API baselines outside the package: {strays}"
+    assert (PACKAGE_ROOT / "_specs").is_dir()
 
 
 # -- the build declaration matches what is on disk --------------------------
