@@ -265,3 +265,11 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   ref.name)` while its `normalize()` doesn't strip `name`** — if a desired
   state ever lacks `name`, post-apply `verify()` would see the injected key
   as drift. Not hit today because intent always carries a name.
+- **`specs.payload_examples()` picks the payload-example artifact by
+  lexicographic glob order** (`sorted(...)[-1]` over `payload-examples-*.json`),
+  which is version order only while releases stay single-digit: a future
+  `payload-examples-9.10.json` would sort *before* `payload-examples-9.6.json`
+  and silently lose. Harmless today — `tools/postman_sync.py` refuses to leave
+  more than one artifact in `specs/` — but the selection wants a version-aware
+  sort before 9.10 ships. Found while building #51; not fixed here because
+  `specs.py` was owned by parallel work.
