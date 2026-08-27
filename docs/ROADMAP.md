@@ -31,7 +31,12 @@ grounded — `dns`/`routes`/`shaper` section names confirmed live, the rest
 stay unverified placeholders.
 
 **Phase 3 — orchestrator-scope breadth, first item.** Orchestrator firewall
-zones (#30).
+zones (#30). Policy maps and shapers (#33) landed here too but are
+appliance-scope, not orchestrator-scope as that issue assumed: the
+Orchestrator exposes `/qosMaps`, `/optimizationMaps`, `/routeMaps`,
+`/shaper`, `/inboundShaper` GET-only, so `appliance/qos-map`,
+`appliance/optimization-map`, `appliance/route-map`, `appliance/shaper` and
+`appliance/inbound-shaper` write through the appliance proxy instead.
 
 **Tier-1 spec pipeline, first tool.** `tools/spec_sync.py` — fetch + diff the
 published OpenAPI spec against the `specs/` baseline (#25). Codegen

@@ -743,6 +743,187 @@ def _seed_appliance_security_maps() -> dict[str, dict[str, Any]]:
 # -- end appliance zones/security-maps (#19) seed data ------------------------
 
 
+# -- policy maps / shapers (#33) ----------------------------------------------
+#
+# Five ECOS paths ("qosMaps", "optimizationMaps", "routeMaps", "shapers",
+# "inboundShapers") served through the generic appliance-proxy handler below,
+# same as vrrp (#14) and zones/securityMaps (#19) — no dedicated routes are
+# needed, only realistic seed data in the per-appliance ECOS store.
+#
+# Two distinct shapes live in this block (see resources/policy_maps.py and
+# resources/shapers.py): the three *maps* share the data/options envelope
+# (and its activeMap directive), while the two *shapers* are bare
+# interface-keyed tables with no envelope at all. The live traffic-class
+# subtree is ~34KB; it is trimmed here to classes 1-3 on a few interfaces,
+# which is representative of the shape without the bulk.
+
+
+def _seed_policy_map_envelope(active_map: str, maps: dict[str, Any]) -> dict[str, Any]:
+    """The data/options envelope all three policy-map endpoints return.
+
+    Real captured shape (#33, read-only against a live lab Orchestrator):
+    {"options": {"merge": ..., "activeMap": ..., "templateApply": ...},
+     "data": {mapName: {"prio": {priority: rule}}}}.
+    """
+    return {
+        "options": {"merge": True, "activeMap": active_map, "templateApply": False},
+        "data": copy.deepcopy(maps),
+    }
+
+
+def _seed_qos_maps() -> dict[str, dict[str, Any]]:
+    maps = {
+        "map1": {
+            "self": "map1",
+            "prio": {
+                "1000": {
+                    "self": 1000,
+                    "comment": "voice",
+                    "match": {"acl": "", "app": "sip"},
+                    "set": {"traffic_class": 1, "lan_qos": "trust-lan", "wan_qos": "trust-lan"},
+                },
+                "65535": {
+                    "self": 65535,
+                    "comment": "",
+                    "match": {"acl": ""},
+                    "set": {"traffic_class": 2, "lan_qos": "trust-lan"},
+                },
+            },
+        }
+    }
+    return {
+        "1.NE": _seed_policy_map_envelope("map1", maps),
+        # 3.NE carries a second, non-active map so activeMap has something to
+        # actually select between.
+        "3.NE": _seed_policy_map_envelope(
+            "map1",
+            {
+                **copy.deepcopy(maps),
+                "afterhours": {
+                    "self": "afterhours",
+                    "prio": {
+                        "65535": {
+                            "self": 65535,
+                            "comment": "",
+                            "match": {"acl": ""},
+                            "set": {"traffic_class": 4},
+                        }
+                    },
+                },
+            },
+        ),
+        "5.NE": {},
+    }
+
+
+def _seed_optimization_maps() -> dict[str, dict[str, Any]]:
+    maps = {
+        "map1": {
+            "self": "map1",
+            "prio": {
+                "65535": {
+                    "self": 65535,
+                    "comment": "",
+                    "match": {"acl": ""},
+                    "set": {"boost": "disable", "tcp_accel": "enable", "net_mem": "enable"},
+                }
+            },
+        }
+    }
+    return {"1.NE": _seed_policy_map_envelope("map1", maps), "3.NE": {}, "5.NE": {}}
+
+
+def _seed_route_maps() -> dict[str, dict[str, Any]]:
+    maps = {
+        "map1": {
+            "self": "map1",
+            "prio": {
+                "65535": {
+                    "self": 65535,
+                    "comment": "",
+                    "gms_marked": True,
+                    "match": {"acl": ""},
+                    "set": {"action": "auto_optimized", "fallback": "next_hop"},
+                }
+            },
+        }
+    }
+    return {"1.NE": _seed_policy_map_envelope("map1", maps), "3.NE": {}, "5.NE": {}}
+
+
+def _shaper_traffic_classes(names: tuple[str, str, str]) -> dict[str, Any]:
+    """Trimmed traffic-class subtree (live has 10 classes; 3 is enough to
+    exercise numeric key ordering and per-class passthrough)."""
+    return {
+        "1": {"name": names[0], "priority": 1, "min_bw": 10, "max_bw": 100,
+              "excess": 100, "max_wait": 100},
+        "2": {"name": names[1], "priority": 2, "min_bw": 5, "max_bw": 100,
+              "excess": 100, "max_wait": 200},
+        "10": {"name": names[2], "priority": 10, "min_bw": 0, "max_bw": 100,
+               "excess": 1, "max_wait": 1000},
+    }
+
+
+def _seed_shapers() -> dict[str, dict[str, Any]]:
+    """Outbound shapers, ECOS path 'shapers'. Real captured shape (#33): a
+    bare interface-keyed table, no data/options envelope."""
+    table = {
+        "default": {
+            "accuracy": 1000,
+            "dyn_bw_enable": False,
+            "enable": True,
+            "max_bw": 1000000,
+            "traffic-class": _shaper_traffic_classes(("realtime", "interactive", "default")),
+        },
+        "wan": {
+            "accuracy": 1000,
+            "dyn_bw_enable": True,
+            "enable": True,
+            "max_bw": 500000,
+            "traffic-class": _shaper_traffic_classes(("realtime", "interactive", "default")),
+        },
+        "lan0": {
+            "accuracy": 1000,
+            "dyn_bw_enable": False,
+            "enable": False,
+            "max_bw": 1000000,
+            "traffic-class": _shaper_traffic_classes(("realtime", "interactive", "default")),
+        },
+    }
+    return {
+        "1.NE": copy.deepcopy(table),
+        "3.NE": {"wan": copy.deepcopy(table["wan"])},
+        "5.NE": {},
+    }
+
+
+def _seed_inbound_shapers() -> dict[str, dict[str, Any]]:
+    """Inbound shapers, ECOS path 'inboundShapers'. Same interface-keyed
+    shape as 'shapers' plus a per-interface if_shaping_enable (#33)."""
+    table = {
+        "wan": {
+            "accuracy": 5000,
+            "dyn_bw_enable": False,
+            "enable": True,
+            "if_shaping_enable": True,
+            "max_bw": 200000,
+            "traffic-class": _shaper_traffic_classes(("realtime", "interactive", "default")),
+        },
+        "wan0": {
+            "accuracy": 5000,
+            "dyn_bw_enable": False,
+            "enable": False,
+            "if_shaping_enable": False,
+            "max_bw": 200000,
+            "traffic-class": _shaper_traffic_classes(("realtime", "interactive", "default")),
+        },
+    }
+    return {"1.NE": copy.deepcopy(table), "3.NE": {}, "5.NE": {}}
+
+
+# -- end policy maps / shapers (#33) seed data --------------------------------
+
+
 # -- internal subnets (#37) ---------------------------------------------------
 #
 # Orchestrator-scope singleton served by GET/POST /gms/internalSubnets2 (see
@@ -787,6 +968,17 @@ def _seed_appliance_ecos() -> dict[str, dict[str, Any]]:
         out.setdefault(ne_pk, {})["ospf/config/system"] = system
     for ne_pk, interfaces in _seed_ospf_interfaces().items():
         out.setdefault(ne_pk, {})["ospf/config/interfaces"] = interfaces
+    # -- policy maps / shapers (#33) --
+    for ne_pk, qos in _seed_qos_maps().items():
+        out.setdefault(ne_pk, {})["qosMaps"] = qos
+    for ne_pk, opt in _seed_optimization_maps().items():
+        out.setdefault(ne_pk, {})["optimizationMaps"] = opt
+    for ne_pk, route_maps in _seed_route_maps().items():
+        out.setdefault(ne_pk, {})["routeMaps"] = route_maps
+    for ne_pk, shaper in _seed_shapers().items():
+        out.setdefault(ne_pk, {})["shapers"] = shaper
+    for ne_pk, inbound in _seed_inbound_shapers().items():
+        out.setdefault(ne_pk, {})["inboundShapers"] = inbound
     return out
 
 
