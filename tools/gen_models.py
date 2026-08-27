@@ -12,8 +12,31 @@ Usage::
     python tools/gen_models.py --scope appliance --method POST --path bgp/config/system
     python tools/gen_models.py --scope orchestrator --method GET --path /gms/grNodes --dry-run
 
-``tools/gen_plugin.py`` (#27) imports :func:`generate` rather than shelling
-out, so the two tools can never disagree about a field name or a type.
+**Public API, for ``tools/gen_plugin.py`` (#27) and anything else that needs
+the same answers.** Import this module rather than shelling out to it, so the
+two tools can never disagree about a field name, a type, or a slug:
+
+* :func:`generate` / :func:`generate_for` -> :class:`GeneratedOperation`, the
+  whole result in memory with no I/O: both module sources, their dotted module
+  paths and on-disk relative paths, the request/response model class names,
+  the binding's callable name, its path and query parameters, and where the
+  request shape came from (:data:`BodySource`).
+* :func:`write` puts a :class:`GeneratedOperation` on disk and runs ruff over
+  it; pass ``format_output=False`` to skip that (output is already clean).
+* :class:`ModelEmitter` is the type engine on its own: ``emit`` turns any
+  resolved schema into a Python type expression and accumulates the
+  :class:`ClassSpec` objects it needs, so a stub generator can learn field
+  names and types without re-deriving them from the spec.
+* :func:`slug_for` / :func:`unique_slug_for`, :func:`root_model_name`,
+  :func:`python_field_name`, :func:`python_class_name` and
+  :func:`classify_properties` are the naming and classification rules,
+  exposed individually so a second emitter can reuse them piecemeal.
+* :func:`spec_examples`, :func:`body_schema` and :func:`expected_status` are
+  the operation-level facts derived from a spec that
+  :class:`pyecsdwan.specs.Endpoint` does not expose directly.
+* :func:`clear_caches` drops this module's spec-derived state as well as
+  :mod:`pyecsdwan.specs`'s -- needed by any test that repoints
+  ``$ECSDWAN_SPECS_DIR``.
 
 Generation is deliberately per-operation: the baselines hold 1833 operations
 and a bulk dump would be 1833 files nobody reads. Output is deterministic —
@@ -42,9 +65,10 @@ key produces nonsense — ``class Foo: field_1: int`` for a priority map. The
 rule, :func:`classify_properties`: **a block whose property names are *all*
 map keys is a mapping**, emitted as ``dict[str, V]`` (or a
 ``RootModel[dict[str, V]]`` at the root) with ``V`` unified across the example
-values. A map key is a name that is all digits, or starts with ``<``, or ends
-with ``>`` — the one-sided forms are needed because the baselines contain
-typos (``VrfId1>``, ``<pppoeName>>``). A *mixed* block stays a record and its
+values. A map key is a name that is all digits, starts with ``<``, ends with
+``>``, is an appliance primary key (``1.NE``) or is an IPv4 literal
+(``10.0.1.1``) — see :func:`is_map_key` for why the bracket test is one-sided
+and why the last two families had to be added. A *mixed* block stays a record and its
 map-shaped names are dropped, absorbed by ``extra="allow"``: 32 blocks look
 like ``{"<nePk>": ..., "header": ...}``, where only ``header`` is a field.
 
