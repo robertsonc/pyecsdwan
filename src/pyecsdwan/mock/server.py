@@ -1042,11 +1042,54 @@ def create_app(state: MockState | None = None) -> FastAPI:
             }
         return out
 
+    # -- interface-labels constraints (#39) --
+    # The real Orchestrator rejects a label table that reuses an id across
+    # wan+lan, and refuses to drop a label an overlay still references unless
+    # deleteDependencies=true. Enforced here so the client-side pre-flight in
+    # resources/interface_labels.py is genuinely proven to fire *first*: a
+    # test that ever sees one of these 400s means the pre-flight missed.
+
+    def _overlay_label_ids() -> set[str]:
+        """Label ids referenced by any overlay (wanPorts + local breakout)."""
+        used: set[str] = set()
+        for overlay in mock.overlays.values():
+            ports = overlay.get("wanPorts")
+            if isinstance(ports, dict):
+                for key in ("primary", "secondary", "backup", "crossConnect"):
+                    used |= {str(i) for i in ports.get(key) or []}
+            policy = overlay.get("internetPolicy")
+            if isinstance(policy, dict) and isinstance(policy.get("localBreakout"), dict):
+                for key in ("primary", "backup"):
+                    used |= {str(i) for i in policy["localBreakout"].get(key) or []}
+        return used
+
     @api.post("/gms/interfaceLabels")
-    async def replace_interface_labels(request: Request) -> Response:
+    async def replace_interface_labels(
+        request: Request, deleteDependencies: bool = False
+    ) -> Response:
         body = await _json_body(request)
         if not isinstance(body, dict):
             return JSONResponse({"error": "body must be a wan/lan label object"}, status_code=400)
+        sides = {side: {str(k) for k in (body.get(side) or {})} for side in ("wan", "lan")}
+        clash = sorted(sides["wan"] & sides["lan"])
+        if clash:
+            return JSONResponse(
+                {"error": f"label id(s) {', '.join(clash)} are used in both wan and lan"},
+                status_code=400,
+            )
+        if not deleteDependencies:
+            before = {
+                str(k) for side in ("wan", "lan") for k in (mock.interface_labels.get(side) or {})
+            }
+            in_use = sorted((before - sides["wan"] - sides["lan"]) & _overlay_label_ids())
+            if in_use:
+                return JSONResponse(
+                    {
+                        "error": f"label id(s) {', '.join(in_use)} are in use by an "
+                        f"overlay; retry with deleteDependencies=true"
+                    },
+                    status_code=400,
+                )
         mock.interface_labels = body
         return Response(status_code=200)
 
