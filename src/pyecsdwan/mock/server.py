@@ -15,6 +15,7 @@ to ``False`` to disable the check entirely (useful in tests).
 from __future__ import annotations
 
 import copy
+import json
 import threading
 import time
 import uuid
@@ -822,6 +823,86 @@ def _seed_template_group_priorities() -> list[str]:
 
 
 # -- end priorities (#36) seed data ---------------------------------------------
+# -- regions (#35) ------------------------------------------------------------
+#
+# Shapes seeded from the real payloads captured live (read-only) this session:
+#   GET /regions                     -> [{"regionId": 0, "regionName": "Default"}]
+#   GET /gms/overlays/config/regions -> {overlayId: {regionId: <overlay config>}}
+# The lab fabric only had the global region 0; a second region ("EMEA", id 1)
+# is seeded here so the region-scoped write can be *tested* for not clobbering
+# its neighbours, and so regionId 0 is distinguishable from a real region.
+#
+# match.overlayAcl is deliberately seeded as a JSON-encoded STRING with its
+# keys NOT in sorted order — that is what the real Orchestrator returns, and
+# it is the phantom-drift hazard resources/regions.py normalizes away.
+#
+# POST /gms/overlays/config/regions (the exhaustive array-of-map replace) is
+# deliberately NOT modeled: resources/regions.py never calls it, and modeling
+# it would mean inventing the array's overlay-identity convention, which the
+# vendored spec does not pin down.
+
+
+def _seed_regions() -> list[dict[str, Any]]:
+    return [
+        {"regionId": 0, "regionName": "Default"},
+        {"regionId": 1, "regionName": "EMEA"},
+    ]
+
+
+def _seed_region_appliances() -> dict[str, int]:
+    """{nePk: regionId} — every appliance starts in the global region 0."""
+    return {"1.NE": 0, "3.NE": 0, "5.NE": 0}
+
+
+def _overlay_acl(overlay_name: str) -> str:
+    """A JSON-encoded overlayAcl string, keys intentionally unsorted."""
+    return json.dumps(
+        {
+            "options": {"merge": True, "templateApply": False},
+            "data": {
+                f"Overlay_{overlay_name}": {
+                    "entry": {
+                        "1010": {"prot": "ip", "dscp": "ef", "misc": "", "self": True},
+                    }
+                }
+            },
+        },
+        sort_keys=False,
+    )
+
+
+def _regional_overlay_config(overlay_id: int, overlay_name: str, hubs: list[str]) -> dict[str, Any]:
+    """One regional overlay config, trimmed from the 27-field live payload to
+    the fields whose shapes were actually observed."""
+    return {
+        "name": overlay_name,
+        "id": overlay_id,
+        "topology": {
+            "topologyType": 1,
+            "hubs": hubs,
+            "useRegions": False,
+            "externalHubs": [],
+        },
+        "match": {"overlayAcl": _overlay_acl(overlay_name)},
+        "brownoutThresholds": {"latency": 150, "loss": 5, "jitter": 30},
+        "wanPorts": {"primary": ["1"], "secondary": [], "backup": []},
+        "bondingPolicy": 1,
+        "useBackupOnBrownout": False,
+        "useSecondaryOnBrownout": True,
+    }
+
+
+def _seed_regional_overlays() -> dict[str, dict[str, Any]]:
+    """{overlayId: {regionId: config}}; overlay "1" matches _seed_overlays()."""
+    return {
+        "1": {
+            "0": _regional_overlay_config(1, "CorpFabric", ["1.NE"]),
+            "1": _regional_overlay_config(1, "CorpFabric", ["3.NE"]),
+        }
+    }
+
+
+# -- end regions (#35) seed data ----------------------------------------------
 
 
 # -- state -------------------------------------------------------------------
@@ -901,6 +982,17 @@ class MockState:
     template_group_priorities: list[str] = field(
         default_factory=_seed_template_group_priorities
     )
+    # -- regions (#35) --
+    #: Network regions, the array shape GET /regions returns.
+    regions: list[dict[str, Any]] = field(default_factory=_seed_regions)
+    #: Next server-allocated regionId (there is no allocator endpoint; the
+    #: real Orchestrator hands the id out on POST /regions, as modeled here).
+    regions_next_id: int = 2
+    #: {nePk: regionId} — one region per appliance.
+    region_appliances: dict[str, int] = field(default_factory=_seed_region_appliances)
+    #: {overlayId: {regionId: overlay config}}, region-scope-merged by
+    #: PUT /gms/overlays/config/regions.
+    regional_overlays: dict[str, dict[str, Any]] = field(default_factory=_seed_regional_overlays)
 
     def reset(self) -> None:
         """Restore every field to its seeded default (in place)."""
@@ -1638,6 +1730,149 @@ def create_app(state: MockState | None = None) -> FastAPI:
         return Response(status_code=204)
 
     # -- end priorities (#36) -------------------------------------------------
+    # -- regions (#35) --------------------------------------------------------
+
+    def _region_record(region_id: int) -> dict[str, Any] | None:
+        for region in mock.regions:
+            if int(region["regionId"]) == region_id:
+                return region
+        return None
+
+    def _association(ne_pk: str) -> dict[str, Any]:
+        region_id = int(mock.region_appliances.get(ne_pk, 0))
+        record = _region_record(region_id)
+        return {
+            "nePk": ne_pk,
+            "regionId": region_id,
+            "regionName": str(record["regionName"]) if record else "",
+        }
+
+    @api.get("/regions")
+    async def get_regions(regionId: int | None = None) -> Any:
+        if regionId is None:
+            return mock.regions
+        return [r for r in mock.regions if int(r["regionId"]) == regionId]
+
+    @api.post("/regions")
+    async def create_region(request: Request) -> Any:
+        body = await _json_body(request)
+        if not isinstance(body, dict) or not body.get("regionName"):
+            return JSONResponse({"error": "body must be {regionName: ...}"}, status_code=400)
+        region_id = mock.regions_next_id
+        mock.regions_next_id += 1
+        # Unknown fields pass through, like every other handler here.
+        mock.regions.append({**body, "regionId": region_id, "regionName": str(body["regionName"])})
+        return JSONResponse({"regionId": region_id}, status_code=200)
+
+    @api.put("/regions")
+    async def update_region(request: Request, regionId: int) -> Any:
+        record = _region_record(regionId)
+        if record is None:
+            return JSONResponse({"error": f"no region {regionId}"}, status_code=404)
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "body must be a region object"}, status_code=400)
+        record.update({**body, "regionId": regionId})
+        return JSONResponse(record, status_code=200)
+
+    @api.delete("/regions")
+    async def delete_region(regionId: int) -> Response:
+        if regionId == 0:
+            return JSONResponse(
+                {"error": "the global region (regionId 0) cannot be deleted"}, status_code=400
+            )
+        record = _region_record(regionId)
+        if record is None:
+            return JSONResponse({"error": f"no region {regionId}"}, status_code=404)
+        mock.regions = [r for r in mock.regions if int(r["regionId"]) != regionId]
+        # Appliances fall back to the global region; regional overlay entries
+        # for the region go with it.
+        for ne_pk, assigned in list(mock.region_appliances.items()):
+            if int(assigned) == regionId:
+                mock.region_appliances[ne_pk] = 0
+        for by_region in mock.regional_overlays.values():
+            by_region.pop(str(regionId), None)
+        return Response(status_code=204)
+
+    @api.get("/regions/appliances/regionId")
+    async def get_region_appliances_by_region(regionId: int) -> Any:
+        return [
+            _association(ne_pk)
+            for ne_pk, assigned in sorted(mock.region_appliances.items())
+            if int(assigned) == regionId
+        ]
+
+    @api.get("/regions/appliances")
+    async def get_region_appliances(nePk: str | None = None) -> Any:
+        if nePk is None:
+            return [_association(pk) for pk in sorted(mock.region_appliances)]
+        if nePk not in mock.region_appliances:
+            return JSONResponse({"error": f"no appliance {nePk!r}"}, status_code=404)
+        return _association(nePk)
+
+    @api.put("/regions/appliances")
+    async def update_region_association(request: Request, nePk: str) -> Any:
+        body = await _json_body(request)
+        if not isinstance(body, dict) or "regionId" not in body:
+            return JSONResponse({"error": "body must be {regionId: int}"}, status_code=400)
+        region_id = int(body["regionId"])
+        if _region_record(region_id) is None:
+            return JSONResponse({"error": f"no region {region_id}"}, status_code=404)
+        mock.region_appliances[nePk] = region_id
+        return Response(status_code=204)
+
+    @api.post("/regions/appliances")
+    async def create_region_associations(request: Request) -> Any:
+        body = await _json_body(request)
+        if not isinstance(body, list):
+            return JSONResponse(
+                {"error": "body must be [{nePk, regionId}, ...]"}, status_code=400
+            )
+        for entry in body:
+            if not isinstance(entry, dict) or "nePk" not in entry or "regionId" not in entry:
+                continue
+            mock.region_appliances[str(entry["nePk"])] = int(entry["regionId"])
+        return Response(status_code=204)
+
+    @api.get("/gms/overlays/config/regions")
+    async def get_regional_overlays(
+        overlayId: str | None = None, regionId: str | None = None
+    ) -> Any:
+        out: dict[str, dict[str, Any]] = {}
+        for oid, by_region in mock.regional_overlays.items():
+            if overlayId is not None and str(overlayId) != oid:
+                continue
+            entries = {
+                rid: cfg
+                for rid, cfg in by_region.items()
+                if regionId is None or str(regionId) == rid
+            }
+            if entries:
+                out[oid] = entries
+        return out
+
+    @api.put("/gms/overlays/config/regions")
+    async def modify_regional_overlays(request: Request) -> Response:
+        """Region-scoped update: only the (overlayId, regionId) pairs named in
+        the body are replaced; every other entry is left untouched. This is the
+        merge reading of the spec's "update an existing overlay configuration"
+        — resources/regions.py deliberately sends the whole merged table so it
+        stays correct under the replace reading too (see its module docstring).
+        """
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "body must map overlayId -> {regionId: config}"}, status_code=400
+            )
+        for overlay_id, by_region in body.items():
+            if not isinstance(by_region, dict):
+                continue
+            target = mock.regional_overlays.setdefault(str(overlay_id), {})
+            for region_id, config in by_region.items():
+                target[str(region_id)] = config
+        return Response(status_code=204)
+
+    # -- end regions (#35) ----------------------------------------------------
 
     # -- catch-all (must be registered last on this router) -----------------
 
