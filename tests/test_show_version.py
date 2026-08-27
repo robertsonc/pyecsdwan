@@ -161,17 +161,18 @@ def _fake_ctx(client: _RecordingClient, inventory: list[dict[str, Any]] | None =
 
 def test_orchestrator_version_is_current_not_installed(ctx: Ctx) -> None:
     """`installed` is the list of versions available to upgrade *to*. Rendering
-    it as "the Orchestrator version" would be wrong, and the mock seeds the two
-    visibly different so this fails rather than ships."""
+    it as "the Orchestrator version" would be wrong, and the mock now seeds a
+    newer release at installed[0] so that specific mistake fails here."""
     running, available = versions.orchestrator_version(ctx.client)
     assert running == "9.4.2.40100"
-    assert list(available) == ["9.4.2.40100", "9.4.1.40077", "9.3.4.39802"]
-    assert running not in ("9.4.1.40077", "9.3.4.39802")
+    assert list(available) == ["9.4.3.40210", "9.4.2.40100", "9.4.1.40077"]
+    # The mistake this test exists for: installed[0] is a staged newer build.
+    assert running != available[0]
 
 
 def test_orchestrator_version_ignores_installed_even_at_index_zero() -> None:
-    """The mock's `installed` happens to *start* with `current`, so a report
-    rendering ``installed[0]`` passes every fixture-based test above while
+    """Belt and braces alongside the fixture fix: even on a payload where
+    `current` DOES appear in `installed`, a report rendering ``installed[0]``
     still being wrong. This pins the semantic on a payload where the two
     disagree: `current` is the running Orchestrator, full stop."""
 
@@ -438,9 +439,9 @@ def test_cli_json_emits_full_per_partition_data(
 
     assert payload["orchestrator"]["current"] == "9.4.2.40100"
     assert payload["orchestrator"]["available"] == [
+        "9.4.3.40210",
         "9.4.2.40100",
         "9.4.1.40077",
-        "9.3.4.39802",
     ]
     assert payload["cached"] is True
     assert payload["fleet"]["skewed"] is True

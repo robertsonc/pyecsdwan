@@ -1526,7 +1526,19 @@ def _seed_app_express_associations() -> list[dict[str, Any]]:
 
 
 def _seed_orchestrator_versions() -> dict[str, Any]:
-    return {"current": "9.4.2.40100", "installed": ["9.4.2.40100", "9.4.1.40077", "9.3.4.39802"]}
+    """`current` is the RUNNING Orchestrator; `installed` is what is available.
+
+    `installed[0]` is deliberately a *newer, staged* release than `current`,
+    so an implementation that renders `installed[0]` as "the Orchestrator
+    version" fails here instead of shipping. Seeding `current` at index 0 —
+    as this fixture originally did — lets exactly that mistake pass every
+    assertion (found by the #57 worker). `current` still appears in the list,
+    because a real Orchestrator does have its running version installed.
+    """
+    return {
+        "current": "9.4.2.40100",
+        "installed": ["9.4.3.40210", "9.4.2.40100", "9.4.1.40077"],
+    }
 
 
 def _seed_appliance_versions() -> dict[str, list[dict[str, Any]]]:
