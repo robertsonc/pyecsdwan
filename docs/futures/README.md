@@ -342,3 +342,27 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   in the data. Left alone deliberately — changing the mock's filter
   semantics would move ground under parallel workers for a feature no
   command asks for.
+- **The CLI passthrough allowlist has no `debug` read verbs, and that gap is a
+  judgement call worth revisiting against a live appliance** (issue #56).
+  `pyecsdwan.reports.applianceconfig.ALLOWED_VERBS` is `{show, display}`. The
+  brief asked for "the `debug`-style read commands the vendor tool permits",
+  but the vendored 9.6 payload examples show the appliance's `debug` namespace
+  is not read-only — `DELETE /debug/generic/{}` deletes a module's data, and
+  `GET /oro/debug/closeGrpcConnection` mutates behind a read-shaped verb — and
+  on ECOS the `debug` CLI verb arms debug logging, which is appliance state
+  and a load hazard on a busy box. Deny-by-default therefore refused all of
+  them rather than guessing which are inert. If someone enumerates the exact
+  read-only `debug` subcommands against a live appliance (or reads them out of
+  `EC_SD-WAN_Expert` directly), they can be added as *exact two-token heads*
+  (`debug <subcommand>`), never as a bare `debug` verb — the verb set is
+  matched with `==` precisely so a namespace cannot be opened wholesale.
+- **`POST /broadcastCli` cannot render config text, only confirm execution**
+  (issue #56). It answers with a bare GUID; neither the vendored Orchestrator
+  OpenAPI (`/broadcastCli` -> `text/plain` string) nor the payload examples
+  document any endpoint that returns the per-appliance command output, and
+  `docs/research/appliance-config.md` records the same ("Text response, no
+  per-appliance status from broadcastCli"). So `show run appliance A B` reads
+  text per appliance through the proxy `cli` path via the bounded fan-out, and
+  `--broadcast` is the opt-in "run this read across these appliances and
+  confirm it ran" form. If a later Orchestrator release exposes broadcast
+  output retrieval, `broadcast_read_command` is the one function that changes.

@@ -23,7 +23,7 @@ import dataclasses
 import re
 import shlex
 from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from prompt_toolkit import PromptSession
@@ -38,6 +38,9 @@ from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.contract import Ctx, Ref, Scope
 from pyecsdwan.registry import Registry
 from pyecsdwan.reports import versions
+
+if TYPE_CHECKING:
+    from pyecsdwan.reports.applianceconfig import ApplianceConfig
 
 MODE_OPERATIONAL = "operational"
 MODE_CONFIG = "config"
@@ -61,13 +64,12 @@ _CONFIG_COMMANDS: tuple[str, ...] = (
 _SHOW_SPECIALS: tuple[str, ...] = (
     "appliances",
     "coverage",
-    "journal",
-    "transactions",
-    "version",
     "flow",
     "flows",
     "journal",
+    "run",
     "transactions",
+    "version",
 )
 #: CLI token -> txn.commit() keyword argument.
 _COMMIT_FLAGS: dict[str, str] = {
@@ -87,9 +89,7 @@ _DELETE_USAGE = (
 )
 _SHOW_OPERATIONAL_USAGE = (
     "usage: show <appliances | journal | coverage | version | transactions pending | "
-    "<kind> [<name>]>"
-    "usage: show <appliances | journal | coverage | transactions pending | "
-    "flows summary | flow <ip> | <kind> [<name>]>"
+    "run appliance <name> | flows summary | flow <ip> | <kind> [<name>]>"
 )
 # `show flow` and `show flows` differ by one character and mean different
 # things, so each insists on its own shape rather than guessing at the other.
@@ -97,6 +97,9 @@ _SHOW_FLOWS_USAGE = "usage: show flows summary"
 _SHOW_FLOW_USAGE = "usage: show flow <ip>[/<prefix>]"
 _ROLLBACK_USAGE = "usage: rollback <n>  |  rollback pending"
 _SHOW_GENERIC_USAGE = "usage: show [appliance <name>] <kind> [<instance>]"
+#: #55 adds the fabric-wide bare `show run`; until then the only form is the
+#: per-appliance one, and this string is what names it.
+_SHOW_RUN_USAGE = "usage: show run appliance <name> [<name>...]"
 
 
 @dataclasses.dataclass
@@ -336,6 +339,8 @@ def _show_operational(args: list[str], state: ShellState) -> None:
         _show_flows_summary(args[1:], state)
     elif head == "flow":
         _show_flow(args[1:], state)
+    elif head == "run":
+        _show_run(args[1:], state)
     else:
         _show_generic(args, state)
 
@@ -438,6 +443,51 @@ def _show_flow(args: list[str], state: ShellState) -> None:
     from pyecsdwan.reports import flows as flows_report
 
     render_flow_search(state.console, flows_report.find_flows(state.ctx, args[0]))
+def _show_run(args: list[str], state: ShellState) -> None:
+    """``show run appliance <name> [<name>...]`` — appliance CLI running-config.
+
+    Read-only: the command sent to each appliance is the vetted constant in
+    :mod:`pyecsdwan.reports.applianceconfig`; nothing here touches the
+    candidate, the journal or the transaction engine.
+
+    **Seam for #55.** The fabric-wide bare ``show run`` lands in the ``if not
+    args`` branch below: replace the usage error with the fabric report and no
+    other line in this module changes.
+    """
+    from pyecsdwan.reports import applianceconfig
+
+    if not args:
+        # <- #55: fabric-wide `show run` goes here.
+        raise ValueError(_SHOW_RUN_USAGE)
+    if args[0] != "appliance" or len(args) < 2:
+        raise ValueError(_SHOW_RUN_USAGE)
+    names = args[1:]
+    if len(names) == 1:
+        _print_appliance_config(state, applianceconfig.fetch_running_config(state.ctx, names[0]))
+        return
+    outcomes = applianceconfig.fetch_running_configs(state.ctx, names)
+    for index, outcome in enumerate(outcomes):
+        if index:
+            state.console.print()
+        if outcome.value is not None:
+            _print_appliance_config(state, outcome.value)
+        else:
+            _error(state.console, f"{outcome.item}: unreachable — {outcome.error}")
+    if any(o.unreachable for o in outcomes):
+        state.exit_code = 2
+
+
+def _print_appliance_config(state: ShellState, config: ApplianceConfig) -> None:
+    state.console.print(
+        f"# {config.appliance} ({config.ne_pk}) — {config.command}",
+        style="bold",
+        markup=False,
+        highlight=False,
+    )
+    # soft_wrap: a wrapped running-config line is a corrupted one.
+    state.console.print(
+        config.text.rstrip("\n"), markup=False, highlight=False, soft_wrap=True
+    )
 
 
 def _show_generic(args: list[str], state: ShellState) -> None:
@@ -688,6 +738,13 @@ class ShellCompleter(Completer):
         # `summary` and inviting the two to be confused.
         if first == "show" and prior[1] == "flows" and len(prior) == 2:
             return ["summary"]
+        if first == "show" and prior[1] == "run":
+            # `show run appliance <name>` (#56); #55's bare `show run` adds no
+            # completions of its own.
+            if len(prior) == 2:
+                return ["appliance"]
+            if prior[2] == "appliance":
+                return self._appliance_names()
         return []
 
     def _appliance_names(self) -> list[str]:

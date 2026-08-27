@@ -37,7 +37,7 @@ from pyecsdwan.client import OrchApiError
 from pyecsdwan.contract import Ctx, Ref, Resource, Reversibility, Scope, Tier
 from pyecsdwan.journal import TxnJournal, TxnState, list_txns
 from pyecsdwan.registry import Registry, UnknownKind, default_registry
-from pyecsdwan.reports import DEFAULT_CONCURRENCY, versions
+from pyecsdwan.reports import DEFAULT_CONCURRENCY, applianceconfig, versions
 from pyecsdwan.reports import flows as flows_report
 from pyecsdwan.resolver import ResolveError
 
@@ -1494,6 +1494,146 @@ def plugin_promote(
         )
     )
     raise typer.Exit(1)
+
+
+# -- show run: appliance CLI running-config (#56) ------------------------------
+#
+# `ec-cli show run appliance <name> [<name>...]`. Declared as its own Typer
+# group under `show` so the fabric-wide bare `show run` (#55) is a one-line
+# addition: give `run_app` a `@run_app.callback(invoke_without_command=True)`
+# that renders the fabric report when no subcommand was given. Nothing here
+# needs to move for that.
+run_app = typer.Typer(help="Running-config views.")
+show_app.add_typer(run_app, name="run")
+
+
+@run_app.callback()
+def show_run() -> None:
+    """Running-config views.
+
+    The fabric-wide bare `show run` (#55) plugs in here: add
+    `invoke_without_command=True` to this callback and render the fabric
+    report when `ctx.invoked_subcommand is None`.
+    """
+
+
+def _render_appliance_config(config: applianceconfig.ApplianceConfig) -> None:
+    console.print(
+        Text(f"# {config.appliance} ({config.ne_pk}) — {config.command}", style="bold")
+    )
+    # soft_wrap: a running-config line that rich wrapped is a corrupted
+    # running-config line. Print it exactly as the appliance sent it.
+    console.print(config.text.rstrip("\n"), markup=False, highlight=False, soft_wrap=True)
+
+
+def _show_run_broadcast(rt_ctx: Ctx, names: list[str], as_json: bool) -> NoReturn:
+    """`--broadcast`: one server-side fan-out, execution status only.
+
+    `/broadcastCli` returns a bare GUID and no command output (see
+    `reports/applianceconfig`), so this confirms the read ran everywhere it
+    was sent. TIMEOUT is reported as failure, never as success.
+    """
+    result = applianceconfig.broadcast_running_config(rt_ctx, names)
+    if as_json:
+        console.print_json(json.dumps(result.as_json()))
+    else:
+        style = "green" if result.ok else "bold red"
+        console.print(
+            Text(
+                f"broadcast {result.command!r} -> {result.outcome.state}"
+                f" (action key: {result.action_key or 'none'})",
+                style=style,
+            )
+        )
+        if result.outcome.detail:
+            console.print(Text(f"  {result.outcome.detail}", style=style))
+        for name, ne_pk in result.targets:
+            status = result.outcome.per_appliance.get(ne_pk, "")
+            line = f"  {name} ({ne_pk}): {status or result.outcome.state}"
+            console.print(Text(line, style="dim"))
+        console.print(
+            Text(
+                "note: broadcast reports execution status only, not command output; "
+                "run 'ec-cli show run appliance <name>' for the config text.",
+                style="dim",
+            )
+        )
+    raise typer.Exit(0 if result.ok else 2)
+
+
+@run_app.command("appliance")
+def show_run_appliance(
+    ctx: typer.Context,
+    names: Annotated[
+        list[str],
+        typer.Argument(metavar="NAME...", help="Appliance hostname(s) (or raw nePk)."),
+    ],
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    broadcast: Annotated[
+        bool,
+        typer.Option(
+            "--broadcast",
+            help=(
+                "Dispatch the read through /broadcastCli in one server-side fan-out "
+                "and report execution status (no command output)."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """An appliance's CLI running-config, read over the Orchestrator proxy.
+
+    Read-only: the command sent to the appliance is a module constant vetted
+    by the read-only allowlist in `pyecsdwan.reports.applianceconfig`; nothing
+    here stages a candidate, journals a transaction, or saves changes.
+    """
+    if not names:
+        _fail("usage: ec-cli show run appliance NAME [NAME...]")
+    rt_ctx, _registry, _settings = _bootstrap(_state(ctx))
+    if broadcast:
+        _show_run_broadcast(rt_ctx, names, as_json)
+
+    if len(names) == 1:
+        # One appliance: no pool, and a ResolveError/OrchApiError surfaces as
+        # the clean top-level error rather than an "unreachable" row.
+        config = applianceconfig.fetch_running_config(rt_ctx, names[0])
+        if as_json:
+            console.print_json(
+                json.dumps(
+                    {
+                        "command": config.command,
+                        "appliances": [config.as_json()],
+                        "unreachable": [],
+                    }
+                )
+            )
+        else:
+            _render_appliance_config(config)
+        return
+
+    outcomes = applianceconfig.fetch_running_configs(rt_ctx, names)
+    good = [o.value for o in outcomes if o.done and o.value is not None]
+    bad = [(o.item, o.error) for o in outcomes if o.unreachable]
+    if as_json:
+        console.print_json(
+            json.dumps(
+                {
+                    "command": applianceconfig.RUNNING_CONFIG_COMMAND,
+                    "appliances": [c.as_json() for c in good],
+                    "unreachable": [{"appliance": n, "error": e} for n, e in bad],
+                }
+            )
+        )
+    else:
+        for index, config in enumerate(good):
+            if index:
+                console.print()
+            _render_appliance_config(config)
+        for name, error in bad:
+            err_console.print(Text(f"{name}: unreachable — {error}", style="yellow"))
+    if bad:
+        # A partial report is not a success: a script diffing configs must not
+        # read a missing appliance as an unchanged one.
+        raise typer.Exit(2)
 
 
 # -- entrypoint ---------------------------------------------------------------
