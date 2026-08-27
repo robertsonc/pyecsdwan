@@ -73,6 +73,18 @@ payload shape for 128 of the 169 write operations the specs leave untyped.
 Coverage today: **119 of 1833 endpoints curated, 5 generated, 1709 raw-only**
 (`ec-cli show coverage`).
 
+**Operational reporting (#54, first tranche of epic #8).** Read-only fabric
+reports in `pyecsdwan/reports/`, deliberately outside `resources/` — they have
+no normalize/diff/apply/rollback contract and no reversibility class, and
+modeling them as resources would imply guarantees they cannot honor.
+`show run` (fabric config by section, #55), `show run appliance <name>` (the
+appliance's own CLI running-config through a deny-by-default read-only
+allowlist, #56), `show version` (Orchestrator + per-appliance active/backup/
+next-boot partitions with skew detection, #57), `show flows summary` (#58) and
+`show flow <ip>` (fabric-wide, deduped, #59). All bounded by a shared
+concurrency-capped, failure-isolating fan-out: one unreachable appliance is a
+marked row, never a lost report.
+
 `make check` gate: ruff + mypy `--strict` + tests, all green.
 
 ## Coverage model (why parity is incremental but safe from day one)
@@ -96,13 +108,13 @@ So *anything and everything* is reachable now via Tier 0; curated plugins
 | **Async job handling** (#5) | no silent success on keyless pushes; per-appliance fan-out; preconfig channel; cancellation | #21–#24 |
 | **Tier-1 spec pipeline** (#6) ✅ | `tools/spec_sync.py`, model/binding/stub codegen, `show coverage`, promotion gating | #25–#29 |
 | **Fleet lifecycle** (#7) | discovery/approval, decommission cascade, preconfig, backup/restore, upgrades, licensing — IRREVERSIBLE class | in-epic checklist |
-| **Fabric ops & observability** (#8) | `drift`, declarative bulk apply, JSON Schema, dashboard-parity views | in-epic checklist |
+| **Fabric ops & observability** (#8) | `drift`, declarative bulk apply, JSON Schema, dashboard-parity views | #54 (✅ shipped) + in-epic checklist |
 | **Production hardening** (#9) | live session-login, systemd watchdog backend, keyring, audit export | in-epic checklist |
 | **(v2) RBAC broker** (#10) | direct-to-appliance access, gated — explicitly out of v1 scope | in-epic checklist |
 
 The near-term epics (#3, #4, #5, #6) are sharded into child sub-issues; #5 and
-#6 are complete. #8's first tranche is sharded as #54 (operational `show`
-commands) with five sub-issues, #55–#59.
+#6 are complete. #8's first tranche shipped as #54 (operational `show`
+commands, sub-issues #55–#59); the rest of #8 stays an in-epic checklist.
 the operational/v2 epics (#7–#10) carry their breakdown as checklists and get
 sharded into issues when their phase starts.
 
@@ -128,6 +140,7 @@ sharded into issues when their phase starts.
 | Common settings (SNMP/logging/mgmt-services/banners/timezone) | ✅ shipped (#38; appliance-scope. DNS proxy/cache, `logging/remote`, NTP deferred) |
 | Appliance lifecycle (discovery/upgrade/backup/preconfig) | ⚙️ Epic #7 |
 | Fabric drift / declarative apply / dashboards | ⚙️ Epic #8 |
+| Operational reporting (`show run` / `version` / `flows`) | ✅ shipped (#54: #55–#59). `show flow <ip>`'s server-side matching rests on `ipEitherFlag`, whose spec description contradicts its name — unverified live |
 | Any endpoint not yet curated | 🟢 reachable today via Tier-0 `ec-cli api` |
 
 Legend: ✅ done · 🔷 Phase 2 · 🔶 Phase 3 · ⚙️ operational epic · 🟢 Tier-0 now.

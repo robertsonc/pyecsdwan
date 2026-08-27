@@ -387,3 +387,66 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   `resources/deployment.py` already owns. If the orchestrator-scope form is
   ever preferred (it is one call per appliance either way), the change is
   confined to `fabric.appliance_deployment`.
+
+## Epic #54 (operational show commands) — deferred work
+
+### Move the report renderers into `cli/render.py`
+
+`render_version_report`, `render_flows_summary`, `render_flow_search` and
+`render_fabric_config` live in `cli/main.py`; `render.py`'s own docstring says
+it holds the presentation-only helpers shared by the subcommands and the
+shell, which is exactly what these are. The shell currently imports them back
+out of `main.py`, which works but reads backwards.
+
+**It is a refactor, not a move.** I attempted it and reverted. The four public
+functions are 178 lines, but they pull 13 more symbols with them —
+`_render_overlays`, `_render_templates`, `_render_security`,
+`_render_inventory`, `_render_deployment`, `_version_table`, `_bounded_note`,
+`_human_bytes`, `_human_uptime`, `_DEGRADED_STYLE`, `_NEXT_BOOT_STYLE`,
+`_SKEW_STYLE`, and `err_console` (a `main.py` object). `render.py` would also
+have to import `pyecsdwan.reports`, which `main.py` already imports at module
+load, so the import graph needs checking for a cycle before anyone starts.
+
+Worth doing when someone next touches that area with room to do it properly.
+Not worth doing halfway.
+
+### `GET /vrf/config/securityPoliciesSegments` — adopted, with a caveat
+
+Now used by `reports/fabric.py` to read the configured segment pairs in one
+call instead of deriving an O(n²) cross product. The bounded derivation
+remains as the fallback because the endpoint is not on every Orchestrator
+release. **Neither path has been exercised against real gear** — the mock
+implements the endpoint as this repo reads the spec, which is not the same as
+the vendor implementing it that way.
+
+### `ipEitherFlag` semantics are assumed, not verified
+
+`reports/flows.py` and the mock both take `ipEitherFlag=true` to mean "match
+the address at either end", which is what the parameter name says and what
+makes `show flow <ip>` a server-side query. The spec's own description says
+the opposite — *"If true, ip1 will be treated as the source IP, and ip2 will
+be treated as the destination IP"* — which describes directional matching.
+
+One of the two is wrong and nobody has tested it live. If the description
+turns out to be right, `show flow <ip>` silently misses every flow where the
+queried address is the destination. **Confirm this before trusting the
+command on a production fabric**: run `show flow <ip>` for an address you know
+appears as a destination, and check it comes back.
+
+### Orchestrator-scope `GET /deployment` is unused
+
+Both `nePk` and `cached` are required (the same trap
+`/appliancesSoftwareVersions` carries), and the mock implements no
+orchestrator-scope `/deployment` at all. `reports/fabric.py` reads the same
+object through the appliance proxy, as `resources/deployment.py` does. If the
+orchestrator-scope path is ever wanted, the mock needs the route first.
+
+### Smaller items
+
+- `show flows summary` counts rows because `active` carries no per-overlay
+  breakdown. A cell bounded by `--max-flows` renders as `2+` and the footer
+  says so; if the API ever grows a per-overlay summary, the counting can go.
+- The mock's `overlays` filter on `GET /flow` splits names on `,` while the
+  spec says IDs split on `|`. Nothing uses it. Reconcile if anything starts to.
+- Zone and VRF ids in flow rows are rendered as integers; no name lookup.
+- `--section` on `show run` takes one name, not a repeatable list.
