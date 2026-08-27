@@ -10,6 +10,19 @@ Flow: candidate changeset -> plan (fetch/normalize/diff/ownership) -> commit
   silently.
 * ``rollback <n>``: restore the nth prior confirmed transaction's snapshots,
   journaled as a new transaction (so a rollback is itself revertible).
+
+Two things keep those guarantees true when this CLI is *not* the only writer
+(issue #63):
+
+* Every critical section that writes to the fabric — commit, confirm, revert,
+  rollback — runs under the host's ``commit`` lock, so two of them cannot
+  interleave their snapshot and apply phases against one Orchestrator.
+* A commit whose diff moved between compare and commit **aborts before the
+  first write**. The engine used to recompute the diff and carry on, which
+  quietly turned another operator's concurrent change into part of this
+  operator's changeset. Absorbing that movement is now an explicit choice
+  (``--rebase``), because the safe default when the world changed underneath
+  a plan is to stop and show the operator what moved.
 """
 
 from __future__ import annotations
@@ -24,7 +37,7 @@ from typing import Any
 
 from pyecsdwan import config
 from pyecsdwan import watchdog as _watchdog
-from pyecsdwan.candidate import CandidateStore
+from pyecsdwan.candidate import CandidateItem, CandidateStore, materialize_desired
 from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
@@ -37,11 +50,20 @@ from pyecsdwan.contract import (
     Tier,
 )
 from pyecsdwan.journal import TxnJournal, TxnState, committed_history, orphaned_txns, prune_history
+from pyecsdwan.locking import DEFAULT_TIMEOUT, HostLock
 from pyecsdwan.registry import Registry
 
 
 class CommitError(Exception):
     """Commit refused or failed; message is operator-facing."""
+
+
+#: The detached watchdog's revert waits far longer for the commit lock than an
+#: interactive command does. A watchdog that gave up because another commit was
+#: in flight would leave an unconfirmed change applied — exactly the outcome the
+#: confirm window exists to prevent. Waiting is the safe direction; the bound
+#: only stops a wedged process from waiting forever.
+REVERT_LOCK_TIMEOUT = 900.0
 
 
 @dataclasses.dataclass
@@ -55,6 +77,11 @@ class PlanItem:
     diff: Diff
     #: e.g. "template-group Branch-Std" when a template owns this section.
     owner: str | None = None
+    #: The staged intent this item came from. ``--rebase`` needs it to
+    #: re-materialize desired state against what the server holds *now*;
+    #: without it a rebase would re-apply a desired state computed from the
+    #: pre-drift world and silently drop the concurrent change it merged over.
+    candidate_item: CandidateItem | None = None
 
     @property
     def changed(self) -> bool:
@@ -137,6 +164,7 @@ def build_plan(ctx: Ctx, registry: Registry, candidate: CandidateStore) -> Plan:
                 desired=desired,
                 diff=diff,
                 owner=owner,
+                candidate_item=cand,
             )
         )
     return Plan(items=items, warnings=warnings)
@@ -152,6 +180,9 @@ def commit(
     override_template: bool = False,
     allow_untransactional: bool = False,
     journal_root: Path | None = None,
+    rebase: bool = False,
+    lock_root: Path | None = None,
+    lock_timeout: float = DEFAULT_TIMEOUT,
 ) -> CommitReport:
     changed = plan.changed_items
     if not changed:
@@ -159,6 +190,30 @@ def commit(
 
     _guard(changed, settings, confirm_minutes, force, override_template, allow_untransactional)
 
+    # Held across snapshot, apply, verify and any auto-revert: a second commit
+    # that interleaved with this one could snapshot state this commit is
+    # midway through writing, and then "restore" it later.
+    with HostLock(
+        settings.host, "commit", root=lock_root, timeout=lock_timeout
+    ):
+        return _commit_locked(
+            ctx,
+            changed,
+            settings,
+            confirm_minutes,
+            journal_root,
+            rebase,
+        )
+
+
+def _commit_locked(
+    ctx: Ctx,
+    changed: list[PlanItem],
+    settings: config.Settings,
+    confirm_minutes: float | None,
+    journal_root: Path | None,
+    rebase: bool,
+) -> CommitReport:
     journal = TxnJournal.create(
         settings.host, [i.ref for i in changed], root=journal_root
     )
@@ -173,18 +228,53 @@ def commit(
         fresh_raw = item.resource.fetch(ctx, item.ref)
         journal.record_snapshot(item.ref, fresh_raw)
         fresh_current = item.resource.normalize(fresh_raw)
-        fresh_diff = item.resource.diff(item.ref, fresh_current, item.desired)
+        # A rebase re-merges the staged *intent* over what the server holds
+        # now. Re-diffing the old desired state against fresh state would not
+        # be a rebase: for a `set` (merge-mode) item the desired state was
+        # materialized over the pre-drift world, so re-applying it would
+        # delete whatever the concurrent writer added — the same lost update,
+        # arrived at by a different route.
+        fresh_desired = item.desired
+        if rebase and item.candidate_item is not None:
+            desired_input = materialize_desired(item.candidate_item, fresh_current)
+            fresh_desired = (
+                None
+                if desired_input is None
+                else item.resource.canonicalize_desired(ctx, item.ref, desired_input)
+            )
+        fresh_diff = item.resource.diff(item.ref, fresh_current, fresh_desired)
         if fresh_diff.entries != item.diff.entries:
             stale.append(item.ref.key())
         if fresh_diff.empty:
             continue
         work.append(
-            dataclasses.replace(item, current_raw=fresh_raw, current=fresh_current, diff=fresh_diff)
+            dataclasses.replace(
+                item,
+                current_raw=fresh_raw,
+                current=fresh_current,
+                desired=fresh_desired,
+                diff=fresh_diff,
+            )
         )
+    if stale and not rebase:
+        # Before the first write, and it stays that way: this block must not
+        # move below the apply loop.
+        journal.append("DRIFT_ABORT", refs=stale)
+        journal.set_state(TxnState.AUDIT_ONLY, note="server state moved since compare")
+        report.state = "DRIFT"
+        report.messages.append(
+            f"refusing: server state moved since compare for: {', '.join(stale)}. "
+            f"Another operator, a template push, or the Orchestrator UI changed these "
+            f"between plan and commit. Re-run `compare` to see the current diff, or "
+            f"`commit --rebase` to apply against the state just read."
+        )
+        return report
     if stale:
         report.messages.append(
-            f"server state moved since compare for: {', '.join(stale)} (diff recomputed)"
+            f"--rebase: server state moved since compare for: {', '.join(stale)} "
+            f"(diff recomputed against current state)"
         )
+        journal.append("DRIFT_REBASED", refs=stale)
     if not work:
         # Record as AUDIT_ONLY, never CONFIRMED: a no-op commit must not enter
         # the rollback history and shift every `rollback <n>` index by one.
@@ -358,11 +448,23 @@ def _revert_items(
 
 
 def confirm_pending(
-    settings: config.Settings, journal_root: Path | None = None, txn_id: str | None = None
+    settings: config.Settings,
+    journal_root: Path | None = None,
+    txn_id: str | None = None,
+    lock_root: Path | None = None,
+    lock_timeout: float = DEFAULT_TIMEOUT,
 ) -> CommitReport:
     """Bare ``commit`` inside a confirm window: claim the decision, write the
     marker, stop the watchdog. Scoped to ``settings.host`` so a confirm against
     one Orchestrator can never finalize an unconfirmed change on another."""
+
+    with HostLock(settings.host, "commit", root=lock_root, timeout=lock_timeout):
+        return _confirm_locked(settings, journal_root, txn_id)
+
+
+def _confirm_locked(
+    settings: config.Settings, journal_root: Path | None, txn_id: str | None
+) -> CommitReport:
     from pyecsdwan.journal import list_txns
 
     candidates = [
@@ -413,14 +515,36 @@ def confirm_pending(
 
 
 def revert_txn_dir(
-    txn_dir: Path, reason: str, ctx: Ctx | None = None, registry: Registry | None = None
+    txn_dir: Path,
+    reason: str,
+    ctx: Ctx | None = None,
+    registry: Registry | None = None,
+    lock_root: Path | None = None,
+    lock_timeout: float = REVERT_LOCK_TIMEOUT,
 ) -> CommitReport:
     """Restore a transaction's snapshots (watchdog expiry, orphan recovery).
 
     Builds a fresh client from the environment when no ctx is given — this is
     the path the detached watchdog uses after the CLI is long gone.
+
+    Takes the same host-scoped commit lock as ``commit``, so a revert cannot
+    interleave with a commit already in flight against that Orchestrator. It
+    waits much longer for it than an interactive command would: this is the
+    safety net firing, and abandoning it would leave the unconfirmed change
+    applied.
     """
     journal = TxnJournal.open(txn_dir)
+    host = journal.meta.orch_host
+    with HostLock(host, "commit", root=lock_root, timeout=lock_timeout, txn_id=journal.meta.txn_id):
+        return _revert_txn_dir_locked(journal, reason, ctx, registry)
+
+
+def _revert_txn_dir_locked(
+    journal: TxnJournal,
+    reason: str,
+    ctx: Ctx | None,
+    registry: Registry | None,
+) -> CommitReport:
     if ctx is None or registry is None:
         from pyecsdwan.runtime import bootstrap
 
@@ -481,9 +605,25 @@ def rollback_history_txn(
     settings: config.Settings,
     n: int = 1,
     journal_root: Path | None = None,
+    lock_root: Path | None = None,
+    lock_timeout: float = DEFAULT_TIMEOUT,
 ) -> CommitReport:
     """Junos-style ``rollback <n>``: restore the nth prior confirmed
-    transaction's pre-change snapshots, journaled as a new transaction."""
+    transaction's pre-change snapshots, journaled as a new transaction.
+
+    Under the same commit lock as everything else that writes to the fabric —
+    a rollback racing a commit would snapshot and restore half of it."""
+    with HostLock(settings.host, "commit", root=lock_root, timeout=lock_timeout):
+        return _rollback_locked(ctx, registry, settings, n, journal_root)
+
+
+def _rollback_locked(
+    ctx: Ctx,
+    registry: Registry,
+    settings: config.Settings,
+    n: int,
+    journal_root: Path | None,
+) -> CommitReport:
     history = committed_history(journal_root, host=settings.host)
     if n < 1 or n > len(history):
         return CommitReport(

@@ -48,7 +48,7 @@ class TxnState:
     TERMINAL = frozenset({CONFIRMED, REVERTED, REVERT_FAILED, FAILED, AUDIT_ONLY})
 
 
-def _utcnow() -> str:
+def utcnow() -> str:
     return _dt.datetime.now(tz=_dt.timezone.utc).isoformat()
 
 
@@ -125,7 +125,7 @@ class TxnJournal:
         _fsync_dir(root)  # make the new txn dir itself durable before we fill it
         meta = TxnMeta(
             txn_id=txn_id,
-            created_at=_utcnow(),
+            created_at=utcnow(),
             orch_host=orch_host,
             items=[r.key() for r in items],
         )
@@ -145,7 +145,7 @@ class TxnJournal:
     # -- event log -----------------------------------------------------------
 
     def append(self, event: str, **fields: Any) -> None:
-        record = {"ts": _utcnow(), "event": event, **fields}
+        record = {"ts": utcnow(), "event": event, **fields}
         line = json.dumps(record, sort_keys=True, default=str)
         # 0o600 on first creation; snapshots can embed sensitive server config.
         fd = os.open(self._events_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -218,7 +218,7 @@ class TxnJournal:
         marker = self.confirm_marker
         fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(_utcnow())
+            fh.write(utcnow())
             fh.flush()
             os.fsync(fh.fileno())
         _fsync_dir(self.dir)
@@ -256,7 +256,7 @@ class TxnJournal:
     def write_watchdog_pid(self, pid: int) -> None:
         """Record the watchdog pid plus a start-time token, so a recycled pid
         (reboot, wraparound) can't masquerade as a live watchdog."""
-        token = _proc_start_token(pid)
+        token = proc_start_token(pid)
         fd = os.open(self.watchdog_pid_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(f"{pid} {token}")
@@ -278,10 +278,10 @@ class TxnJournal:
             token = parts[1] if len(parts) > 1 else ""
         except (OSError, ValueError, IndexError):
             return False
-        if not _pid_alive(pid):
+        if not pid_alive(pid):
             return False
         # An older pid file without a token falls back to bare liveness.
-        return token == "" or _proc_start_token(pid) == token
+        return token == "" or proc_start_token(pid) == token
 
 
 # -- journal-wide operations -------------------------------------------------
@@ -389,7 +389,7 @@ def prune_history(keep: int, root: Path | None = None, host: str | None = None,
     return removed
 
 
-def _pid_alive(pid: int) -> bool:
+def pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -399,7 +399,7 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _proc_start_token(pid: int) -> str:
+def proc_start_token(pid: int) -> str:
     """A per-process token that changes when the pid is reused: the kernel
     start-time (field 22 of /proc/<pid>/stat on Linux). Empty when
     unavailable (non-Linux, dead pid) — callers fall back to bare liveness."""
