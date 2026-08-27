@@ -23,7 +23,7 @@ import dataclasses
 import re
 import shlex
 from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from prompt_toolkit import PromptSession
@@ -37,6 +37,9 @@ from pyecsdwan import __version__, config, journal, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.contract import Ctx, Ref, Scope
 from pyecsdwan.registry import Registry
+
+if TYPE_CHECKING:
+    from pyecsdwan.reports.applianceconfig import ApplianceConfig
 
 MODE_OPERATIONAL = "operational"
 MODE_CONFIG = "config"
@@ -57,7 +60,7 @@ _CONFIG_COMMANDS: tuple[str, ...] = (
     "show",
     "top",
 )
-_SHOW_SPECIALS: tuple[str, ...] = ("appliances", "coverage", "journal", "transactions")
+_SHOW_SPECIALS: tuple[str, ...] = ("appliances", "coverage", "journal", "run", "transactions")
 #: CLI token -> txn.commit() keyword argument.
 _COMMIT_FLAGS: dict[str, str] = {
     "force": "force",
@@ -79,6 +82,9 @@ _SHOW_OPERATIONAL_USAGE = (
 )
 _ROLLBACK_USAGE = "usage: rollback <n>  |  rollback pending"
 _SHOW_GENERIC_USAGE = "usage: show [appliance <name>] <kind> [<instance>]"
+#: #55 adds the fabric-wide bare `show run`; until then the only form is the
+#: per-appliance one, and this string is what names it.
+_SHOW_RUN_USAGE = "usage: show run appliance <name> [<name>...]"
 
 
 @dataclasses.dataclass
@@ -312,6 +318,8 @@ def _show_operational(args: list[str], state: ShellState) -> None:
         _show_pending(state)
     elif head == "coverage":
         _show_coverage(state)
+    elif head == "run":
+        _show_run(args[1:], state)
     else:
         _show_generic(args, state)
 
@@ -370,6 +378,53 @@ def _show_coverage(state: ShellState) -> None:
     state.console.print(table)
     state.console.print(coverage_summary_line(state.registry))
     _info(state.console, "`ec-cli show coverage --endpoints` lists every known endpoint")
+
+
+def _show_run(args: list[str], state: ShellState) -> None:
+    """``show run appliance <name> [<name>...]`` — appliance CLI running-config.
+
+    Read-only: the command sent to each appliance is the vetted constant in
+    :mod:`pyecsdwan.reports.applianceconfig`; nothing here touches the
+    candidate, the journal or the transaction engine.
+
+    **Seam for #55.** The fabric-wide bare ``show run`` lands in the ``if not
+    args`` branch below: replace the usage error with the fabric report and no
+    other line in this module changes.
+    """
+    from pyecsdwan.reports import applianceconfig
+
+    if not args:
+        # <- #55: fabric-wide `show run` goes here.
+        raise ValueError(_SHOW_RUN_USAGE)
+    if args[0] != "appliance" or len(args) < 2:
+        raise ValueError(_SHOW_RUN_USAGE)
+    names = args[1:]
+    if len(names) == 1:
+        _print_appliance_config(state, applianceconfig.fetch_running_config(state.ctx, names[0]))
+        return
+    outcomes = applianceconfig.fetch_running_configs(state.ctx, names)
+    for index, outcome in enumerate(outcomes):
+        if index:
+            state.console.print()
+        if outcome.value is not None:
+            _print_appliance_config(state, outcome.value)
+        else:
+            _error(state.console, f"{outcome.item}: unreachable — {outcome.error}")
+    if any(o.unreachable for o in outcomes):
+        state.exit_code = 2
+
+
+def _print_appliance_config(state: ShellState, config: ApplianceConfig) -> None:
+    state.console.print(
+        f"# {config.appliance} ({config.ne_pk}) — {config.command}",
+        style="bold",
+        markup=False,
+        highlight=False,
+    )
+    # soft_wrap: a wrapped running-config line is a corrupted one.
+    state.console.print(
+        config.text.rstrip("\n"), markup=False, highlight=False, soft_wrap=True
+    )
 
 
 def _show_generic(args: list[str], state: ShellState) -> None:
@@ -615,6 +670,13 @@ class ShellCompleter(Completer):
                 return kinds
         if first == "show" and prior[1] == "transactions" and len(prior) == 2:
             return ["pending"]
+        if first == "show" and prior[1] == "run":
+            # `show run appliance <name>` (#56); #55's bare `show run` adds no
+            # completions of its own.
+            if len(prior) == 2:
+                return ["appliance"]
+            if prior[2] == "appliance":
+                return self._appliance_names()
         return []
 
     def _appliance_names(self) -> list[str]:
