@@ -222,6 +222,13 @@ class Routes(Resource):
         "against subnets3/configured/{addMultiple,deleteMultiple} — never a "
         "full-table replace, so rollback is a precise inverse of the change."
     )
+    #: Reconciled with the add/delete multiple forms; all_routes() is a view.
+    endpoints = (
+        "appliance GET /subnets3/configured",
+        "appliance POST /subnets3/configured/addMultiple",
+        "appliance POST /subnets3/configured/deleteMultiple",
+        "appliance GET /subnets3/all",
+    )
 
     @staticmethod
     def _ne_pk(ctx: Ctx, ref: Ref) -> str:

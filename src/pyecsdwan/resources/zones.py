@@ -107,6 +107,17 @@ class Zones(Resource):
         "true, detaching it from " + _CASCADE_TARGETS + ". Zone id 0 "
         "(Default) is server-managed and cannot be removed."
     )
+    #: nextId is the id allocator; the last two are read-only views.
+    endpoints = (
+        "orchestrator GET /zones",
+        "orchestrator POST /zones",
+        "orchestrator GET /zones/eeEnable",
+        "orchestrator POST /zones/eeEnable",
+        "orchestrator GET /zones/nextId",
+        "orchestrator POST /zones/nextId",
+        "orchestrator GET /zones/vrfZonesMap",
+        "orchestrator GET /appliance/zoneListMeta",
+    )
 
     # -- read side ------------------------------------------------------------
 

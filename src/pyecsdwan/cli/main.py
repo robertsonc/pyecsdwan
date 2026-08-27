@@ -28,7 +28,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from pyecsdwan import config, runtime, txn
+from pyecsdwan import config, runtime, specs, txn
 from pyecsdwan.candidate import CandidateCorruptError, CandidateStore
 from pyecsdwan.cli import render
 from pyecsdwan.client import OrchApiError
@@ -523,26 +523,295 @@ def _coverage_notes(resource: Resource) -> str:
     return "no rollback; commit requires --force"
 
 
-@show_app.command("coverage")
-def show_coverage() -> None:
-    """Resource kinds and their transactional guarantees."""
-    registry = _registry_only()
+# -- coverage: registered kinds joined onto the spec endpoint universe (#28) ---
+#
+# A resource declares the operations it covers via ``Resource.endpoints``
+# (``"<scope> <METHOD> <path>"``, see :func:`pyecsdwan.specs.endpoint_key`).
+# Those declarations are the *only* link between a kind and the API surface,
+# so this join is exactly as good as they are — ``tests/test_coverage.py``
+# asserts every one of them resolves to a real spec operation.
+#
+# Deliberately NOT attributed to any kind: the appliance proxy transport
+# (``/appliance/rest``) and the engine's own plumbing
+# (``/appliance/saveChanges``, ``/action/status``, ``/appliance``). Every
+# appliance-scope transaction drives those, so charging them to one kind
+# would be arbitrary; they sit at tier 0 with the rest of the passthrough
+# surface.
+
+#: Endpoints with no covering resource are still reachable — this is the
+#: floor of the tool, not a hole in it.
+_TIER0_NOTE = "tier 0 = reachable today via `ec-cli api` passthrough (journaled), not a gap"
+
+
+@dataclasses.dataclass(frozen=True)
+class _EndpointCoverage:
+    """One spec operation with the tier attribution derived from the registry."""
+
+    scope: str
+    method: str
+    path: str
+    tier: int
+    #: Every kind declaring this endpoint, sorted; empty at tier 0.
+    kinds: tuple[str, ...]
+    #: Reversibility of the highest-tier covering kinds; "" at tier 0.
+    reversibility: str
+    summary: str
+    deprecated: bool
+    #: A Postman-derived payload example exists for this endpoint (issue #51).
+    example: bool
+
+
+def _declared_coverage(registry: Registry) -> dict[str, list[Resource]]:
+    """``endpoint_key()`` -> the resources declaring it (may be more than one)."""
+    covering: dict[str, list[Resource]] = {}
+    for kind in registry.kinds():
+        resource = registry.get(kind)
+        for declared in resource.endpoints:
+            scope, _, rest = declared.partition(" ")
+            method, _, path = rest.partition(" ")
+            covering.setdefault(specs.endpoint_key(scope, method, path), []).append(resource)
+    return covering
+
+
+def _undeclared_keys(registry: Registry) -> list[str]:
+    """Declared endpoints absent from the spec universe — drift or a typo.
+
+    Normally empty (a test enforces it), but the report says so out loud
+    rather than silently dropping the declaration.
+    """
+    universe = specs.endpoint_index()
+    if not universe:
+        # No baselines vendored: the universe is unknown, not empty. Judging
+        # declarations against it would report every one of them as drift.
+        return []
+    return sorted(k for k in _declared_coverage(registry) if k not in universe)
+
+
+def _endpoint_coverage(registry: Registry) -> list[_EndpointCoverage]:
+    """The whole endpoint universe, each row tiered by its covering kinds."""
+    covering = _declared_coverage(registry)
+    examples = specs.payload_examples()
+    rows: list[_EndpointCoverage] = []
+    for key, endpoint in specs.endpoint_index().items():
+        resources = covering.get(key, [])
+        tier = max((int(r.tier) for r in resources), default=int(Tier.RAW))
+        # Two kinds can legitimately declare one endpoint (appliance/deployment
+        # and appliance/dhcp share the deployment object). Take the highest
+        # tier and name every kind rather than picking one.
+        top = [r for r in resources if int(r.tier) == tier]
+        rows.append(
+            _EndpointCoverage(
+                scope=endpoint.scope,
+                method=endpoint.method,
+                path=endpoint.path,
+                tier=tier,
+                kinds=tuple(sorted(r.kind for r in top)),
+                reversibility="/".join(sorted({r.reversibility.value for r in top})),
+                summary=endpoint.summary,
+                deprecated=endpoint.deprecated,
+                example=key in examples,
+            )
+        )
+    rows.sort(key=lambda r: (r.scope, r.path, r.method))
+    return rows
+
+
+def _coverage_rollup(rows: list[_EndpointCoverage]) -> dict[str, int]:
+    counts = {"endpoints": len(rows), "curated": 0, "generated": 0, "raw": 0}
+    for row in rows:
+        counts[{2: "curated", 1: "generated"}.get(row.tier, "raw")] += 1
+    return counts
+
+
+def _rollup_line(counts: dict[str, int]) -> str:
+    return (
+        f"{counts['curated']} of {counts['endpoints']} endpoints curated, "
+        f"{counts['generated']} generated, {counts['raw']} raw-only"
+    )
+
+
+def coverage_summary_line(registry: Registry) -> str:
+    """One-line roll-up, shared by ``ec-cli show coverage`` and the shell.
+
+    Returns an explanation instead of a fake zero when no baselines are
+    vendored — an empty universe is "unknown", not "nothing is covered".
+    """
+    rows = _endpoint_coverage(registry)
+    if not rows:
+        return "no API specs vendored; per-endpoint coverage unavailable"
+    return _rollup_line(_coverage_rollup(rows))
+
+
+def _kind_rows(registry: Registry, kinds: list[str]) -> Table:
     table = Table(title="resource coverage")
     table.add_column("kind")
     table.add_column("scope")
     table.add_column("reversibility")
     table.add_column("tier", justify="right")
+    table.add_column("endpoints", justify="right")
     table.add_column("notes")
-    for kind in registry.kinds():
+    for kind in kinds:
         resource = registry.get(kind)
         table.add_row(
             kind,
             resource.scope.value,
             resource.reversibility.value,
             str(int(resource.tier)),
+            str(len(resource.endpoints)),
             _coverage_notes(resource),
         )
-    console.print(table)
+    return table
+
+
+def _endpoint_table(rows: list[_EndpointCoverage]) -> Table:
+    # The example column only appears once payload examples are vendored
+    # (issue #51); before that it would be a column of blanks.
+    with_examples = any(row.example for row in rows)
+    table = Table(title=f"endpoint coverage ({len(rows)})")
+    table.add_column("scope")
+    table.add_column("method")
+    table.add_column("path", overflow="fold")
+    table.add_column("tier", justify="right")
+    table.add_column("kind(s)", overflow="fold")
+    table.add_column("reversibility")
+    if with_examples:
+        table.add_column("example")
+    for row in rows:
+        cells = [
+            row.scope,
+            row.method,
+            row.path + (" (deprecated)" if row.deprecated else ""),
+            str(row.tier),
+            ", ".join(row.kinds),
+            row.reversibility,
+        ]
+        if with_examples:
+            cells.append("yes" if row.example else "")
+        table.add_row(*cells)
+    return table
+
+
+@show_app.command("coverage")
+def show_coverage(
+    endpoints: Annotated[
+        bool,
+        typer.Option(
+            "--endpoints",
+            help="One row per known API endpoint instead of per resource kind.",
+        ),
+    ] = False,
+    kind: Annotated[
+        str | None,
+        typer.Option("--kind", help="Restrict to one resource kind and what it covers."),
+    ] = None,
+    tier: Annotated[
+        int | None,
+        typer.Option("--tier", min=0, max=2, help="Restrict to tier 0, 1 or 2."),
+    ] = None,
+    scope: Annotated[
+        str | None,
+        typer.Option("--scope", help="Restrict to 'orchestrator' or 'appliance'."),
+    ] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+) -> None:
+    """Resource kinds, the endpoints they cover, and the transactional tier.
+
+    Offline: reads the vendored ``specs/`` baselines and the plugin registry,
+    never the Orchestrator.
+    """
+    registry = _registry_only()
+    if kind is not None and kind not in registry:
+        _fail(f"unknown resource kind {kind!r}; known kinds: {', '.join(registry.kinds())}")
+    if scope is not None and scope not in specs.SCOPES:
+        _fail(f"unknown scope {scope!r}; expected one of: {', '.join(specs.SCOPES)}")
+
+    kinds = [
+        k
+        for k in registry.kinds()
+        if (kind is None or k == kind)
+        and (tier is None or int(registry.get(k).tier) == tier)
+        and (scope is None or registry.get(k).scope.value == scope)
+    ]
+    all_rows = _endpoint_coverage(registry)
+    # Join through endpoint_key(), never raw strings: a declaration writes an
+    # ECOS path relative while the spec writes it absolute.
+    covered_by_kind = (
+        {specs.endpoint_key(*e.split(" ", 2)) for e in registry.get(kind).endpoints}
+        if kind is not None
+        else set()
+    )
+    rows = [
+        row
+        for row in all_rows
+        if (tier is None or row.tier == tier)
+        and (scope is None or row.scope == scope)
+        and (
+            kind is None
+            or specs.endpoint_key(row.scope, row.method, row.path) in covered_by_kind
+        )
+    ]
+    counts = _coverage_rollup(all_rows)
+    unknown = _undeclared_keys(registry)
+
+    if as_json:
+        payload: dict[str, Any] = {
+            "spec_versions": {s: specs.spec_version(s) for s in specs.SCOPES},
+            "totals": counts,
+            "note": _TIER0_NOTE,
+            "kinds": [
+                {
+                    "kind": k,
+                    "scope": registry.get(k).scope.value,
+                    "reversibility": registry.get(k).reversibility.value,
+                    "tier": int(registry.get(k).tier),
+                    "notes": _coverage_notes(registry.get(k)),
+                    "endpoints": list(registry.get(k).endpoints),
+                }
+                for k in kinds
+            ],
+            "undeclared_in_spec": unknown,
+        }
+        if endpoints:
+            payload["endpoints"] = [dataclasses.asdict(row) for row in rows]
+        console.print_json(json.dumps(payload, default=str))
+        return
+
+    if endpoints:
+        if not all_rows:
+            console.print(Text(_no_specs_message(), style="yellow"))
+            return
+        if not rows:
+            console.print("no endpoints match those filters")
+            return
+        console.print(_endpoint_table(rows))
+    elif kinds:
+        console.print(_kind_rows(registry, kinds))
+    else:
+        # `--tier 0` is the common case here: no *registered kind* is tier 0,
+        # but 1700-odd endpoints are, so point at the view that shows them.
+        console.print("no resource kinds match those filters; try --endpoints")
+
+    if all_rows:
+        console.print(_rollup_line(counts))
+        console.print(Text(_TIER0_NOTE, style="dim"))
+    else:
+        console.print(Text(_no_specs_message(), style="yellow"))
+    if unknown:
+        err_console.print(
+            Text(
+                f"warning: {len(unknown)} declared endpoint(s) are absent from the "
+                f"vendored specs: {', '.join(unknown)}",
+                style="yellow",
+            )
+        )
+
+
+def _no_specs_message() -> str:
+    return (
+        "no API specs vendored (looked for specs/*-openapi-*.json, or "
+        f"${specs.ENV_SPECS_DIR}); per-endpoint coverage is unavailable — "
+        "the resource-kind table above is complete on its own"
+    )
 
 
 @show_app.command("candidate")

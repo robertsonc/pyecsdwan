@@ -153,6 +153,12 @@ class Deployment(Resource):
         "the whole object is validated (deployment/validate) then POSTed back "
         "on every apply."
     )
+    #: Every write is validated before it lands.
+    endpoints = (
+        "appliance GET /deployment",
+        "appliance POST /deployment",
+        "appliance POST /deployment/validate",
+    )
 
     # -- appliance resolution --------------------------------------------------
 

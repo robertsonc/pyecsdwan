@@ -273,3 +273,20 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   more than one artifact in `specs/` — but the selection wants a version-aware
   sort before 9.10 ships. Found while building #51; not fixed here because
   `specs.py` was owned by parallel work.
+- **`loopback.reclaim_deleted_ips()` builds a path that does not exist.** It
+  calls `DELETE /loopbackOrch/pool/reclaim/{id}` when given a `loopback_id`,
+  but neither vendored baseline has that path — the Orchestrator spec's
+  `DELETE /loopbackOrch/pool/reclaim` takes `id` as a **required query
+  parameter** ("Reclaim all deleted ip addresses or Reclaim deleted ip address
+  by id"). Both call forms are therefore wrong: the by-id one 404s, and the
+  "all" one omits a parameter the spec marks required. Found by #28's
+  declared-endpoints-exist-in-spec check; the function is a maintenance
+  helper no `apply()` path reaches, so it was left alone rather than fixed
+  in a coverage change. `Resource.endpoints` for `loopback-orch` declares only
+  the real `DELETE /loopbackOrch/pool/reclaim`.
+- **`appliance POST /virtualif/loopback` exists but `appliance/loopback` still
+  refuses to write.** The module says "no documented endpoint" for the write
+  path and `apply()` raises; the appliance baseline does list POST (and
+  per-interface POST/DELETE on `/virtualif/loopback/{loopbackName}`). Worth
+  re-checking against live gear — it may be promotable from IRREVERSIBLE
+  read-only to a full curated resource.

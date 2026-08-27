@@ -51,6 +51,12 @@ class Bio(Resource):
         "full overlay configuration object (name, topology, interface label "
         "preferences, ...) — see GET /gms/overlays/config for the live shape"
     )
+    endpoints = (
+        "orchestrator GET /gms/overlays/config",
+        "orchestrator POST /gms/overlays/config",
+        "orchestrator PUT /gms/overlays/config",
+        "orchestrator DELETE /gms/overlays/config",
+    )
 
     def fetch(self, ctx: Ctx, ref: Ref) -> RawState:
         try:
@@ -136,6 +142,12 @@ class BioAssociation(Resource):
     tier = Tier.CURATED
     dependencies = ("bio",)
     desired_state_doc = "appliances: complete list of appliance hostnames in the overlay"
+    #: Removal uses the /remove form, not DELETE.
+    endpoints = (
+        "orchestrator GET /gms/overlays/association",
+        "orchestrator POST /gms/overlays/association",
+        "orchestrator POST /gms/overlays/association/remove",
+    )
 
     def fetch(self, ctx: Ctx, ref: Ref) -> RawState:
         try:

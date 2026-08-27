@@ -169,6 +169,13 @@ class Dhcp(Resource):
         "fields, other interfaces, ...) is left untouched. An interface/ip "
         "not found in the live object is skipped, never invented."
     )
+    #: Shares the deployment object with appliance/deployment: this kind owns only
+    #: the dhcpd/dhcpFailover subtrees, spliced into a freshly-read full object.
+    endpoints = (
+        "appliance GET /deployment",
+        "appliance POST /deployment",
+        "appliance POST /deployment/validate",
+    )
 
     # -- appliance resolution --------------------------------------------------
 

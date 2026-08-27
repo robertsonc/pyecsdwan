@@ -178,6 +178,11 @@ class Loopback(Resource):
         "always raises NotImplementedError — no write endpoint is "
         "documented for this per-appliance view."
     )
+    #: Read-only today. `appliance POST /virtualif/loopback` exists in the spec but
+    #: is deliberately not claimed here: apply() raises (see _WRITE_PATH_TODO).
+    endpoints = (
+        "appliance GET /virtualif/loopback",
+    )
 
     # -- read side ------------------------------------------------------------
 
@@ -285,6 +290,13 @@ class LoopbackOrch(Resource):
         "folded to 'mgmtIP' (the real GET casing — see module docstring's "
         "SDK case-mismatch note). Full-structure replace: POST /loopbackOrch "
         "always carries the whole table, never a partial segment."
+    )
+    #: Config plus the pool view and the reclaim maintenance action.
+    endpoints = (
+        "orchestrator GET /loopbackOrch",
+        "orchestrator POST /loopbackOrch",
+        "orchestrator GET /loopbackOrch/pool",
+        "orchestrator DELETE /loopbackOrch/pool/reclaim",
     )
 
     # -- read side ------------------------------------------------------------

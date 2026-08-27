@@ -318,6 +318,10 @@ class NatMaps(Resource):
         "backfilled from the server when user intent omits it, so a replace "
         "can never silently deactivate the running map."
     )
+    endpoints = (
+        "appliance GET /natMaps",
+        "appliance POST /natMaps",
+    )
 
     # -- read side ------------------------------------------------------------
 
@@ -520,6 +524,12 @@ class NatPools(Resource):
         "replaces or merges. SPEC-DERIVED: the lab returned {} — no "
         "populated live sample was available."
     )
+    #: Removed pools are deleted per-id before the full-table POST.
+    endpoints = (
+        "appliance GET /nat/natPools",
+        "appliance POST /nat/natPools",
+        "appliance DELETE /nat/natPools/{id}",
+    )
 
     # -- read side ------------------------------------------------------------
 
@@ -639,6 +649,12 @@ class SnatMaps(Resource):
         "Inter-segment S-NAT is ON by default; this fabric-wide table lists "
         "the pairs where it is turned off. Full-table replace against "
         "POST /vrf/config/snatMaps — an empty table means 'S-NAT everywhere'."
+    )
+    #: D-NAT has no write endpoint in either baseline; it is a read view.
+    endpoints = (
+        "orchestrator GET /vrf/config/snatMaps",
+        "orchestrator POST /vrf/config/snatMaps",
+        "orchestrator GET /dnatMaps",
     )
 
     # -- read side ------------------------------------------------------------

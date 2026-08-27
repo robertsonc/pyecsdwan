@@ -95,6 +95,10 @@ class SecurityPolicy(Resource):
         "maps: {mapName: {fromZoneId_toZoneId: {prio: {priority: {match, set, misc, "
         "comment}}}}} — resource name is the segment pair, e.g. '0_0'"
     )
+    endpoints = (
+        "orchestrator GET /vrf/config/securityPolicies",
+        "orchestrator POST /vrf/config/securityPolicies",
+    )
 
     @staticmethod
     def _validate(ref: Ref) -> None:

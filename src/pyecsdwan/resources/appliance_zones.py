@@ -151,6 +151,11 @@ class ApplianceZones(Resource):
         "orchestrator-scope zones, there is no confirmed server-managed "
         "Default/id-0 row at this scope)."
     )
+    #: ECOS zone table; the write goes through the proxy with deleteDependencies.
+    endpoints = (
+        "appliance GET /zones",
+        "appliance POST /zones",
+    )
 
     @staticmethod
     def _ne_pk(ctx: Ctx, ref: Ref) -> str:
@@ -324,6 +329,11 @@ class ApplianceSecurityMaps(Resource):
         "misc, comment}}}}}. Full-table replace against ECOS 'securityMaps', "
         "persisted via save-changes. self echoes are stripped on read and "
         "re-injected on write (security_policy.py's technique, reused as-is)."
+    )
+    #: ECOS security-policy (zone-pair) table.
+    endpoints = (
+        "appliance GET /securityMaps",
+        "appliance POST /securityMaps",
     )
 
     @staticmethod
