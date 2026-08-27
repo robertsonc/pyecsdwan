@@ -23,6 +23,17 @@ from pyecsdwan.reports.fanout import (
     unreachable,
     values,
 )
+from pyecsdwan.reports.flows import (
+    DEFAULT_MAX_FLOWS,
+    PASSTHROUGH,
+    FlowMatch,
+    FlowRow,
+    FlowSearch,
+    FlowsSummary,
+    build_flows_summary,
+    find_flows,
+    parse_query_ip,
+)
 from pyecsdwan.reports.versions import (
     ApplianceVersions,
     FabricVersions,
@@ -31,11 +42,20 @@ from pyecsdwan.reports.versions import (
 
 __all__ = [
     "DEFAULT_CONCURRENCY",
+    "DEFAULT_MAX_FLOWS",
+    "PASSTHROUGH",
     "ApplianceVersions",
     "FabricVersions",
+    "FlowMatch",
+    "FlowRow",
+    "FlowSearch",
+    "FlowsSummary",
     "Outcome",
     "Partition",
+    "build_flows_summary",
     "fan_out",
+    "find_flows",
+    "parse_query_ip",
     "unreachable",
     "values",
 ]

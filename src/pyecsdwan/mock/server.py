@@ -15,6 +15,7 @@ to ``False`` to disable the check entirely (useful in tests).
 from __future__ import annotations
 
 import copy
+import ipaddress
 import json
 import threading
 import time
@@ -1669,6 +1670,22 @@ def _seed_flows() -> dict[str, list[dict[str, Any]]]:
     }
 
 
+def _flow_ip_matches(candidate: Any, query: str, mask: int | None) -> bool:
+    """GET /flow address matching: exact host, or inside the /mask prefix."""
+    if not candidate:
+        return False
+    try:
+        address = ipaddress.ip_address(str(candidate))
+        network = (
+            ipaddress.ip_network(f"{query}/{mask}", strict=False)
+            if mask is not None
+            else ipaddress.ip_network(query, strict=False)
+        )
+    except ValueError:
+        return str(candidate) == query
+    return address in network
+
+
 def _seed_cli_output() -> dict[str, str]:
     """`show running-config` text per nePk, keyed by hostname in the banner so
     a report that attributes output to the wrong appliance is visible."""
@@ -2502,7 +2519,9 @@ def create_app(state: MockState | None = None) -> FastAPI:
         nePk: str,
         maxFlows: int,
         ip1: str | None = None,
+        mask1: int | None = None,
         ip2: str | None = None,
+        mask2: int | None = None,
         ipEitherFlag: bool = False,
         overlays: str | None = None,
     ) -> Any:
@@ -2512,14 +2531,24 @@ def create_app(state: MockState | None = None) -> FastAPI:
         real API 400s). `ipEitherFlag` is the one that matters: it matches an
         address at *either* end, which is what makes `show flow <ip>` a server-
         side query rather than a fetch-everything-and-filter.
+
+        `mask1`/`mask2` widen their address to a prefix. Omitted, the match is
+        the single host — so a client that parses `<ip>/<prefix>` but forgets
+        to send the mask gets its host-only answer back and the difference is
+        visible in a test rather than silently plausible.
         """
         rows = list(mock.flows.get(nePk, []))
         if ip1 and ipEitherFlag:
-            rows = [r for r in rows if ip1 in (r.get("ip1"), r.get("ip2"))]
+            rows = [
+                r
+                for r in rows
+                if _flow_ip_matches(r.get("ip1"), ip1, mask1)
+                or _flow_ip_matches(r.get("ip2"), ip1, mask1)
+            ]
         elif ip1:
-            rows = [r for r in rows if r.get("ip1") == ip1]
+            rows = [r for r in rows if _flow_ip_matches(r.get("ip1"), ip1, mask1)]
         if ip2:
-            rows = [r for r in rows if r.get("ip2") == ip2]
+            rows = [r for r in rows if _flow_ip_matches(r.get("ip2"), ip2, mask2)]
         if overlays:
             wanted = {o.strip() for o in overlays.split(",") if o.strip()}
             rows = [r for r in rows if r.get("overlayName") in wanted]
