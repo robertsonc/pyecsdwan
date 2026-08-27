@@ -290,3 +290,12 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   per-interface POST/DELETE on `/virtualif/loopback/{loopbackName}`). Worth
   re-checking against live gear — it may be promotable from IRREVERSIBLE
   read-only to a full curated resource.
+- **`security-policy` and `appliance/vrrp` implement no `list_refs()`**, so
+  `ec-cli show <kind>` and any registry-wide sweep (drift reports, the #29
+  promotion gate) cannot enumerate them and must be handed a ref. For
+  `security-policy` that is arguably unavoidable — the Orchestrator exposes no
+  endpoint listing the configured `srcSeg_dstSeg` pairs, so enumeration would
+  mean guessing from the segment table. For `appliance/vrrp` it is a cost
+  decision: enumerating means one proxy GET per appliance. Both are declared
+  with their reasons in `PROBE_REFS` in `tests/test_promotion.py`; if either
+  grows a `list_refs()`, that entry must be deleted (the suite asserts it).

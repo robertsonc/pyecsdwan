@@ -494,3 +494,10 @@ def test_promote_rejects_an_unknown_kind(state_home: Any, mock_fabric: str) -> N
     result = _promote(mock_fabric, "not-a-kind")
     assert result.exit_code == 2
     assert "unknown resource kind" in result.output
+
+
+def test_promote_validates_scope_on_a_named_ref(state_home: Any, mock_fabric: str) -> None:
+    """--name on an appliance-scope kind still needs --appliance."""
+    result = _promote(mock_fabric, "appliance/bgp", "--name", "config")
+    assert result.exit_code == 2
+    assert "appliance-scoped" in result.output

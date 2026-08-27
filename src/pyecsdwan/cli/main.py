@@ -968,14 +968,12 @@ def cache_refresh(ctx: typer.Context) -> None:
 
 
 def _promotion_sample_ref(
-    rt_ctx: Ctx, resource: Resource, name: str | None, appliance: str | None
+    rt_ctx: Ctx, registry: Registry, resource: Resource, name: str | None, appliance: str | None
 ) -> Ref:
     """Ref to run the checklist against: the operator's, or the first the
     resource enumerates on this Orchestrator."""
     if name is not None:
-        if resource.scope is Scope.APPLIANCE and appliance is None:
-            _fail(f"kind {resource.kind!r} is appliance-scoped; pass --appliance NAME")
-        return Ref(kind=resource.kind, name=name, appliance=appliance)
+        return _make_ref(registry, resource.kind, name, appliance)
     refs = list(resource.list_refs(rt_ctx))
     if not refs:
         _fail(
@@ -1036,7 +1034,7 @@ def plugin_promote(
     state = _state(ctx)
     rt_ctx, registry, _settings = _bootstrap(state)
     resource = _resource_for(registry, kind)
-    ref = _promotion_sample_ref(rt_ctx, resource, name, appliance)
+    ref = _promotion_sample_ref(rt_ctx, registry, resource, name, appliance)
 
     checks = [registry_mod.check_untransactional_normalize(resource)]
     if resource.tier >= Tier.CURATED:
