@@ -2507,6 +2507,21 @@ def create_app(state: MockState | None = None) -> FastAPI:
                 appliance["hasUnsavedChanges"] = True
         return Response(status_code=204)
 
+    @api.get("/vrf/config/securityPoliciesSegments")
+    async def security_policy_segments() -> Any:
+        """Every configured "<src>_<dst>" segment pair, as a flat string array.
+
+        The list-all counterpart to GET /vrf/config/securityPolicies, which
+        requires map=<src>_<dst> and so cannot be enumerated. Without this a
+        report has to derive the pairs from the segment cross product, which
+        is O(n^2) GETs against a control plane (#55).
+
+        The spec types the response as an array whose one "property" is named
+        "<sourceSegment_destinationSegment>" — the angle-bracket placeholder
+        shape that means "a string of this form", not a field name.
+        """
+        return sorted(mock.security_policies)
+
     # -- operational reports (#54) --------------------------------------------
 
     @api.get("/gms/versions")

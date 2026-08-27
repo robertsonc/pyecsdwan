@@ -93,6 +93,11 @@ OVERLAY_ASSOCIATION_PATH: Final[str] = "/gms/overlays/association"
 TEMPLATE_GROUPS_PATH: Final[str] = "/template/templateGroups"
 TEMPLATE_ASSOCIATION_PATH: Final[str] = "/template/applianceAssociation"
 SECURITY_POLICY_PATH: Final[str] = "/vrf/config/securityPolicies"
+#: Lists every configured "<src>_<dst>" pair in one call. SECURITY_POLICY_PATH
+#: requires map=<src>_<dst> and cannot be enumerated, so without this the pairs
+#: have to be derived from the segment cross product — O(n^2) GETs against a
+#: control plane. Not present on every Orchestrator release, hence the fallback.
+SECURITY_SEGMENTS_PATH: Final[str] = "/vrf/config/securityPoliciesSegments"
 #: ECOS path handed to the appliance proxy — relative, no leading slash.
 DEPLOYMENT_ECOS_PATH: Final[str] = "deployment"
 
@@ -143,9 +148,7 @@ class UnknownSection(ValueError):
 
     def __init__(self, name: str) -> None:
         self.name = name
-        super().__init__(
-            f"unknown section {name!r}; valid sections: {', '.join(SECTIONS)}"
-        )
+        super().__init__(f"unknown section {name!r}; valid sections: {', '.join(SECTIONS)}")
 
 
 def resolve_sections(section: str | None) -> tuple[str, ...]:
@@ -486,9 +489,7 @@ def collect_overlays(
     overlays.sort(key=lambda o: o.name)
 
     unassociated = tuple(sorted(name for pk, name in names.items() if pk not in associated))
-    return OverlaySection(
-        notes=tuple(notes), overlays=tuple(overlays), unassociated=unassociated
-    )
+    return OverlaySection(notes=tuple(notes), overlays=tuple(overlays), unassociated=unassociated)
 
 
 def _template_group_objects(raw: Any) -> list[dict[str, Any]]:
@@ -578,6 +579,29 @@ def collect_templates(
     return TemplateSection(notes=tuple(notes), groups=tuple(groups), unassigned=unassigned)
 
 
+def _configured_pairs(ctx: Ctx) -> tuple[tuple[str, ...], str]:
+    """The pairs the fabric actually has, in one call, or ``()`` to fall back.
+
+    ``GET /vrf/config/securityPoliciesSegments`` answers exactly the question
+    the cross-product derivation below approximates: which ``<src>_<dst>`` maps
+    exist. Preferred whenever it answers, because reading N real pairs beats
+    guessing at N^2 possible ones.
+
+    Any failure — an older Orchestrator without the endpoint, a permissions
+    error, an unexpected shape — returns empty so the caller degrades to the
+    bounded cross product rather than losing the section.
+    """
+    try:
+        raw = ctx.client.get(SECURITY_SEGMENTS_PATH)
+    except Exception as exc:  # noqa: BLE001 - absence is expected on older releases
+        log.debug("fabric_policy_segments_unavailable", error=_reason(exc))
+        return (), ""
+    if not isinstance(raw, list):
+        return (), ""
+    pairs = tuple(sorted({str(p) for p in raw if isinstance(p, str) and p}))
+    return pairs, ""
+
+
 def _segment_pairs(segments: Sequence[str]) -> tuple[tuple[str, ...], str]:
     """``(pairs, note)`` — which ``<src>_<dst>`` maps to read, and why.
 
@@ -649,9 +673,14 @@ def collect_security(ctx: Ctx) -> SecuritySection:
         # is a floor rather than a guess — it just may not be the whole story.
         segments = ("0",)
 
-    pairs, bound_note = _segment_pairs(segments)
-    if bound_note:
-        notes.append(bound_note)
+    # Prefer the real list; fall back to guessing at the cross product. No note
+    # on the success path — `notes` is what makes a section report as degraded,
+    # and reading the configured pairs is the un-degraded case.
+    pairs, bound_note = _configured_pairs(ctx)
+    if not pairs:
+        pairs, bound_note = _segment_pairs(segments)
+        if bound_note:
+            notes.append(bound_note)
 
     from pyecsdwan.resources import security_policy as security_policy_res
 
@@ -937,6 +966,7 @@ __all__ = [
     "OVERLAYS",
     "SECTIONS",
     "SECURITY",
+    "SECURITY_SEGMENTS_PATH",
     "TEMPLATES",
     "UNSPECIFIED",
     "ApplianceDeployment",

@@ -716,3 +716,49 @@ def test_show_run_leaves_no_candidate_journal_or_transaction(
     assert len(CandidateStore(world["settings"].host)) == 0
     # The mock flags any appliance a write reached; the report reached none.
     assert not any(a.get("hasUnsavedChanges") for a in world["state"].appliances)
+
+
+
+def test_configured_pairs_are_read_not_derived(world: dict[str, Any]) -> None:
+    """`GET /vrf/config/securityPolicies` requires map=<src>_<dst> and cannot be
+    enumerated, so the pairs were originally guessed at from the segment cross
+    product — O(n^2) GETs against a control plane. `securityPoliciesSegments`
+    answers the real question in one call; this proves we take it."""
+    _add_security_policy(world, "0_0")
+    _add_security_policy(world, "1_2")
+    pairs, note = fabric._configured_pairs(world["ctx"])
+    assert pairs == ("0_0", "1_2")
+    assert note == ""
+    # And the section reports both without being told the segments exist.
+    section = fabric.collect_security(world["ctx"])
+    assert {p.pair for p in section.policies} == {"0_0", "1_2"}
+    assert not section.degraded
+
+
+def test_missing_segments_endpoint_falls_back_to_the_cross_product(
+    world: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Older Orchestrators do not carry the endpoint. Losing it must cost the
+    optimization, never the section."""
+    client = world["client"]
+    original = client.get
+
+    def refuse(path: str, **kwargs: Any) -> Any:
+        if path == fabric.SECURITY_SEGMENTS_PATH:
+            raise OrchApiError("GET", path, 404, "not found")
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(client, "get", refuse)
+    assert fabric._configured_pairs(world["ctx"]) == ((), "")
+    # The section still renders, via the bounded cross-product derivation.
+    section = fabric.collect_security(world["ctx"])
+    assert isinstance(section, fabric.SecuritySection)
+
+
+def test_a_non_list_response_falls_back_rather_than_crashing(
+    world: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live drift from the spec is tolerated everywhere else in this codebase;
+    a report is not the place to start trusting a shape."""
+    monkeypatch.setattr(world["client"], "get", lambda path, **kw: {"unexpected": "object"})
+    assert fabric._configured_pairs(world["ctx"]) == ((), "")
