@@ -169,6 +169,31 @@ def test_orchestrator_version_is_current_not_installed(ctx: Ctx) -> None:
     assert running not in ("9.4.1.40077", "9.3.4.39802")
 
 
+def test_orchestrator_version_ignores_installed_even_at_index_zero() -> None:
+    """The mock's `installed` happens to *start* with `current`, so a report
+    rendering ``installed[0]`` passes every fixture-based test above while
+    still being wrong. This pins the semantic on a payload where the two
+    disagree: `current` is the running Orchestrator, full stop."""
+
+    class _Divergent(_RecordingClient):
+        def get(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
+            if path == versions.ORCHESTRATOR_VERSIONS_PATH:
+                self.calls.append((path, params))
+                # A freshly upgraded Orchestrator whose available-version list
+                # has not been refreshed: nothing in `installed` is running.
+                return {
+                    "current": "9.5.0.40500",
+                    "installed": ["9.4.2.40100", "9.4.1.40077", "9.3.4.39802"],
+                }
+            return super().get(path, params=params)
+
+    result = versions.collect(_fake_ctx(_Divergent()))
+    assert result.orchestrator == "9.5.0.40500"
+    header = _rendered(result).splitlines()[0]
+    assert header.strip() == "Orchestrator 9.5.0.40500"
+    assert "9.4.2.40100" not in header
+
+
 def test_orchestrator_version_is_the_header(report: versions.FabricVersions) -> None:
     out = _rendered(report)
     header = out.splitlines()[0]
