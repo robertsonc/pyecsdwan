@@ -55,6 +55,9 @@ dev = [
     "mypy~=2.3",
     "ruff~=0.16.4",
     "types-PyYAML~=6.0.12",
+    # `tomllib` is stdlib only from 3.11; the packaging tests read pyproject.toml
+    # and this repo supports 3.10.
+    "tomli~=2.3; python_version < '3.11'",
     "fastapi~=0.141.1",
     "uvicorn~=0.52.4",
 ]

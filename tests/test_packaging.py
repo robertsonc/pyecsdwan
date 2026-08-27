@@ -13,9 +13,13 @@ everything that can be checked without a build, so the loop is short.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
-import tomllib
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # 3.10 has no tomllib; `tomli` is the backport, a dev-only dependency.
+    import tomli as tomllib
 
 from pyecsdwan import specs
 
