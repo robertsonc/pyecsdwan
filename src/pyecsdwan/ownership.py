@@ -53,6 +53,16 @@ KIND_TO_TEMPLATE_SECTIONS: dict[str, tuple[str, ...]] = {
     # name candidate (matches the ECOS path), same UNVERIFIED convention as
     # appliance/deployment above.
     "appliance/zones": ("zones",),
+    # NAT (#32). The pre-seeded bare "appliance/nat" above is left untouched
+    # (Branch NAT, ECOS "nat/maps", may yet claim it): one kind cannot name
+    # the two distinct appliance NAT resources that landed here, which have
+    # different endpoints. Section name for the policy-map table CONFIRMED
+    # real in the sense that it matches the ECOS path itself, "natMaps".
+    "appliance/nat-maps": ("natMaps",),
+    # UNVERIFIED — no live Default Template Group with a NAT-pool section
+    # selected was available this session; "natPools" is the natural
+    # candidate (matches the ECOS path), same convention as the entries above.
+    "appliance/nat-pools": ("natPools",),
 }
 
 
