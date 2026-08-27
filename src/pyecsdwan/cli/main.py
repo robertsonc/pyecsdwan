@@ -29,6 +29,7 @@ from rich.table import Table
 from rich.text import Text
 
 from pyecsdwan import config, runtime, specs, txn
+from pyecsdwan import registry as registry_mod
 from pyecsdwan.candidate import CandidateCorruptError, CandidateStore
 from pyecsdwan.cli import render
 from pyecsdwan.client import OrchApiError
@@ -46,8 +47,10 @@ app = typer.Typer(
 )
 show_app = typer.Typer(help="Read-only views of fabric and CLI state.")
 cache_app = typer.Typer(help="Resolver cache maintenance.")
+plugin_app = typer.Typer(help="Resource-plugin tooling (promotion checklist).")
 app.add_typer(show_app, name="show")
 app.add_typer(cache_app, name="cache")
+app.add_typer(plugin_app, name="plugin")
 
 _API_METHODS = ("get", "post", "put", "delete")
 
@@ -959,6 +962,124 @@ def cache_refresh(ctx: typer.Context) -> None:
     rt_ctx, _registry, _settings = _bootstrap(state)
     rt_ctx.resolver.refresh()
     console.print(Text("ok: resolver cache cleared (repopulates on next use)", style="green"))
+
+
+# -- plugin promotion (#29) ---------------------------------------------------
+
+
+def _promotion_sample_ref(
+    rt_ctx: Ctx, registry: Registry, resource: Resource, name: str | None, appliance: str | None
+) -> Ref:
+    """Ref to run the checklist against: the operator's, or the first the
+    resource enumerates on this Orchestrator."""
+    if name is not None:
+        return _make_ref(registry, resource.kind, name, appliance)
+    refs = list(resource.list_refs(rt_ctx))
+    if not refs:
+        _fail(
+            f"{resource.kind} enumerates no instances on this Orchestrator; "
+            f"name one with --name (and --appliance for appliance scope)"
+        )
+    if appliance is not None:
+        scoped = [r for r in refs if r.appliance == appliance]
+        if not scoped:
+            _fail(f"{resource.kind} enumerates no instances on appliance {appliance!r}")
+        return scoped[0]
+    return refs[0]
+
+
+def _check_table(kind: str, checks: list[registry_mod.Check]) -> Table:
+    styles = {
+        registry_mod.CheckStatus.OK: "green",
+        registry_mod.CheckStatus.FAIL: "bold red",
+        registry_mod.CheckStatus.MANUAL: "yellow",
+    }
+    table = Table(title=f"promotion checklist: {kind}")
+    table.add_column("box")
+    table.add_column("result")
+    table.add_column("detail", overflow="fold")
+    for check in checks:
+        table.add_row(
+            check.name,
+            Text(check.status.value, style=styles[check.status]),
+            check.detail,
+        )
+    return table
+
+
+@plugin_app.command("promote")
+def plugin_promote(
+    ctx: typer.Context,
+    kind: Annotated[str, typer.Argument(help="Resource kind to run the checklist for.")],
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help="Instance to sample; default: the first the kind enumerates."),
+    ] = None,
+    appliance: Annotated[
+        str | None, typer.Option("--appliance", help="Appliance for an appliance-scope kind.")
+    ] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+) -> None:
+    """Run the Tier-1 -> Tier-2 promotion checklist for KIND against this fabric.
+
+    Same checks ``make check`` runs (``pyecsdwan.registry``), pointed at a real
+    Orchestrator instead of the bundled mock — worth running before you promote
+    a plugin, because your fabric's state exercises shapes the fixtures do not.
+
+    It reads only: one ``fetch()`` for the sampled instance, no writes. The tier
+    itself is a source-level declaration a human reviews, so this command never
+    edits your plugin — when every machine-checkable box is green it prints the
+    one-line change to make and the boxes still left to human judgment.
+    """
+    state = _state(ctx)
+    rt_ctx, registry, _settings = _bootstrap(state)
+    resource = _resource_for(registry, kind)
+    ref = _promotion_sample_ref(rt_ctx, registry, resource, name, appliance)
+
+    checks = [registry_mod.check_untransactional_normalize(resource)]
+    if resource.tier >= Tier.CURATED:
+        raw = resource.fetch(rt_ctx, ref)
+        checks.extend(registry_mod.check_idempotent(resource, ref, raw, rt_ctx))
+    checks.extend(registry_mod.manual_checks())
+    failed = [c for c in checks if c.failed]
+
+    if as_json:
+        console.print_json(
+            json.dumps(
+                {
+                    "kind": kind,
+                    "tier": int(resource.tier),
+                    "ref": str(ref),
+                    "green": not failed,
+                    "checks": [dataclasses.asdict(c) for c in checks],
+                },
+                default=str,
+            )
+        )
+    else:
+        console.print(_check_table(kind, checks))
+        console.print(Text(f"sampled {ref}", style="dim"))
+
+    if failed:
+        if not as_json:
+            err_console.print(
+                Text(f"{len(failed)} checklist box(es) failed — not ready for Tier 2", style="red")
+            )
+        raise typer.Exit(1)
+    if as_json:
+        return
+    if resource.tier >= Tier.CURATED:
+        console.print(Text(f"ok: {kind} still meets its Tier-2 obligations", style="green"))
+    else:
+        console.print(
+            Text(
+                f"ok: every machine-checkable box is green for {kind}. Confirm the "
+                f"manual boxes above, then set `tier = Tier.CURATED` on the "
+                f"resource class and re-run `make check` — the tier is a reviewed "
+                f"source declaration, so this command will not flip it for you.",
+                style="green",
+            )
+        )
 
 
 # -- entrypoint ---------------------------------------------------------------
