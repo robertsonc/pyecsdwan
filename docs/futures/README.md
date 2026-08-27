@@ -366,3 +366,24 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   `--broadcast` is the opt-in "run this read across these appliances and
   confirm it ran" form. If a later Orchestrator release exposes broadcast
   output retrieval, `broadcast_read_command` is the one function that changes.
+- **`show run`'s security section derives its segment pairs instead of listing
+  them, and reads deployment through the appliance proxy rather than the
+  Orchestrator-scope endpoint** (issue #55). Two endpoint findings, both
+  recorded here because a later Orchestrator release could make either moot:
+  (1) `GET /vrf/config/securityPolicies` *requires* a `map` query parameter
+  (`<srcSegment>_<dstSegment>`), so there is no "list every orchestrated
+  policy" read. `reports/fabric.py` therefore derives the pairs from
+  `resources/zones.py`'s `segment_zone_map()` view (`GET /zones/vrfZonesMap`)
+  and bounds the cross product at `MAX_POLICY_READS`, falling back to
+  intra-segment pairs — stated in-band — past that. The vendored spec does
+  carry `GET /vrf/config/securityPoliciesSegments` ("Gets all security maps",
+  an array of `<src>_<dst>` strings), which would replace the derivation with
+  one call; it is not implemented by `mock/server.py`, so adopting it needs a
+  mock endpoint (and ideally a live capture) first. (2) The spec's
+  Orchestrator-scope `GET /deployment` requires **both** `nePk` and `cached`
+  (an omitted `cached` is a 422, exactly as with
+  `/appliancesSoftwareVersions`) and is likewise absent from the mock;
+  `reports/fabric.py` reads the same object over the appliance proxy path
+  `resources/deployment.py` already owns. If the orchestrator-scope form is
+  ever preferred (it is one call per appliance either way), the change is
+  confined to `fabric.appliance_deployment`.
