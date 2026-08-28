@@ -33,7 +33,7 @@ from typer.core import TyperGroup
 from pyecsdwan import config, locking, runtime, specs, txn
 from pyecsdwan import registry as registry_mod
 from pyecsdwan.candidate import CandidateCorruptError, CandidateStore
-from pyecsdwan.cli import render
+from pyecsdwan.cli import fanout, render
 from pyecsdwan.client import OrchApiError
 from pyecsdwan.contract import Ctx, Ref, Resource, Reversibility, Scope, Tier
 from pyecsdwan.journal import TxnJournal, TxnState, list_txns
@@ -240,6 +240,28 @@ def _resolve_kind(registry: Registry, token: str, appliance: str | None) -> str:
         except UnknownKind:
             known = ", ".join(sorted(set(registry.cli_names()))) or "(none)"
             _fail(f"unknown resource kind {token!r}; known kinds: {known}")
+
+
+_YES_OPTION = typer.Option(
+    "--yes", "-y", help="Skip the fan-out cost prompt (grammar.md Decision 7)."
+)
+
+
+def _gate_fanout(rt_ctx: Ctx, assume_yes: bool, calls_each: int = 1) -> None:
+    """Ask, or warn, before a command that calls every appliance.
+
+    Declining is not a failure: the operator was asked and said no, so it
+    exits 0 with a line saying nothing ran. Exiting non-zero would make a
+    deliberate "not now" indistinguishable from the command breaking.
+    """
+    try:
+        fanout.confirm(
+            rt_ctx, console=console, err_console=err_console, assume_yes=assume_yes,
+            calls_each=calls_each,
+        )
+    except fanout.FanoutDeclined:
+        console.print(Text("cancelled: nothing was queried", style="dim"))
+        raise typer.Exit(0) from None
 
 
 def _resource_for(registry: Registry, token: str, appliance: str | None = None) -> Resource:
@@ -786,6 +808,7 @@ def show_version(
         typer.Option("--timeout", help="Overall deadline (seconds) for the appliance fan-out."),
     ] = None,
     as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    assume_yes: Annotated[bool, _YES_OPTION] = False,
 ) -> None:
     """Orchestrator version, then every appliance's active and backup partitions.
 
@@ -793,6 +816,10 @@ def show_version(
     config, the journal, or the transaction engine.
     """
     rt_ctx, _registry, _settings = _bootstrap(_state(ctx))
+    if no_cache:
+        # The cached read is one Orchestrator call; --no-cache is what turns
+        # this into a per-appliance fan-out, so only that spelling is gated.
+        _gate_fanout(rt_ctx, assume_yes)
     report = versions.collect(rt_ctx, cached=not no_cache, timeout=timeout)
     if as_json:
         console.print_json(json.dumps(versions.to_payload(report), default=str))
@@ -1291,6 +1318,7 @@ def show_flows_summary(
     timeout: Annotated[float | None, _TIMEOUT_OPTION] = None,
     no_cache: Annotated[bool, _NO_CACHE_OPTION] = False,
     as_json: Annotated[bool, _JSON_OPTION] = False,
+    assume_yes: Annotated[bool, _YES_OPTION] = False,
 ) -> None:
     """Active flow counts per appliance per overlay, with row and column totals.
 
@@ -1299,6 +1327,10 @@ def show_flows_summary(
     per-overlay breakdown -- see ``pyecsdwan.reports.flows``.
     """
     rt_ctx, _registry, _settings = _bootstrap(_state(ctx))
+    if not appliance:
+        # --appliance narrows the fan-out to what the operator named, so the
+        # cost they are being warned about is one they already bounded.
+        _gate_fanout(rt_ctx, assume_yes)
     try:
         summary = flows_report.build_flows_summary(
             rt_ctx,
@@ -1329,6 +1361,7 @@ def show_flow(
     timeout: Annotated[float | None, _TIMEOUT_OPTION] = None,
     no_cache: Annotated[bool, _NO_CACHE_OPTION] = False,
     as_json: Annotated[bool, _JSON_OPTION] = False,
+    assume_yes: Annotated[bool, _YES_OPTION] = False,
 ) -> None:
     """Every flow touching an address, fabric-wide, deduped across appliances.
 
@@ -1337,6 +1370,8 @@ def show_flow(
     and filtering here. Read-only.
     """
     rt_ctx, _registry, _settings = _bootstrap(_state(ctx))
+    if not appliance:
+        _gate_fanout(rt_ctx, assume_yes)
     try:
         search = flows_report.find_flows(
             rt_ctx,
@@ -2052,6 +2087,7 @@ def show_configuration_fabric(
         typer.Option("--timeout", help="Overall deadline (seconds) for the deployment fan-out."),
     ] = None,
     as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    assume_yes: Annotated[bool, _YES_OPTION] = False,
 ) -> None:
     """The fabric's Orchestrator-managed configuration, by section.
 
@@ -2070,12 +2106,17 @@ def show_configuration_fabric(
     are part of the answer, not a failure to produce one.
     """
     try:
-        fabric.resolve_sections(section)
+        sections = fabric.resolve_sections(section)
     except fabric.UnknownSection as exc:
-        # Names the valid sections; `--section overlay` must not be answered
+        # Names the valid sections; an unknown section must not be answered
         # with an empty report.
         _fail(str(exc))
     rt_ctx, _registry, _settings = _bootstrap(_state(ctx))
+    if "deployment" in sections:
+        # Only the deployment section reads every appliance; the rest are
+        # Orchestrator-level GETs, so scoping to one of those is not a fan-out
+        # and must not be gated as though it were.
+        _gate_fanout(rt_ctx, assume_yes)
     report = fabric.collect(rt_ctx, section=section, timeout=timeout)
     if as_json:
         console.print_json(json.dumps(fabric.to_payload(report), default=str))

@@ -19,6 +19,7 @@ unlinked task has not been started.
 | T9 | **Remove** the old forms (no aliases — Q3), including #77's legacy `appliance/<kind>` acceptance | T8 | **Done** — parametrized absence test per row on both surfaces; the registry-key acceptance is withdrawn | #74 |
 | T10 | BGP operational views — **spec** in `specs/002-appliance-operational-views/` | T1 | Source-verified; `routes` reported unsupported (no endpoint exists) | #72 |
 | T11 | Golden UX tests derived from `grammar.md` §7 | T8, T10 | **Partly done** — `tests/test_grammar_parity.py` covers every configuration row on both surfaces; the operational rows wait on T10 | #74 |
+| T13 | Fan-out cost gate (§6, Decision 7) | T8 | **Done** — prompt when a TTY can answer, warn on stderr and proceed when not; count from the resolver cache, duration from observed latency; only the sections that actually fan out are gated | #74 |
 | ~~T12~~ | ~~Removal boundary decided (Q3)~~ | — | **Withdrawn** — no aliases to remove; nothing has shipped | — |
 
 ## Sequencing notes
@@ -39,6 +40,12 @@ unlinked task has not been started.
   was written to close, and on its first run it found a form the shell accepted
   and the scriptable CLI did not. Shell-first is a reasonable order; shipping
   it without the correspondence test would not have been.
+
+* **The fan-out gate is not a safety prompt, and the tests say so.** Every
+  fan-out command here is read-only; what is being guarded is elapsed time.
+  Writing it as an "are you sure" would train the operator to skip it, which is
+  why it stays quiet below ten seconds and why only the `deployment` section of
+  the fabric report is gated — the others are Orchestrator-level GETs.
 
 * **T10 (#72) comes *before* T8/T9 (#74), not after.** This table originally
   had it last, on the reasoning that BGP proves the taxonomy on a real domain.

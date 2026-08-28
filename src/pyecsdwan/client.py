@@ -75,9 +75,15 @@ def _guard_relative_path(path: str) -> None:
         raise ValueError(f"path must not contain '..' segments: {path!r}")
 
 
+#: How many recent calls the latency estimate averages over.
+_LATENCY_WINDOW = 8
+
+
 class OrchClient:
     def __init__(self, settings: Settings, transport: httpx.BaseTransport | None = None):
         self.settings = settings
+        #: Recent call latencies in ms; see `_record_latency`.
+        self._latencies: list[float] = []
         base = settings.orch_url
         if not base.startswith(("http://", "https://")):
             base = f"https://{base}"
@@ -201,6 +207,7 @@ class OrchClient:
                 )
                 continue
             elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+            self._record_latency(elapsed_ms)
             log.debug(
                 "api_call", method=method, path=path,
                 status=resp.status_code, elapsed_ms=elapsed_ms,
@@ -220,6 +227,34 @@ class OrchClient:
         if isinstance(last_error, OrchApiError):
             raise last_error
         raise OrchApiError(method, path, None, str(last_error)) from last_error
+
+    def _record_latency(self, elapsed_ms: float) -> None:
+        """Keep a short window of call latencies.
+
+        Read by the fan-out warning (grammar.md Decision 7), which has to say
+        how long a per-appliance command will take *before* running it. A
+        constant would be wrong on every fabric; this is at least wrong in the
+        direction of the Orchestrator actually in front of the operator.
+
+        Bounded to the last few calls on purpose: an estimate for the fan-out
+        about to start should reflect the link as it is now, not an average
+        dragged around by a slow call from ten minutes ago.
+        """
+        self._latencies.append(elapsed_ms)
+        if len(self._latencies) > _LATENCY_WINDOW:
+            del self._latencies[:-_LATENCY_WINDOW]
+
+    @property
+    def observed_latency_ms(self) -> float | None:
+        """Mean of the recent call latencies, or None before any call.
+
+        None is a real answer and not zero: it means "no basis for an
+        estimate", and a caller that renders it as a duration would be
+        inventing one.
+        """
+        if not self._latencies:
+            return None
+        return sum(self._latencies) / len(self._latencies)
 
     def get(self, path: str, *, params: dict[str, Any] | None = None,
             expected: tuple[int, ...] = (200, 204)) -> Any:

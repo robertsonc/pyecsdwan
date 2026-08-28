@@ -456,11 +456,46 @@ def _show_operational(args: list[str], state: ShellState) -> None:
 # -- operational state -------------------------------------------------------
 
 
+def _take_yes_flag(args: list[str]) -> tuple[list[str], bool]:
+    """Strip ``--yes``/``-y`` (grammar.md §6) from anywhere in the token list."""
+    kept = [a for a in args if a not in ("--yes", "-y")]
+    return kept, len(kept) != len(args)
+
+
+def _gate_fanout(state: ShellState, assume_yes: bool, calls_each: int = 1) -> None:
+    """Ask before a command that calls every appliance (Decision 7).
+
+    Declining returns quietly: the operator was asked and said no, so there is
+    nothing to report except that nothing ran.
+    """
+    from pyecsdwan.cli import fanout
+
+    fanout.confirm(
+        state.ctx,
+        console=state.console,
+        err_console=state.console,
+        assume_yes=assume_yes,
+        calls_each=calls_each,
+    )
+
+
 def _show_fabric_operational(args: list[str], state: ShellState) -> None:
-    """``show fabric <domain> ...`` — live state across every appliance."""
+    """``show fabric <domain> ...`` — live state across every appliance.
+
+    Every domain here is a fan-out by definition of the scope noun, so the
+    cost gate sits at the branch rather than in each leaf.
+    """
+    from pyecsdwan.cli.fanout import FanoutDeclined
+
+    args, assume_yes = _take_yes_flag(args)
     if not args:
         raise Nonterminal("show fabric", list(_FABRIC_DOMAINS))
     head = args[0]
+    try:
+        _gate_fanout(state, assume_yes)
+    except FanoutDeclined:
+        _info(state.console, "cancelled: nothing was queried")
+        return
     if head == "version":
         if args[1:]:
             raise ValueError("usage: show fabric version")
@@ -738,16 +773,27 @@ def _show_fabric_config(args: list[str], state: ShellState) -> None:
     An unknown section names the valid ones and then the usage line, so a
     typo is answered with what to type rather than with an empty report.
     """
+    from pyecsdwan.cli.fanout import FanoutDeclined
     from pyecsdwan.cli.main import render_fabric_config
     from pyecsdwan.reports import fabric
 
+    args, assume_yes = _take_yes_flag(args)
     if len(args) > 1:
         raise ValueError(_SHOW_FABRIC_CONFIG_USAGE)
     section = args[0] if args else None
     try:
-        fabric.resolve_sections(section)
+        sections = fabric.resolve_sections(section)
     except fabric.UnknownSection as exc:
         raise ValueError(f"{exc}\n{_SHOW_FABRIC_CONFIG_USAGE}") from None
+    if "deployment" in sections:
+        # Only the deployment section reads every appliance; the others are
+        # Orchestrator-level GETs, so scoping to one of those is not a fan-out
+        # and must not be gated as though it were.
+        try:
+            _gate_fanout(state, assume_yes)
+        except FanoutDeclined:
+            _info(state.console, "cancelled: nothing was queried")
+            return
     render_fabric_config(state.console, fabric.collect(state.ctx, section=section))
 
 
