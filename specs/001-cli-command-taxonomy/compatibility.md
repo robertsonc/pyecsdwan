@@ -37,7 +37,8 @@ rather than in the constitution's exception register for that reason: this is
 | `show run appliance <name>` | `show configuration appliance <name> --format native` |
 | `show appliance <name> <kind> [<instance>]` | **split by intent** — `show appliance <name> <domain> ...` for state, `show configuration appliance <name> <kind>` for config |
 | `show <kind> [<instance>]` *(orch-scope)* | `show configuration <kind> [<instance>]` |
-| `show appliance <name> appliance/<kind>` | `show appliance <name> <kind>` (#77, shipped) |
+| `show appliance <name> appliance/<kind>` | `show appliance <name> <kind>` — the key is no longer accepted (rule 3, shipped) |
+| `ec-cli set\|delete\|load\|plugin promote appliance/<kind>` | same commands with `<kind>` — the scriptable CLI resolves nouns too (rule 6, shipped) |
 | `show flows summary` | `show fabric flows summary` |
 | `show flow <ip>` | `show fabric flow <ip>` |
 
@@ -69,11 +70,19 @@ ought to work.
 3. **The `#77` legacy `appliance/<kind>` acceptance is withdrawn too.** It
    shipped in #82 as a warned alias under the old plan; #74 removes it and the
    warning with it. Registry keys stay internal, full stop.
-4. **`--format native` inherits the existing allowlist unchanged.** `show run
+4. **Nouns are one rule, not one per surface.** The shell resolved nouns and
+   the scriptable CLI did not, so `banners` worked at the prompt while
+   `ec-cli plugin promote banners` answered "unknown resource kind" — and
+   listed the registry keys. Both surfaces now resolve through
+   `Registry.resolve_cli`, with the same scope rule and the same retry in the
+   other scope; only the unknown-token error differs, and deliberately (the
+   shell lists the position's nouns, since position is scope there; the
+   scriptable CLI lists all of them, since scope is a flag).
+5. **`--format native` inherits the existing allowlist unchanged.** `show run
    appliance` is the one surface reaching an appliance's command interpreter;
    its deny-by-default validator (40 refusal cases) is not relaxed by being
    renamed.
-5. **Documentation carries before/after examples anyway** (#74 asks for them).
+6. **Documentation carries before/after examples anyway** (#74 asks for them).
    Not for compatibility — for anyone reading an older sitrep or issue and
    wondering why the command in it no longer exists.
 

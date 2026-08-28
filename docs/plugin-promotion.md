@@ -157,8 +157,15 @@ check would fail a broken one.)
 ## Running the checklist against your own fabric
 
 ```
-ec-cli plugin promote <kind> [--name INSTANCE] [--appliance NAME] [--json]
+ec-cli plugin promote <noun> [--name INSTANCE] [--appliance NAME] [--json]
 ```
+
+`<noun>` is what an operator types — `banners`, not `appliance/banners`;
+registry keys are internal and not accepted (#74). Where a noun names two
+different objects, `--appliance` picks: `plugin promote zones` checks the
+Orchestrator's zone table, `plugin promote zones --appliance BR1-EC` checks the
+appliance's. The `--json` output reports the *resolved* kind, so it is never
+ambiguous about which one was checked.
 
 Same checks, pointed at a real Orchestrator rather than the mock — worth
 running before promoting, because your fabric's state exercises shapes the

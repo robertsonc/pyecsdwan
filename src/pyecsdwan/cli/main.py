@@ -163,20 +163,53 @@ def _coerce_value(raw: str) -> Any:
     return raw
 
 
-def _resource_for(registry: Registry, kind: str) -> Resource:
-    if kind not in registry:
-        known = ", ".join(registry.kinds()) or "(none)"
-        _fail(f"unknown resource kind {kind!r}; known kinds: {known}")
-    return registry.get(kind)
+def _resolve_kind(registry: Registry, token: str, appliance: str | None) -> str:
+    """User-facing noun -> internal registry kind (issue #77), as the shell does it.
+
+    The shell learned this and the scriptable CLI did not, so `banners` worked
+    at the prompt and `plugin promote banners` answered "unknown resource
+    kind" — then listed the registry keys, which is the leak #77 is about.
+    Principle IV is one grammar across interfaces, so both surfaces resolve a
+    token the same way, including the scope rule: naming an appliance selects
+    appliance scope, naming none selects the Orchestrator. A token that does
+    not resolve there is retried in the other scope so the caller can say
+    "that is appliance-scope, pass --appliance" — or its mirror — rather than
+    "unknown kind".
+
+    The unknown-token error lists *every* noun, unlike the shell's, which lists
+    the position's. Here scope is a flag rather than a position, so both scopes
+    are reachable without moving the token, and narrowing the list would hide
+    the noun the operator meant behind a flag they have not typed yet.
+    """
+    scope = Scope.APPLIANCE if appliance is not None else Scope.ORCHESTRATOR
+    other = Scope.ORCHESTRATOR if scope is Scope.APPLIANCE else Scope.APPLIANCE
+    try:
+        return registry.resolve_cli(token, scope)
+    except UnknownKind:
+        try:
+            return registry.resolve_cli(token, other)
+        except UnknownKind:
+            known = ", ".join(sorted(set(registry.cli_names()))) or "(none)"
+            _fail(f"unknown resource kind {token!r}; known kinds: {known}")
 
 
-def _make_ref(registry: Registry, kind: str, name: str, appliance: str | None) -> Ref:
-    resource = _resource_for(registry, kind)
+def _resource_for(registry: Registry, token: str, appliance: str | None = None) -> Resource:
+    return registry.get(_resolve_kind(registry, token, appliance))
+
+
+def _validated_ref(registry: Registry, kind: str, name: str, appliance: str | None) -> Ref:
+    """Scope-check an already-resolved kind and build the ref."""
+    resource = registry.get(kind)
+    noun = registry.cli_name(kind)
     if resource.scope is Scope.APPLIANCE and appliance is None:
-        _fail(f"kind {kind!r} is appliance-scoped; pass --appliance NAME")
+        _fail(f"{noun} is appliance-scoped; pass --appliance NAME")
     if resource.scope is Scope.ORCHESTRATOR and appliance is not None:
-        _fail(f"kind {kind!r} is orchestrator-scoped; --appliance does not apply")
+        _fail(f"{noun} is orchestrator-scoped; --appliance does not apply")
     return Ref(kind=kind, name=name, appliance=appliance)
+
+
+def _make_ref(registry: Registry, token: str, name: str, appliance: str | None) -> Ref:
+    return _validated_ref(registry, _resolve_kind(registry, token, appliance), name, appliance)
 
 
 # -- global callback ----------------------------------------------------------
@@ -321,7 +354,7 @@ def load(
         # strict subset of the resource's known top-level sections so the
         # operator isn't surprised by a silent wipe (they still see it in
         # `show | compare`, but a heads-up here is cheap).
-        resource = _resource_for(registry, kind)
+        resource = registry.get(ref.kind)
         try:
             template = resource.normalize(None)
         except Exception:  # noqa: BLE001 - a normalize() that needs real state just skips the hint
@@ -1411,20 +1444,25 @@ def _promotion_sample_ref(
     rt_ctx: Ctx, registry: Registry, resource: Resource, name: str | None, appliance: str | None
 ) -> Ref:
     """Ref to run the checklist against: the operator's, or the first the
-    resource enumerates on this Orchestrator."""
+    resource enumerates in the operator's scope.
+
+    Scoped through :func:`pyecsdwan.registry.scoped_instances` so this agrees
+    with the shell about what ``--appliance`` selects (#76). It also decides
+    which instance the checklist samples, so "the first one" has to be a
+    stable choice: ``scoped_instances`` sorts by name, where the raw
+    ``list_refs()`` order was whatever the resource happened to build.
+    """
     if name is not None:
-        return _make_ref(registry, resource.kind, name, appliance)
-    refs = list(resource.list_refs(rt_ctx))
+        return _validated_ref(registry, resource.kind, name, appliance)
+    refs = registry_mod.scoped_instances(resource, rt_ctx, appliance)
     if not refs:
+        noun = registry.cli_name(resource.kind)
+        if appliance is not None:
+            _fail(f"{noun} enumerates no instances on appliance {appliance!r}")
         _fail(
-            f"{resource.kind} enumerates no instances on this Orchestrator; "
+            f"{noun} enumerates no instances on this Orchestrator; "
             f"name one with --name (and --appliance for appliance scope)"
         )
-    if appliance is not None:
-        scoped = [r for r in refs if r.appliance == appliance]
-        if not scoped:
-            _fail(f"{resource.kind} enumerates no instances on appliance {appliance!r}")
-        return scoped[0]
     return refs[0]
 
 
@@ -1473,7 +1511,12 @@ def plugin_promote(
     """
     state = _state(ctx)
     rt_ctx, registry, _settings = _bootstrap(state)
-    resource = _resource_for(registry, kind)
+    resource = _resource_for(registry, kind, appliance)
+    # What was typed is not necessarily what was checked: `zones` names two
+    # different objects and --appliance picks between them. Reporting the token
+    # back would label an `appliance/zones` result `zones`. Machine output gets
+    # the resolved kind (stable, unambiguous); prose gets the noun (#77).
+    kind, noun = resource.kind, registry.cli_name(resource.kind)
     curated = resource.tier >= Tier.CURATED
 
     # Only the Tier-2 boxes need a sample instance. An un-curated kind is
@@ -1509,7 +1552,7 @@ def plugin_promote(
             )
         )
     else:
-        console.print(_check_table(kind, checks))
+        console.print(_check_table(noun, checks))
         if ref is not None:
             console.print(Text(f"sampled {ref}", style="dim"))
 
@@ -1521,7 +1564,7 @@ def plugin_promote(
         raise typer.Exit(1)
     if curated:
         if not as_json:
-            console.print(Text(f"ok: {kind} still meets its Tier-2 obligations", style="green"))
+            console.print(Text(f"ok: {noun} still meets its Tier-2 obligations", style="green"))
         return
     # An un-curated kind reaching here has passed exactly one box: "normalize()
     # refuses". The Tier-2 boxes were not evaluated and *cannot* be while
@@ -1532,7 +1575,7 @@ def plugin_promote(
         raise typer.Exit(1)
     err_console.print(
         Text(
-            f"{kind} is tier {int(resource.tier)} (generated). It correctly refuses "
+            f"{noun} is tier {int(resource.tier)} (generated). It correctly refuses "
             f"to normalize, and that is the only box this command can evaluate — "
             f"the Tier-2 obligations above were NOT checked, because idempotency "
             f"cannot be proved while normalize() raises NotCurated.\n"

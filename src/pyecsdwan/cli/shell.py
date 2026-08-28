@@ -36,7 +36,7 @@ from rich.table import Table
 from pyecsdwan import __version__, config, journal, locking, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.contract import Ctx, Ref, Resource, Scope
-from pyecsdwan.registry import Registry, UnknownKind
+from pyecsdwan.registry import Registry, UnknownKind, scoped_instances
 from pyecsdwan.reports import versions
 
 if TYPE_CHECKING:
@@ -191,23 +191,28 @@ def _resolve_kind(token: str, appliance: str | None, state: ShellState) -> str:
     `zones` is unambiguous in either position even though it names two
     different objects.
 
-    A token that resolves in neither is retried in appliance scope, so the
-    caller can answer "that is appliance-scope, use `appliance <name> ...`"
-    instead of the much less useful "unknown resource kind".
+    A token that does not resolve in the position's scope is retried in the
+    *other* one, so the caller can answer "that is appliance-scope, use
+    `appliance <name> ...`" — or the mirror image, `bio` named after an
+    appliance (#48) — instead of the much less useful "unknown resource kind".
+    The caller's own scope check then rejects it with that message.
+
+    Both directions matter, and only one of them used to work: until #74
+    withdrew the `appliance/<kind>` alias, an orchestrator noun in appliance
+    position was rescued by the registry-key fallback rather than by this
+    retry, which hid the asymmetry.
     """
     scope = Scope.APPLIANCE if appliance is not None else Scope.ORCHESTRATOR
+    other = Scope.ORCHESTRATOR if scope is Scope.APPLIANCE else Scope.APPLIANCE
     try:
-        resolution = state.registry.resolve_cli(token, scope)
-    except UnknownKind:
-        resolution = state.registry.resolve_cli(token, Scope.APPLIANCE)
-    if resolution.legacy:
-        _warn(
-            state.console,
-            f"{token!r} is an internal registry key; use "
-            f"{state.registry.cli_name(resolution.kind)!r}. "
-            f"The old form still works, and will be removed at a declared boundary.",
-        )
-    return resolution.kind
+        return state.registry.resolve_cli(token, scope)
+    except UnknownKind as unknown_here:
+        try:
+            return state.registry.resolve_cli(token, other)
+        except UnknownKind:
+            # Report the nouns valid where the operator typed, not where the
+            # retry looked: in the shell, position *is* scope.
+            raise unknown_here from None
 
 
 def _parse_ref(args: list[str], state: ShellState, usage: str) -> tuple[Ref, list[str]]:
@@ -618,31 +623,20 @@ def _resolve_instance(
 ) -> tuple[str, str | None]:
     """Pick the instance when the operator gave a kind but no name.
 
-    ``list_refs()`` enumerates the whole fabric. The operator has already named
-    the appliance, so a ref on any *other* appliance is not a candidate — and
-    without that filter an appliance-scoped singleton offered one identical
-    name per appliance and then refused to act on any of them:
+    Scoping itself lives in :func:`pyecsdwan.registry.scoped_instances` — one
+    implementation, shared with completion and with ``plugin promote`` (#76),
+    because three private copies of "filter to the named appliance" is how
+    those surfaces came to disagree about what an instance list even is.
 
-        appliance/banners: name required; instances: global, global, global
-
-    Three names, all the same, none of them wrong, and no indication that
-    ``global`` was the answer. That is issue #76's unscoped discovery
-    surfacing as issue #78's unusable command.
+    What stays here is the shell's half: what to say when the scoped answer is
+    not exactly one instance.
     """
-    refs = list(resource.list_refs(state.ctx))
-    if appliance is not None:
-        refs = [r for r in refs if r.appliance == appliance]
-    # Dedupe by name, keeping first sighting. Safe because appliance-scoped
-    # kinds are filtered to one appliance above, and orchestrator-scoped names
-    # are already unique within their scope.
-    by_name: dict[str, Ref] = {}
-    for ref in refs:
-        by_name.setdefault(ref.name, ref)
+    refs = scoped_instances(resource, state.ctx, appliance)
 
-    if len(by_name) == 1:
-        only = next(iter(by_name.values()))
+    if len(refs) == 1:
+        only = refs[0]
         return only.name, appliance or only.appliance
-    if not by_name:
+    if not refs:
         if appliance is not None:
             # Distinguish "this appliance has none" from "there is no such
             # appliance" (#78). ne_pk_for raises the resolver's own
@@ -652,7 +646,7 @@ def _resolve_instance(
             state.ctx.resolver.ne_pk_for(appliance)
         where = f" on {appliance}" if appliance else ""
         raise ValueError(f"{kind}: no instances found{where}")
-    names = ", ".join(sorted(by_name))
+    names = ", ".join(r.name for r in refs)
     where = f" on {appliance}" if appliance else ""
     raise ValueError(f"{kind}: name required{where}; instances: {names}")
 
@@ -849,6 +843,8 @@ class ShellCompleter(Completer):
                 return self._appliance_names()
             if len(prior) == 3:
                 return self.state.registry.cli_names(Scope.APPLIANCE)
+            if len(prior) == 4:
+                return self._instance_names(prior[3], Scope.APPLIANCE, prior[2])
         if first == "show" and prior[1] == "transactions" and len(prior) == 2:
             return ["pending"]
         # `flows` completes to its one subcommand; `flow` takes a free-form
@@ -865,7 +861,47 @@ class ShellCompleter(Completer):
                 return ["appliance", *fabric.SECTIONS]
             if prior[2] == "appliance":
                 return self._appliance_names()
+        # Last, so the special forms above keep their own completions: the
+        # position after a bare kind noun is an instance name. The specials are
+        # not registered nouns, so _instance_names would decline them anyway.
+        if len(prior) == 2:
+            return self._instance_names(prior[1], Scope.ORCHESTRATOR, None)
         return []
+
+    def _instance_names(self, noun: str, scope: Scope, appliance: str | None) -> list[str]:
+        """Instance names for a kind the operator has already named (#49, #76).
+
+        Completion used to stop at the kind noun, so the only way to learn an
+        instance name was to run the command without one and read the names out
+        of the error message — which for an appliance-scoped singleton listed
+        the same name once per appliance and so named nothing at all (#78).
+
+        Scoped through the same :func:`scoped_instances` the command itself
+        uses, so TAB offers exactly the set the command will accept.
+        """
+        registry = self.state.registry
+        try:
+            resource = registry.get(registry.resolve_cli(noun, scope))
+        except UnknownKind:
+            # Includes an appliance-scoped noun at the bare position: it does
+            # not resolve in Orchestrator scope, and the command would reject
+            # that form anyway, so there is nothing to offer.
+            return []
+        # A kind whose list_refs() reaches the Orchestrator costs one GET per
+        # completion. That is the same call the command itself is about to
+        # make, and completion here is explicit (complete_while_typing=False),
+        # so the operator asked for it.
+        try:
+            refs = scoped_instances(resource, self.state.ctx, appliance)
+        except Exception:  # noqa: BLE001 - see _appliance_names: TAB must never break the prompt
+            # Deliberately local rather than leaning on get_completions'
+            # catch-all, so `_options` stays total for every caller — the
+            # contextual `?` help of #49 reads the same tree. An unreachable
+            # Orchestrator and a resource that cannot address its instances
+            # both land here; the operator gets the real message from the
+            # command, where there is somewhere to print it.
+            return []
+        return [r.name for r in refs]
 
     def _appliance_names(self) -> list[str]:
         try:

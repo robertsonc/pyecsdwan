@@ -495,10 +495,16 @@ def test_promote_rejects_an_unknown_kind(state_home: Any, mock_fabric: str) -> N
 
 
 def test_promote_validates_scope_on_a_named_ref(state_home: Any, mock_fabric: str) -> None:
-    """--name on an appliance-scope kind still needs --appliance."""
-    result = _promote(mock_fabric, "appliance/bgp", "--name", "config")
+    """--name on an appliance-scope kind still needs --appliance.
+
+    Spelled with the noun since #74 withdrew the registry key as a command
+    token; `bgp` resolves here through the other-scope retry, which is what
+    lets the answer be this message rather than "unknown resource kind".
+    """
+    result = _promote(mock_fabric, "bgp", "--name", "config")
     assert result.exit_code == 2
-    assert "appliance-scoped" in result.output
+    assert "bgp is appliance-scoped" in result.output, result.output
+    assert "appliance/bgp" not in result.output, result.output
 
 
 def test_promote_refuses_to_green_light_an_un_curated_stub(
@@ -528,3 +534,78 @@ def test_promote_refuses_to_green_light_an_un_curated_stub(
     names = {c["name"]: c["status"] for c in payload["checks"]}
     assert names["generated-normalize-refuses"] == "pass"
     assert "normalize-idempotent" not in names
+
+
+# -- which instance gets sampled (#76) ----------------------------------------
+#
+# The checklist runs against one ref, so *which* ref is part of the result. The
+# helper that picks it now shares `registry.scoped_instances` with the shell
+# (#76's "common registry/helper contract"), which makes two properties the
+# command never had: the pick is scoped the way `--appliance` says, and it is
+# the same pick on every run.
+
+
+def test_promote_samples_an_appliance_scoped_kind_without_an_appliance(
+    state_home: Any, mock_fabric: str
+) -> None:
+    """Fabric-wide enumeration of a per-appliance singleton is not ambiguity.
+
+    Every appliance holds one `banners` object named `global`. Treating the
+    bare name as the selector makes those look like one address matching many
+    instances, and the command refuses a kind it can perfectly well sample.
+    """
+    result = _promote(mock_fabric, "banners", "--json")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["ref"] is not None
+    assert payload["ref"].startswith("appliance/banners:"), payload["ref"]
+    assert payload["green"] is True
+
+
+def test_promote_samples_the_appliance_it_was_given(
+    state_home: Any, mock_fabric: str
+) -> None:
+    result = _promote(mock_fabric, "banners", "--appliance", "BR2-EC", "--json")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["ref"] == "appliance/banners:BR2-EC:global"
+
+
+def test_promote_reports_an_appliance_that_holds_nothing_separately(
+    state_home: Any, mock_fabric: str
+) -> None:
+    """"No instances on BR2-EC" and "no instances anywhere" are different
+    answers, and the fabric-wide message tells the operator to pass
+    --appliance, which is useless advice when they already did."""
+    result = _promote(mock_fabric, "banners", "--appliance", "no-such-appliance")
+    assert result.exit_code == 2
+    assert "no-such-appliance" in result.output
+
+
+def test_promote_samples_the_same_instance_every_run(
+    state_home: Any, mock_fabric: str
+) -> None:
+    """A checklist whose sample moves between runs reports on a different
+    object each time, and a box that fails on one appliance is a coin toss."""
+    refs = {
+        json.loads(_promote(mock_fabric, "banners", "--json").stdout)["ref"]
+        for _ in range(3)
+    }
+    assert len(refs) == 1, refs
+
+
+def test_promote_resolves_a_scope_collision_the_way_the_flag_says(
+    state_home: Any, mock_fabric: str
+) -> None:
+    """`zones` names two different objects; --appliance is what picks.
+
+    Resolving the noun without consulting --appliance lands on the
+    Orchestrator's `zones`, whose refs carry no appliance — so the scoped
+    sample comes back empty and the command refuses a kind it could have
+    sampled. Wrong object, and an error that blames the fabric for it.
+    """
+    result = _promote(mock_fabric, "zones", "--appliance", "BR1-EC", "--json")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["kind"] == "appliance/zones"
+    orch = _promote(mock_fabric, "zones", "--json")
+    assert orch.exit_code == 0, orch.output
+    assert json.loads(orch.stdout)["kind"] == "zones"

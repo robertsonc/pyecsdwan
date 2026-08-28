@@ -74,3 +74,55 @@ with HostLock({host!r}, {scope!r}, timeout=10.0):
         if proc.poll() is None:
             proc.kill()
         proc.wait(timeout=10)
+
+
+@pytest.fixture
+def wide_fabric():
+    """Grow a mock fabric past the three seeded appliances (issue #76).
+
+    #76 reports the bug at six appliances::
+
+        appliance/nat-maps: name required; instances: global, global, global,
+                                                      global, global, global
+
+    Three is enough to *have* the bug but not enough to show it at the scale
+    that made it unusable, and the seeded fabric is three. Seventy test files
+    reference that fabric and several assert its size, so this grows it per
+    test rather than moving the seed: a changed count there would surface as
+    dozens of unrelated failures, which is exactly where a real regression
+    hides in the noise.
+
+    ``MockState.appliances`` is a plain list field, so appending is all it
+    takes. Returns the names added. Call before anything populates the
+    resolver cache, or refresh it afterwards.
+    """
+
+    def _grow(state, total: int = 6, seed_ecos: dict | None = None):
+        added = []
+        # Seeded nePks are odd (1.NE, 3.NE, 5.NE); keep the pattern going so a
+        # generated nePk can never collide with a hand-written fixture's.
+        next_pk = max(int(a["nePk"].split(".")[0]) for a in state.appliances) + 2
+        branch = sum(1 for a in state.appliances if a["hostName"].startswith("BR"))
+        while len(state.appliances) < total:
+            branch += 1
+            ne_pk, name = f"{next_pk}.NE", f"BR{branch}-EC"
+            state.appliances.append(
+                {
+                    "nePk": ne_pk,
+                    "id": ne_pk,
+                    "hostName": name,
+                    "site": f"Branch-{branch}",
+                    "model": "EC-S",
+                    "state": 1,
+                    "reachabilityChannel": 2,
+                    "hasUnsavedChanges": False,
+                    "rebootRequired": False,
+                }
+            )
+            if seed_ecos:
+                state.appliance_ecos.setdefault(ne_pk, {}).update(seed_ecos)
+            added.append(name)
+            next_pk += 2
+        return added
+
+    return _grow
