@@ -489,7 +489,11 @@ def commit(
         bool,
         typer.Option(
             "--allow-untransactional",
-            help="Allow tier-0/1 resources inside a commit-confirm window.",
+            help=(
+                "Allow sub-curated resources inside a commit-confirm window. "
+                "No shipped tier reaches this: a Tier-1 stub's normalize() "
+                "raises first, so the guard is belt-and-braces (#68)."
+            ),
         ),
     ] = False,
     rebase: Annotated[

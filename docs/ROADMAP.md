@@ -184,12 +184,18 @@ CI on every push and pull request, not only locally.
 | Tier | What | In transactions? |
 |---|---|---|
 | **0** raw | `ec-cli api get\|post\|put\|delete <path>` — any endpoint, today | never; audit-journaled, no rollback |
-| **1** generated | spec-ingested pydantic models + plugin stub | plain commit; confirm only with `--allow-untransactional` |
+| **1** generated | spec-ingested pydantic models + plugin stub | never — `normalize()` raises `NotCurated`, so a stub cannot be planned (#68) |
 | **2** curated | real `normalize()`, true reversibility class, ownership detection | full commit-confirm |
 
 So *anything and everything* is reachable now via Tier 0; curated plugins
 (Tier 2) grow coverage against a stable contract, and the Tier-1 pipeline
 (Epic below) generates stubs for the long tail.
+
+Tier 1 is **developer scaffolding, not operator coverage**: a stub is where
+curation starts, not something an operator can commit through. This table said
+otherwise until #68, contradicting both the code and
+`docs/plugin-promotion.md`; `tests/test_tier_claims.py` now derives the claim
+from the registry so it cannot drift again.
 
 ## Epics
 
