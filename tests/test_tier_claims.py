@@ -39,6 +39,10 @@ pytest.importorskip("pyecsdwan.mock.server")
 
 from pyecsdwan.mock.server import MockState, run_in_thread
 
+#: Rich's help renderer styles flag names, splitting them across escape
+#: sequences. Stripped before matching — see `test_the_flag_help_does_not_overpromise`.
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
 REPO = Path(__file__).resolve().parents[1]
 README = REPO / "README.md"
 ROADMAP = REPO / "docs" / "ROADMAP.md"
@@ -181,11 +185,30 @@ def test_the_flag_help_does_not_overpromise() -> None:
 
     from pyecsdwan.cli.main import app
 
-    # Rich truncates the options box to the terminal width, and the default is
-    # narrow enough to cut the flag out entirely — the first version of this
-    # test failed on a help text that was perfectly correct.
+    # Two ways Rich's help renderer defeats a naive substring search, both of
+    # which this test hit for real:
+    #
+    # * it truncates the options box to the terminal width, and the default is
+    #   narrow enough to cut the flag out entirely;
+    # * it *colourizes the flag name*, emitting `-`, `-allow` and
+    #   `-untransactional` as three separately-styled spans, so the literal
+    #   "--allow-untransactional" never appears in the output.
+    #
+    # The second one passed locally and failed in CI, because Rich only
+    # colourizes when it thinks it has a terminal. Stripping the escapes is
+    # environment-independent; setting NO_COLOR would only work for as long as
+    # Rich keeps honouring it.
     result = CliRunner(env={"COLUMNS": "200"}).invoke(app, ["commit", "--help"])
     assert result.exit_code == 0, result.output
-    flat = " ".join(result.output.split())
+    flat = " ".join(_ANSI.sub("", result.output).split())
     assert "--allow-untransactional" in flat, flat
     assert "normalize() raises first" in flat, flat
+
+
+def test_the_ansi_stripper_actually_strips() -> None:
+    """Guards the guard. A stripper that silently did nothing would make the
+    assertions above pass or fail on whether Rich felt like using colour —
+    which is exactly the flakiness it exists to remove."""
+    coloured = "\x1b[1;36m-\x1b[0m\x1b[1;36m-allow\x1b[0m\x1b[1;36m-untransactional\x1b[0m"
+    assert "--allow-untransactional" not in coloured
+    assert _ANSI.sub("", coloured) == "--allow-untransactional"
