@@ -33,7 +33,7 @@ from typer.core import TyperGroup
 from pyecsdwan import config, locking, runtime, specs, txn
 from pyecsdwan import registry as registry_mod
 from pyecsdwan.candidate import CandidateCorruptError, CandidateStore
-from pyecsdwan.cli import fanout, render
+from pyecsdwan.cli import fanout, outcomes, render
 from pyecsdwan.cli.outcomes import Outcome
 from pyecsdwan.client import OrchApiError
 from pyecsdwan.contract import Ctx, Ref, Resource, Reversibility, Scope, Tier
@@ -2148,12 +2148,22 @@ def _bgp_status(result: Any, view: str | None, peer: str | None) -> Outcome:
     Computed once and used for both the exit code and the JSON `status`, so a
     script branching on either gets the same answer — two derivations is how
     they come to disagree.
+
+    Ordered most-specific first, because more than one can hold at once and
+    only the most specific is worth acting on: a cached response that is also
+    incomplete is `partial`, since the incompleteness is the problem and the
+    staleness is what the operator already asked for with `--stale-ok`.
     """
     if view == "neighbors" and peer is not None:
         if not any(n.peer_ip == peer for n in result.neighbors):
             return Outcome.NOT_FOUND
     if not result.rows_match_count:
         return Outcome.PARTIAL
+    if result.cached:
+        # Exit 0: cached data is served only under `--stale-ok`, so this is
+        # honouring what was asked for, not degrading it (Decision 7). The
+        # status still says so, and the rendering still annotates it.
+        return Outcome.STALE
     return Outcome.OK
 
 
@@ -2427,10 +2437,16 @@ def main() -> None:
     ) as exc:
         if _DEBUG:
             raise
+        # One classifier, shared with the shell, so the same failure exits with
+        # the same code on both surfaces (grammar.md §5, R7). Everything here
+        # used to be exit 2, which made "permission denied", "appliance
+        # unreachable" and "you typed it wrong" indistinguishable to a script.
+        outcome = outcomes.classify(exc)
         message = str(exc.args[0]) if exc.args else str(exc)
-        err_console.print(Text(f"error: {message}", style="bold red"))
+        style = "yellow" if outcome is outcomes.Outcome.UNSUPPORTED else "bold red"
+        err_console.print(Text(f"{outcome.value}: {message}", style=style))
         err_console.print(Text("(re-run with --debug for details)", style="dim"))
-        raise SystemExit(2) from None
+        raise SystemExit(outcome.exit_code) from None
 
 
 if __name__ == "__main__":
