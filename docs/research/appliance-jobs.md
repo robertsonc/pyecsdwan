@@ -60,6 +60,12 @@ returns the same set plus `platform`, `haPeer`, `preconfigStatus`;
 > Which terminal shapes the poller treats as success, failure or unknown — and
 > the evidence behind each — is `docs/research/job-shapes.md` (#64).
 
+> Retries: `pyecsdwan.retry` holds the per-endpoint policy (#67). GET is not
+> idempotent on this API — the specs describe GETs summarised "Clear idle
+> time", "Generate the Sys Dump file on the appliance" and "Delete
+> specific/all segment BGP state" — so replay is opt-in, and a classified
+> mutating GET is never replayed whatever the caller asks for.
+
 Poll: `GET /action/status?key={key}`. Record fields (also used by `GET /action` audit
 listing): `id`, `user`, `ipAddress`, `nepk` (lowercase!), `name`, `description`,
 `taskStatus` (str), `startTime`/`endTime`/`queuedTime` (ms epoch; endTime 0 while

@@ -28,6 +28,7 @@ import httpx
 import structlog
 
 from pyecsdwan.config import Settings
+from pyecsdwan.retry import Retry, effective_policy
 
 log = structlog.get_logger("pyecsdwan.client")
 
@@ -182,16 +183,35 @@ class OrchClient:
         json_body: Any = None,
         params: dict[str, Any] | None = None,
         expected: tuple[int, ...] = (200, 201, 204),
+        retry_policy: Retry = Retry.NEVER,
+        scope: str = "orchestrator",
     ) -> Any:
         """One API call; returns parsed JSON (or None for empty bodies).
 
-        GETs retry on connection errors / 5xx with exponential backoff.
-        Writes never blindly retry — a lost response to a landed POST would
+        Retries are **opt-in and vetoable** (#67). This used to retry every
+        GET on the usual assumption that GET is idempotent; it is not on this
+        API, whose own spec describes GETs that clear idle time, generate a sys
+        dump, log out a session and delete segment BGP state. `retry.py` holds
+        the classification and the evidence for each entry.
+
+        ``retry_policy`` defaults to NEVER so a caller that has not thought
+        about it gets one attempt: the failure mode of a missing retry is a
+        reported error the caller already handles, and the failure mode of an
+        unwanted one is a mutation applied twice. :func:`retry.effective_policy`
+        can still override BOUNDED down to NEVER, never the other way.
+
+        Writes never retry at all — a lost response to a landed POST would
         double-apply; callers re-fetch and re-diff instead.
         """
         method = method.upper()
         _guard_relative_path(path)
-        attempts = self.settings.max_retries + 1 if method == "GET" else 1
+        policy, reason = effective_policy(method, path, retry_policy, scope=scope)
+        attempts = self.settings.max_retries + 1 if policy is Retry.BOUNDED else 1
+        if policy is Retry.NEVER and retry_policy is Retry.BOUNDED:
+            # The veto fired: a caller asked to replay something the spec says
+            # mutates. Logged rather than silent — it is the interesting case,
+            # and the reason carries the spec's own words.
+            log.debug("retry_vetoed", method=method, path=path, reason=reason)
         last_error: Exception | None = None
         for attempt in range(attempts):
             if attempt:
@@ -219,7 +239,11 @@ class OrchClient:
                     return resp.json()
                 except ValueError:
                     return resp.text
-            if method == "GET" and resp.status_code in _RETRYABLE_STATUS and attempt + 1 < attempts:
+            if (
+                policy is Retry.BOUNDED
+                and resp.status_code in _RETRYABLE_STATUS
+                and attempt + 1 < attempts
+            ):
                 last_error = OrchApiError(method, path, resp.status_code, self._scrub(resp.text))
                 continue
             raise OrchApiError(method, path, resp.status_code, self._scrub(resp.text))
@@ -257,8 +281,19 @@ class OrchClient:
         return sum(self._latencies) / len(self._latencies)
 
     def get(self, path: str, *, params: dict[str, Any] | None = None,
-            expected: tuple[int, ...] = (200, 204)) -> Any:
-        return self.request("GET", path, params=params, expected=expected)
+            expected: tuple[int, ...] = (200, 204),
+            retry_policy: Retry = Retry.BOUNDED) -> Any:
+        """A curated read. Bounded retries by default (#67).
+
+        This is the seam the policy hangs on: everything that reaches a fabric
+        through a registered plugin comes through here, and those GETs are
+        reviewed at promotion. Tier-0 raw passthrough deliberately does *not* —
+        it calls :meth:`request` directly, which defaults to NEVER, so an
+        arbitrary path an operator typed is never replayed.
+        """
+        return self.request(
+            "GET", path, params=params, expected=expected, retry_policy=retry_policy
+        )
 
     def post(self, path: str, json_body: Any = None, *,
              params: dict[str, Any] | None = None,
@@ -284,8 +319,18 @@ class OrchClient:
         *,
         json_body: Any = None,
         expected: tuple[int, ...] = (200, 201, 204),
+        retry_policy: Retry = Retry.BOUNDED,
     ) -> Any:
-        """Call an appliance (ECOS) API through the Orchestrator proxy."""
+        """Call an appliance (ECOS) API through the Orchestrator proxy.
+
+        The retry policy is resolved against the **ECOS** path, not against
+        ``/appliance/rest`` (#67). Every proxied call wears the same transport
+        path, so classifying on it would make the whole appliance API one
+        undifferentiated endpoint — and the two worst read-shaped mutations in
+        the specs, ``GET /bgp/vrfs/{vrfId}/state`` ("Delete specific/all
+        segment BGP state") and ``GET /debugFiles/debugDump/generate``, are
+        both appliance-scope and reachable only through here.
+        """
         validate_ne_pk(ne_pk)
         # The proxy `url` param carries the path *after* rest/json/ with no
         # leading slash (per the SDK: url="securityMaps"); a leading slash
@@ -293,10 +338,14 @@ class OrchClient:
         clean = ecos_path.strip("/")
         if not re.match(r"^[a-zA-Z0-9/_.?=&-]+$", clean):
             raise ValueError(f"invalid ECOS path: {ecos_path!r}")
+        policy, reason = effective_policy(method, clean, retry_policy, scope="appliance")
+        if policy is Retry.NEVER and retry_policy is Retry.BOUNDED:
+            log.debug("retry_vetoed", method=method.upper(), path=clean, reason=reason)
         return self.request(
             method,
             "/appliance/rest",
             json_body=json_body,
             params={"nePk": ne_pk, "url": clean},
             expected=expected,
+            retry_policy=policy,
         )

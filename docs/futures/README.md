@@ -404,7 +404,9 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   brief asked for "the `debug`-style read commands the vendor tool permits",
   but the vendored 9.6 payload examples show the appliance's `debug` namespace
   is not read-only — `DELETE /debug/generic/{}` deletes a module's data, and
-  `GET /oro/debug/closeGrpcConnection` mutates behind a read-shaped verb — and
+  `GET /oro/debug/closeGrpcConnection` mutates behind a read-shaped verb
+  (since #67 that endpoint is in `retry.MUTATING_GETS`, so it is never
+  replayed even if a caller asks) — and
   on ECOS the `debug` CLI verb arms debug logging, which is appliance state
   and a load hazard on a busy box. Deny-by-default therefore refused all of
   them rather than guessing which are inert. If someone enumerates the exact
