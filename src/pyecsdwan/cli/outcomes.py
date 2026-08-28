@@ -27,6 +27,7 @@ which is the failure mode a hand-copied table has.
 from __future__ import annotations
 
 import enum
+from typing import Any
 
 
 class Outcome(enum.Enum):
@@ -100,3 +101,77 @@ class CommandOutcome(Exception):
         self.outcome = outcome
         self.detail = detail
         self.remedy = remedy
+
+
+def classify(exc: BaseException) -> Outcome:
+    """Which outcome a raised exception represents (`grammar.md` §5, R7).
+
+    One table, applied at both dispatch boundaries, so the same failure exits
+    with the same code whichever surface produced it. Before this every error
+    was exit 2 in the scriptable CLI and exit 0 in the shell, which made
+    "permission denied", "appliance unreachable" and "you typed it wrong"
+    indistinguishable to a script — #78's complaint, at the level of the
+    process contract rather than the rendering.
+
+    The distinctions that carry real cost:
+
+    * **denied is not unreachable.** A 403 means the credential lacks the
+      right; retrying, or checking the network, wastes the operator's time.
+    * **timeout is not unreachable** in the JSON status, even though they
+      share an exit code: "it did not answer in time" and "it was not there"
+      send an operator to different places, and only one of them is worth
+      raising the budget for.
+    * **unsupported is not error.** A Tier-1 stub refusing to normalize is
+      this tool declining to guess, not the appliance failing.
+    """
+    import httpx
+
+    from pyecsdwan.client import OrchApiError
+    from pyecsdwan.contract import NotCurated
+    from pyecsdwan.resolver import ResolveError
+
+    if isinstance(exc, CommandOutcome):
+        return exc.outcome
+    if isinstance(exc, NotCurated):
+        return Outcome.UNSUPPORTED
+    if isinstance(exc, ResolveError):
+        # The name resolved against nothing on this Orchestrator. The path was
+        # well-formed, so this is not `invalid`.
+        return Outcome.NOT_FOUND
+    if isinstance(exc, OrchApiError):
+        return _from_api_error(exc)
+    if isinstance(exc, httpx.TimeoutException):
+        return Outcome.TIMEOUT
+    if isinstance(exc, httpx.HTTPError):
+        return Outcome.UNREACHABLE
+    if isinstance(exc, ValueError):
+        # Usage errors: the parser rejected what was typed.
+        return Outcome.INVALID
+    return Outcome.ERROR
+
+
+def _from_api_error(exc: Any) -> Outcome:
+    """Map an `OrchApiError` by status, or by what caused it when there is none."""
+    import httpx
+
+    status = exc.status_code
+    if status is None:
+        # No response at all. `raise ... from last_error` preserves which kind
+        # of transport failure it was, and that is the only thing separating
+        # "did not answer in time" from "was not reachable".
+        cause = exc.__cause__
+        if isinstance(cause, httpx.TimeoutException):
+            return Outcome.TIMEOUT
+        return Outcome.UNREACHABLE
+    if status in (401, 403):
+        return Outcome.DENIED
+    if status == 404:
+        return Outcome.NOT_FOUND
+    if status in (408, 504):
+        return Outcome.TIMEOUT
+    if status == 501:
+        return Outcome.UNSUPPORTED
+    # Everything else — 4xx the CLI should not have sent, 5xx the Orchestrator
+    # could not answer — is a response this tool did not expect. `error` says
+    # that without claiming to know which side is at fault.
+    return Outcome.ERROR

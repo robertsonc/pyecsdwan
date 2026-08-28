@@ -330,7 +330,14 @@ def dispatch_operational(line: str, state: ShellState) -> None:
     except outcomes.CommandOutcome as outcome:
         _render_outcome(state, outcome)
     except Exception as exc:  # noqa: BLE001 - dispatch boundary: any command failure becomes a red line; the shell survives
-        _error(state.console, _format_error(exc))
+        # Classified through the same table the scriptable CLI uses, so a
+        # failure reported at the prompt and the same failure in a script are
+        # the same outcome with the same exit code (grammar.md §5, R7).
+        # Distinct name: `outcome` is bound by the CommandOutcome clause above
+        # and unbound at its end, so reusing it here reads a deleted variable.
+        classified = outcomes.classify(exc)
+        _error(state.console, f"{classified.value}: {_format_error(exc)}")
+        state.exit_code = classified.exit_code
 
 
 def _render_outcome(state: ShellState, outcome: outcomes.CommandOutcome) -> None:

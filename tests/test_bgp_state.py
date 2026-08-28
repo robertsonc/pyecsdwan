@@ -402,3 +402,39 @@ def test_stale_ok_is_opt_in_and_reaches_the_api(ctx: Ctx) -> None:
     bgpstate.collect(ctx, "BR1-EC")
     bgpstate.collect(ctx, "BR1-EC", cached=True)
     assert seen == ["false", "true"], seen
+
+
+def test_cached_data_reports_stale_and_still_exits_zero(ctx: Ctx) -> None:
+    """Decision 7: cached data is served only under `--stale-ok`, so `stale`
+    is honouring what was asked for, not degrading it — exit 0.
+
+    The status still says so, because a log that cannot tell a cached answer
+    from a live one is a log that cannot explain a stale reading later.
+    """
+    live = _cli(ctx, "show", "appliance", "BR1-EC", "bgp", "summary", "--json")
+    assert live.exit_code == 0, live.output
+    assert json.loads(live.stdout)["status"] == Outcome.OK.value
+
+    cached = _cli(ctx, "show", "appliance", "BR1-EC", "bgp", "summary", "--stale-ok", "--json")
+    assert cached.exit_code == 0, cached.output
+    payload = json.loads(cached.stdout)
+    assert payload["status"] == Outcome.STALE.value
+    assert payload["cached"] is True
+
+
+def test_the_stale_annotation_reaches_the_human_rendering(shell_state: ShellState) -> None:
+    live = _shell(shell_state, "show appliance BR1-EC bgp summary")
+    stale = _shell(shell_state, "show appliance BR1-EC bgp summary --stale-ok")
+    assert "(cached)" not in live, live
+    assert "(cached)" in stale, stale
+
+
+def test_partial_outranks_stale(ctx: Ctx) -> None:
+    """More than one outcome can hold at once, and only the most specific is
+    worth acting on: an incomplete answer is the problem, and the staleness is
+    what the operator already asked for."""
+    result = _cli(ctx, "show", "appliance", "BR2-EC", "bgp", "neighbors", "--stale-ok", "--json")
+    assert result.exit_code == Outcome.PARTIAL.exit_code, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == Outcome.PARTIAL.value
+    assert payload["cached"] is True

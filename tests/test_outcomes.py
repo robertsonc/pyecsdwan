@@ -15,10 +15,15 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 
-from pyecsdwan.cli.outcomes import CommandOutcome, Outcome
+from pyecsdwan.cli.outcomes import CommandOutcome, Outcome, classify
+from pyecsdwan.client import OrchApiError
+from pyecsdwan.contract import NotCurated
+from pyecsdwan.resolver import ResolveError
 
 SPEC = Path(__file__).resolve().parents[1] / "specs/001-cli-command-taxonomy/grammar.md"
 
@@ -124,3 +129,223 @@ def test_a_command_outcome_carries_what_to_do_instead() -> None:
     assert exc.outcome is Outcome.UNSUPPORTED
     assert "route-table" in str(exc)
     assert "summary" in exc.remedy
+
+
+# -- classification: which outcome a raised exception represents ------------
+#
+# One table, applied at both dispatch boundaries. Before it, every failure was
+# exit 2 in the scriptable CLI and exit 0 in the shell — so "permission
+# denied", "appliance unreachable" and "you typed it wrong" were the same
+# answer to a script. That is #78's complaint at the level of the process
+# contract rather than the rendering.
+
+def _api_error(status: int | None, cause: BaseException | None = None) -> OrchApiError:
+    exc = OrchApiError("GET", "/bgp/state", status, "detail")
+    if cause is not None:
+        exc.__cause__ = cause
+    return exc
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (401, Outcome.DENIED),
+        (403, Outcome.DENIED),
+        (404, Outcome.NOT_FOUND),
+        (408, Outcome.TIMEOUT),
+        (504, Outcome.TIMEOUT),
+        (501, Outcome.UNSUPPORTED),
+        (400, Outcome.ERROR),
+        (500, Outcome.ERROR),
+        (502, Outcome.ERROR),
+    ],
+)
+def test_an_api_status_maps_to_its_outcome(status: int, expected: Outcome) -> None:
+    assert classify(_api_error(status)) is expected
+
+
+def test_denied_is_not_unreachable() -> None:
+    """A 403 means the credential lacks the right. Sending the operator to
+    check the network wastes their time on a reachable Orchestrator."""
+    assert classify(_api_error(403)) is Outcome.DENIED
+    assert classify(_api_error(None)) is Outcome.UNREACHABLE
+    assert Outcome.DENIED.exit_code != Outcome.UNREACHABLE.exit_code
+
+
+def test_no_response_at_all_is_unreachable_or_timeout_by_cause() -> None:
+    """`OrchApiError` carries no status for a transport failure, so the only
+    thing separating "did not answer in time" from "was not reachable" is the
+    exception it was raised from — which the client preserves with `from`."""
+    assert classify(_api_error(None, httpx.ConnectError("refused"))) is Outcome.UNREACHABLE
+    assert classify(_api_error(None, httpx.ReadTimeout("slow"))) is Outcome.TIMEOUT
+    assert classify(_api_error(None, httpx.ConnectTimeout("slow"))) is Outcome.TIMEOUT
+
+
+def test_a_bare_transport_error_is_classified_too() -> None:
+    """Not everything reaches the boundary wrapped: the resolver and the
+    reports call httpx paths that can raise directly."""
+    assert classify(httpx.ConnectError("refused")) is Outcome.UNREACHABLE
+    assert classify(httpx.ReadTimeout("slow")) is Outcome.TIMEOUT
+
+
+def test_timeout_is_ordered_before_the_general_transport_error() -> None:
+    """`TimeoutException` is a subclass of `HTTPError`, so a check in the
+    wrong order would classify every timeout as unreachable and the JSON
+    status would lose a distinction the exit code cannot carry."""
+    assert isinstance(httpx.ReadTimeout("x"), httpx.HTTPError)
+    assert classify(httpx.ReadTimeout("x")) is Outcome.TIMEOUT
+
+
+def test_a_tier_one_stub_is_unsupported_not_an_error() -> None:
+    """This tool declining to guess, not the appliance failing."""
+    assert classify(NotCurated("generated/whatever has no curated normalize()")) is (
+        Outcome.UNSUPPORTED
+    )
+
+
+def test_an_unknown_name_is_not_found_not_invalid() -> None:
+    """The path was well-formed; the object named by it does not exist."""
+    assert classify(ResolveError("unknown appliance 'S1-ecv-01'")) is Outcome.NOT_FOUND
+
+
+def test_a_usage_error_is_invalid() -> None:
+    assert classify(ValueError("usage: show configuration fabric [<section>]")) is (
+        Outcome.INVALID
+    )
+
+
+def test_an_explicit_command_outcome_passes_through() -> None:
+    """A command that already decided its terminal state is not re-guessed."""
+    raised = CommandOutcome(Outcome.PARTIAL, "9 of 10 appliances answered")
+    assert classify(raised) is Outcome.PARTIAL
+
+
+def test_anything_unrecognised_is_error_not_success() -> None:
+    """The default must never be an outcome that exits 0: an exception nobody
+    classified is still a command that did not answer."""
+    assert classify(RuntimeError("something nobody anticipated")) is Outcome.ERROR
+    assert not Outcome.ERROR.is_success
+
+
+# -- both dispatch boundaries -----------------------------------------------
+#
+# The classifier is only useful where it is actually reached, and the two
+# surfaces reach it differently. `CliRunner.invoke(app)` calls the Typer app
+# directly, so it never runs `cli_main.main()` — the very handler that turns an
+# escaping exception into an exit code. Testing the scriptable side through
+# CliRunner alone would leave that path unexercised, so these drive `main()`.
+
+
+@pytest.fixture
+def failing_orchestrator(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Make every API call fail in a chosen way, from the client outward."""
+
+    def _fail_with(exc: BaseException) -> None:
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            raise exc
+
+        monkeypatch.setattr("pyecsdwan.client.OrchClient.request", boom)
+
+    return _fail_with
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (OrchApiError("GET", "/gms/versions", 403, "forbidden"), Outcome.DENIED),
+        (OrchApiError("GET", "/gms/versions", 500, "boom"), Outcome.ERROR),
+        (OrchApiError("GET", "/gms/versions", None, "refused"), Outcome.UNREACHABLE),
+    ],
+)
+def test_the_scriptable_cli_exits_with_the_classified_code(
+    failing_orchestrator: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: BaseException,
+    expected: Outcome,
+) -> None:
+    from pyecsdwan.cli import main as cli_main
+
+    failing_orchestrator(failure)
+    monkeypatch.setenv("ECSDWAN_HOME", str(tmp_path))
+    monkeypatch.setenv("ECSDWAN_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["ec-cli", "--orch-url", "https://nowhere.invalid", "show", "fabric", "version"],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main.main()
+    assert excinfo.value.code == expected.exit_code, failure
+
+
+def test_every_failure_used_to_be_exit_two(
+    failing_orchestrator: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The point of the change, stated as a property: three different failures
+    that a script must handle differently now exit differently."""
+    from pyecsdwan.cli import main as cli_main
+
+    codes = set()
+    for failure in (
+        OrchApiError("GET", "/gms/versions", 403, "forbidden"),
+        OrchApiError("GET", "/gms/versions", 500, "boom"),
+        OrchApiError("GET", "/gms/versions", None, "refused"),
+    ):
+        failing_orchestrator(failure)
+        monkeypatch.setenv("ECSDWAN_HOME", str(tmp_path))
+        monkeypatch.setenv("ECSDWAN_API_KEY", "test-key")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["ec-cli", "--orch-url", "https://nowhere.invalid", "show", "fabric", "version"],
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            cli_main.main()
+        codes.add(excinfo.value.code)
+    assert len(codes) == 3, codes
+    assert 0 not in codes
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (OrchApiError("GET", "/bgp/state", 403, "forbidden"), Outcome.DENIED),
+        (OrchApiError("GET", "/bgp/state", 404, "no such"), Outcome.NOT_FOUND),
+        (OrchApiError("GET", "/bgp/state", None, "refused"), Outcome.UNREACHABLE),
+        (OrchApiError("GET", "/bgp/state", 500, "boom"), Outcome.ERROR),
+    ],
+)
+def test_the_shell_sets_the_classified_exit_code(
+    failing_orchestrator: Any,
+    state_home: Any,
+    failure: BaseException,
+    expected: Outcome,
+) -> None:
+    """The shell's dispatch boundary catches everything so the prompt survives
+    — which is right, and used to mean every failure looked identical."""
+    from rich.console import Console
+
+    from pyecsdwan.candidate import CandidateStore
+    from pyecsdwan.cli.shell import ShellState, dispatch_operational
+    from pyecsdwan.client import OrchClient
+    from pyecsdwan.config import Settings
+    from pyecsdwan.contract import Ctx
+    from pyecsdwan.registry import default_registry
+    from pyecsdwan.resolver import Resolver
+
+    settings = Settings(orch_url="https://nowhere.invalid", api_key="test-key")
+    client = OrchClient(settings)
+    state = ShellState(
+        ctx=Ctx(client=client, resolver=Resolver(client)),
+        registry=default_registry,
+        settings=settings,
+        console=Console(record=True, width=200),
+        candidate=CandidateStore(settings.host),
+    )
+    failing_orchestrator(failure)
+    dispatch_operational("show appliance BR1-EC bgp summary", state)
+
+    assert state.exit_code == expected.exit_code
+    out = state.console.export_text()
+    assert expected.value in out, out
+    # And the prompt survived it, which is the other half of #78.
+    assert state.running
