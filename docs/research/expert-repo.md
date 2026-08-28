@@ -35,7 +35,10 @@ specs against them). Base paths: Orchestrator `/gms/rest`, appliance `/rest/json
 - **`completionStatus` is unreliable**: for ECOS upgrades it stays `false` even on
   success; `logLevel` is always ERROR. Success test used in the field:
   `taskStatus == "COMPLETED" and result.startswith("Success")`. → pyecsdwan's
-  poller keys on taskStatus first, uses completionStatus only as a tiebreaker.
+  poller keys on taskStatus first and **allowlists** the success `result`
+  shape; `completionStatus` is not used as a tiebreaker at all, since a field
+  that is wrong in the success direction cannot break a tie about success
+  (#64). Table of observed shapes: `docs/research/job-shapes.md`.
 - `POST /action/cancel?key=` exists. `GET /action/inProgress` returns 400 in
   practice — don't use.
 - `POST /broadcastCli` returns the GUID as **plain text**, not JSON.

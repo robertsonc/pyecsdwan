@@ -9,10 +9,12 @@ Endpoint facts: docs/research/templates-overlays-security.md. Two kinds:
   appliance (ref name = appliance hostname). The POST is a *complete
   replacement* (the Orchestrator merges nothing), and it is what triggers the
   actual template push to the appliance — the push itself runs async
-  server-side. apply() confirms the push through the action log before
-  returning: by key when the response carries one, else via
+  server-side. apply() *and* rollback() confirm the push through the action
+  log before returning: by key when the response carries one, else via
   ``jobs.wait_for_recent_action`` (``GET /action`` by appliance + time
-  window). verify() re-checks the association record, which is the
+  window), and in both cases only when a record names this appliance's nePk
+  (#64 — the action log can confirm the association while saying nothing
+  about the push). verify() re-checks the association record, which is the
   orchestrator-side state this resource manages.
 """
 
@@ -175,35 +177,72 @@ class TemplateAssociation(Resource):
         groups = list(desired.get("template_groups", []))
         # Complete replacement; this POST triggers the template push. The real
         # endpoint returns 204 and the per-appliance results land in the action
-        # log by guid. When a key IS returned, await it; when the response is
-        # keyless, poll the action log by appliance + a window opening just
-        # before the POST — either way a failed push fails the commit instead
-        # of being reported CONFIRMED.
+        # log by guid — so a failed push fails the commit instead of being
+        # reported CONFIRMED.
+        outcome = self._push(ctx, ref, ne_pk, groups)
+        return self._confirmed(ref, ne_pk, outcome, f"set to {groups or '[]'}")
+
+    def _push(self, ctx: Ctx, ref: Ref, ne_pk: str, groups: list[str]) -> JobOutcome:
+        """POST the association and await the push it triggers.
+
+        Shared by apply() and rollback(): a revert that does not confirm its
+        own push is the same unverified claim as an apply that does not, and
+        the revert is the one running after something has already gone wrong.
+        """
         since_ms = int(time.time() * 1000)
+        # Snapshot the action log *before* writing, so the keyless waiter can
+        # tell a new guid from one that was already there — including this
+        # appliance's own previous push, which a revert following an apply
+        # would otherwise find sitting in its window (#64).
+        before = jobs.action_log_guids(ctx.client, ne_pk, since_ms)
         resp = ctx.client.post(_ASSOC_PATH, {"templateIds": groups}, params={"nePk": ne_pk})
         key = jobs.extract_action_key(resp)
-        outcome: JobOutcome
         if key is not None:
-            outcome = jobs.wait_for_action(
+            return jobs.wait_for_action(
                 ctx.client, key, ctx.client.settings, f"template push {ref.name}"
             )
-        else:
-            outcome = jobs.wait_for_recent_action(
-                ctx.client, ctx.client.settings, ne_pk, since_ms, f"template push {ref.name}"
-            )
+        return jobs.wait_for_recent_action(
+            ctx.client,
+            ctx.client.settings,
+            ne_pk,
+            since_ms,
+            f"template push {ref.name}",
+            ignore_guids=before,
+        )
+
+    def _confirmed(
+        self, ref: Ref, ne_pk: str, outcome: JobOutcome, what: str
+    ) -> ApplyResult:
+        """Turn a push outcome into a result, requiring appliance-side evidence.
+
+        A SUCCESS outcome is not on its own enough (#64): the action log can
+        answer about the *control-plane association* — the Orchestrator
+        recorded which groups this appliance should carry — while saying
+        nothing about whether the appliance received the push. The evidence
+        that it did is a record naming this ``nePk``; ``_terminal_outcome``
+        collects exactly those into ``per_appliance``, so an empty entry there
+        means the confirmation covers the wrong thing.
+        """
         if outcome.state != "SUCCESS":
             return ApplyResult(
                 ok=False,
                 message=f"template push for {ref.name} {outcome.state}: {outcome.detail}",
                 jobs=[outcome],
             )
+        if ne_pk not in outcome.per_appliance:
+            return ApplyResult(
+                ok=False,
+                message=(
+                    f"template push for {ref.name} reported success but no action-log "
+                    f"record names {ne_pk}, so only the association was confirmed and "
+                    f"not the push to the appliance"
+                ),
+                jobs=[outcome],
+            )
         return ApplyResult(
             ok=True,
             jobs=[outcome],
-            message=(
-                f"association for {ref.name} set to {groups or '[]'} "
-                f"(template push confirmed)"
-            ),
+            message=f"association for {ref.name} {what} (template push confirmed)",
         )
 
     def rollback(self, ctx: Ctx, ref: Ref, snapshot: RawState) -> ApplyResult:
@@ -211,8 +250,8 @@ class TemplateAssociation(Resource):
         canonical = self.normalize(snapshot)
         assert isinstance(canonical, dict)
         groups = canonical["template_groups"]
-        ctx.client.post(_ASSOC_PATH, {"templateIds": groups}, params={"nePk": ne_pk})
-        return ApplyResult(ok=True, message=f"association for {ref.name} restored to {groups}")
+        outcome = self._push(ctx, ref, ne_pk, groups)
+        return self._confirmed(ref, ne_pk, outcome, f"restored to {groups}")
 
     def list_refs(self, ctx: Ctx) -> list[Ref]:
         return [Ref(kind=self.kind, name=n) for n in ctx.resolver.appliance_names()]

@@ -57,6 +57,9 @@ returns the same set plus `platform`, `haPeer`, `preconfigStatus`;
 
 ## Async jobs / action keys
 
+> Which terminal shapes the poller treats as success, failure or unknown — and
+> the evidence behind each — is `docs/research/job-shapes.md` (#64).
+
 Poll: `GET /action/status?key={key}`. Record fields (also used by `GET /action` audit
 listing): `id`, `user`, `ipAddress`, `nepk` (lowercase!), `name`, `description`,
 `taskStatus` (str), `startTime`/`endTime`/`queuedTime` (ms epoch; endTime 0 while

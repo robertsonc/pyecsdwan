@@ -168,10 +168,20 @@ def test_job_at_100pct_still_in_progress_is_not_finished() -> None:
 
 
 def test_completed_with_error_result_is_failure() -> None:
-    from pyecsdwan.jobs import _record_succeeded
+    """The original API-5 regression, re-pointed at `_record_state` (#64).
 
-    assert not _record_succeeded({"taskStatus": "Completed", "result": "error: push denied"})
-    assert _record_succeeded({"taskStatus": "Completed", "result": "template pushed"})
+    Its second assertion used to read
+    ``assert _record_succeeded({"taskStatus": "Completed", "result": "template
+    pushed"})`` — i.e. it *required* the poller to call an unrecognised result
+    text a success. That is the very hole #64 closes, so the assertion is now
+    inverted: an unrecognised shape is UNKNOWN, and every caller branches on
+    ``state != "SUCCESS"``.
+    """
+    from pyecsdwan.jobs import _record_state
+
+    assert _record_state({"taskStatus": "Completed", "result": "error: push denied"}) == "FAILED"
+    assert _record_state({"taskStatus": "Completed", "result": "template pushed"}) == "UNKNOWN"
+    assert _record_state({"taskStatus": "Completed", "result": "Success"}) == "SUCCESS"
 
 
 # -- DIF-4: interface-labels default fill (idempotency vs injecting server) ----

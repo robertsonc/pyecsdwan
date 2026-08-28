@@ -1844,6 +1844,14 @@ class MockState:
     require_auth: bool = True
     action_delay_polls: int = 1
     fail_next_action: bool = False
+    #: Overrides the ``result`` text of every action created while set, so a
+    #: test can drive a terminal record the poller does not recognise (#64).
+    #: The default is :data:`SUCCESS_RESULT`, the field-verified success shape.
+    action_result: str | None = None
+    #: Answer ``POST /appliance/saveChanges`` with no ``clientKey`` — the
+    #: off-spec shape Orchestrators before 9.3 could produce, and the one
+    #: `jobs.save_changes` must verify rather than assume (#64).
+    save_changes_keyless: bool = False
     appliances: list[dict[str, Any]] = field(default_factory=_seed_appliances)
     interface_labels: dict[str, Any] = field(default_factory=_seed_interface_labels)
     template_groups: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -1975,13 +1983,16 @@ class MockState:
         only ever uses one of the two, so ``action_delay_polls`` means the
         same thing on both paths. A pending ``fail_next_action`` flag is
         consumed by the next action created, which then finishes as a failure
-        (``completionStatus`` false, result ``"mock failure"``).
+        (``completionStatus`` false, result ``"mock failure"``). A successful
+        action's ``result`` is :data:`SUCCESS_RESULT` unless ``action_result``
+        overrides it.
         """
         action_key = key or str(uuid.uuid4())
         self.actions[action_key] = {
             "polls": 0,
             "delay_polls": self.action_delay_polls,
             "fail": self.fail_next_action,
+            "result": self.action_result,
             "ne_pks": list(ne_pks) if ne_pks else [],
             "name": name,
             "startTime": int(time.time() * 1000),
@@ -2132,6 +2143,20 @@ async def _acls_dispatch(request: Request, mock: MockState, ne_pk: str, url: str
 # -- end acls / ipObjects / appExpress (#31) proxy dispatch -------------------
 
 
+#: The ``result`` text a successful action record carries.
+#:
+#: This used to read ``"mock apply complete"`` — a shape no Orchestrator has
+#: ever emitted. It was harmless only because the poller inferred success from
+#: the *absence* of failure words, so any invented string passed. #64 replaced
+#: that with an allowlist, and the invented string immediately failed 81 tests:
+#: the fixture had been holding a wrong implementation up.
+#:
+#: ``"Success"`` is the shape ``docs/research/expert-repo.md`` records from the
+#: field (``taskStatus == "COMPLETED" and result.startswith("Success")``). A
+#: mock that models what the API does is the only kind worth testing against.
+SUCCESS_RESULT = "Success"
+
+
 def _action_records(key: str, action: dict[str, Any]) -> list[dict[str, Any]]:
     finished = action["polls"] >= max(int(action.get("delay_polls", 1)), 1)
     failed = bool(action.get("fail"))
@@ -2175,7 +2200,7 @@ def _action_records(key: str, action: dict[str, Any]) -> list[dict[str, Any]]:
                     "percentComplete": 100,
                     "completionStatus": True,
                     "endTime": int(time.time() * 1000),
-                    "result": "mock apply complete",
+                    "result": action.get("result") or SUCCESS_RESULT,
                 }
             )
     return records
@@ -2759,7 +2784,10 @@ def create_app(state: MockState | None = None) -> FastAPI:
             for appliance in mock.appliances:
                 if appliance.get("nePk") in ne_pks:
                     appliance["hasUnsavedChanges"] = False
-        return {"clientKey": mock.new_action(ne_pks=[str(p) for p in ne_pks], name="save changes")}
+        key = mock.new_action(ne_pks=[str(p) for p in ne_pks], name="save changes")
+        if mock.save_changes_keyless:
+            return Response(status_code=204)
+        return {"clientKey": key}
 
     # bgp (#16) and ospf (#17) Stage 2 moved to the generic /appliance/rest
     # proxy below (appliance_ecos store) — no dedicated orchestrator-level

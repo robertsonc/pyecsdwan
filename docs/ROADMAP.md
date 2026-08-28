@@ -199,7 +199,7 @@ So *anything and everything* is reachable now via Tier 0; curated plugins
 | **Tier-1 spec pipeline** (#6) ✅ | `tools/spec_sync.py`, model/binding/stub codegen, `show coverage`, promotion gating | #25–#29 |
 | **Fleet lifecycle** (#7) | discovery/approval, decommission cascade, preconfig, backup/restore, upgrades, licensing — IRREVERSIBLE class | in-epic checklist |
 | **Fabric ops & observability** (#8) | `drift`, declarative bulk apply, JSON Schema, dashboard-parity views | #54 (✅ shipped) + in-epic checklist |
-| **Production hardening** (#9) | concurrency, MCP trust boundary, CI/packaging, async-job fail-closed, evidence ladder, retry policy | #62–#68 (#62, #63, #65 ✅ shipped; #64, #66, #67, #68 open) |
+| **Production hardening** (#9) | concurrency, MCP trust boundary, CI/packaging, async-job fail-closed, evidence ladder, retry policy | #62–#68 (#62, #63, #64, #65 ✅ shipped; #66, #67, #68 open) |
 | **CLI information architecture** (#70) ✅ | intent-separated command taxonomy, spec-driven design; constitution + design corpus + grammar, then the migration itself | #49, #71–#78 (all shipped; one flag decision open) |
 | **(v2) RBAC broker** (#10) | direct-to-appliance access, gated — explicitly out of v1 scope | in-epic checklist |
 

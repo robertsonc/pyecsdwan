@@ -177,7 +177,16 @@ class JobOutcome:
     """Terminal result of one Orchestrator async job (action key)."""
 
     key: str
-    state: str  # SUCCESS | FAILED | TIMEOUT
+    #: SUCCESS | FAILED | TIMEOUT | UNKNOWN.
+    #:
+    #: ``UNKNOWN`` (#64) means the job finished but the poller cannot tell
+    #: whether it worked — an unrecognised terminal shape, or a keyless save
+    #: whose persistence could not be checked. Every consumer branches on
+    #: ``state != "SUCCESS"``, so an unknown job fails its transaction; it is a
+    #: separate state from FAILED because "it did not work" is a claim this
+    #: code cannot support, and because the operator's next move differs
+    #: (report the shape, rather than read the Orchestrator's error).
+    state: str
     detail: str = ""
     per_appliance: dict[str, str] = dataclasses.field(default_factory=dict)
 

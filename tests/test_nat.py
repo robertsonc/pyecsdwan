@@ -76,7 +76,7 @@ def _job_ok(key: str = "k1", ne_pk: str = "3.NE") -> None:
                     "percentComplete": 100,
                     "completionStatus": True,
                     "endTime": 1,
-                    "result": "ok",
+                    "result": "Success",
                 }
             ],
         )
