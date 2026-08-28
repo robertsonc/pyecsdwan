@@ -77,14 +77,16 @@ alters a safety guarantee, or would be hard to reverse.
 
 ## Ratification status
 
-The constitution is at **0.1.0, drafted and not yet ratified**. Until the owner
-ratifies it:
+**Ratified 2026-08-28 at 1.0.0.** The constitution is in force:
 
-* The templates and flow are usable, and this feature (`001-cli-command-taxonomy`)
-  is the pilot #75 asks for.
-* Nothing is rejected *because of* the constitution — a proposed rule is not a
-  rule. The constitution check in a plan records findings rather than blocking.
+* The constitution check in a plan **blocks** rather than recording findings. A
+  non-negotiable principle (I, II, V) left unsatisfied stops the plan —
+  redesign, or propose an amendment.
+* Conventions (III, IV, VI) may be departed from with a recorded reason and an
+  **expiry**. An exception without an expiry is not an exception; it is an
+  undocumented amendment.
+* Amendments go through the process in the constitution's own *Amendment*
+  section: a PR touching that file alone, with rationale and migration impact.
 
-Ratification means the owner accepts the six principles and their
-non-negotiable/convention split, at which point the checks become binding and
-the version moves to 1.0.0.
+`001-cli-command-taxonomy` was the pilot #75 asked for, and ran the flow end to
+end from specification through to implementation.

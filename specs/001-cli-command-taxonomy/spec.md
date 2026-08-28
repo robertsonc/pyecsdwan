@@ -1,6 +1,6 @@
 # Feature specification: intent-separated CLI command taxonomy
 
-**Feature:** `001-cli-command-taxonomy` · **Version:** 0.2.0 · **Status:** draft
+**Feature:** `001-cli-command-taxonomy` · **Version:** 0.3.0 · **Status:** draft
 **Changed in 0.2.0:** Q1 and Q2 answered by the owner; all eight required
 decisions are now resolved. Grammar updated accordingly.
 **Issues:** #71 (this spec), under epic #70. Consumes #75 (constitution) and
@@ -65,7 +65,7 @@ schema. Incomplete commands list valid next tokens instead of guessing.
 | R6 | Alias uniqueness is per scope and checked at startup | Startup check + test; `zones` is the live collision |
 | R7 | Every outcome in `grammar.md` §5 is distinguishable in human and JSON output | One test per outcome, both modes |
 | R8 | No renderer reduces a valid response to zero visible characters | Test over `{}`, `None`, `""`, HTTP 204, `[]` (#78) |
-| R9 | Every existing command form has a recorded replacement and mechanism | `compatibility.md`; test asserts old-form *behavior*, not acceptance |
+| R9 | Every removed command form has a recorded replacement, and a test asserting the old spelling is no longer accepted | `compatibility.md`; removal cannot silently regress into a half-supported form |
 | R10 | Native output is reachable only by explicit request | Grammar test: no default path yields native |
 | R11 | Fan-out commands declare cost before running — prompting when interactive, warning on stderr when not; one unreachable target is a marked row | Existing `fanout` tests extended per D-EC-3; both TTY and piped paths tested |
 | R12 | `running`, `candidate`, `appliance`, `fabric`, `configuration` are reserved and rejected as kind aliases | Alias validator test; a synthetic kind named `running` fails at startup |
@@ -86,7 +86,7 @@ making one.
 | 4 | Semantics of "candidate" | **Staged intent**, not a materialized tree. Junos's candidate lives on the device; ours is a client-side changeset materialized against server state at compare/commit (`candidate.py`). The grammar must not imply a tree. |
 | 5 | Is native a format, a source, or both? | **A format of running configuration.** Junos (`\| display`), NSO (`ios:` namespace) and kubectl (`-o`) agree independently (D-JUN-3, D-NSO-4, D-K8S-4). |
 | 6 | Resource-kind aliases | **Per-scope user-facing nouns**, registry keys internal. `zones` is the one live collision and is why the namespace is scoped, not flat (#77). |
-| 7 | Cost/freshness flags and defaults | **Fan-out confirms, then warns** — prompt where a TTY makes one answerable, warn on stderr and proceed where it does not. `--stale-ok` is **opt-in**; without it a read is live or it fails. |
+| 7 | Cost/freshness flags and defaults | **Fan-out warns about elapsed time**: prompt naming appliance count and expected duration where a TTY can answer it; the same two figures on stderr where it cannot. `--stale-ok` is **opt-in**. |
 | 8 | Exit codes and output schema | **Resolved** — `grammar.md` §5, from gNMI's taxonomy extended with the distributed cases (D-GNMI-2). |
 
 ## Open questions
@@ -95,7 +95,7 @@ making one.
 |---|---|---|---|---|
 | Q1 | Is the datastore token mandatory, or does it default to running? | was blocking | owner | **Answered: default to running.** Grammar 0.2.0. |
 | Q2 | Fan-out cost behavior, and is `--stale-ok` opt-in? | was blocking | owner | **Answered: confirm then warn; `--stale-ok` opt-in.** Grammar 0.2.0. |
-| Q3 | Removal boundary for compatibility aliases — next MINOR, a date, or a coverage condition? | No — #74 needs it, this spec does not | owner | open |
+| Q3 | Removal boundary for compatibility aliases | — | owner | **Answered: not needed.** pyecsdwan has not shipped to production, so old forms are removed rather than aliased. See `compatibility.md` 0.3.0. |
 | Q4 | Does `show fabric <domain>` warrant existing where the Orchestrator has a single-call answer, or should those stay unscoped (`show version`)? Currently inconsistent: `show version` is Orchestrator+fanout but unscoped, while `show flows summary` gains `fabric`. | No — resolvable during #74 | owner or implementer | open |
 
 **Nothing blocks the plan now.** One reading is flagged rather than assumed
@@ -116,7 +116,7 @@ collides today — 42 bare names checked against them.
 - [ ] Incomplete commands return valid next tokens and examples
 - [ ] Grammar examples cover fabric, appliance, resource, instance, list, detail, multi-appliance fan-out
 - [ ] Shell and scriptable CLI have a one-to-one canonical mapping
-- [ ] A compatibility table maps every existing command to its replacement and removal policy
+- [x] A migration table maps every changed command to its replacement (removal, not aliasing — Q3)
 - [ ] Golden UX tests are derivable directly from the spec
 - [ ] #48/#49-style scope and discoverability confusion is covered by acceptance tests
 - [x] Alias collisions fail at startup/test time, never at operator runtime

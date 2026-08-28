@@ -1,6 +1,6 @@
 # Command grammar
 
-**Feature:** `001-cli-command-taxonomy` · **Version:** 0.2.0 · **Status:** draft
+**Feature:** `001-cli-command-taxonomy` · **Version:** 0.3.0 · **Status:** draft
 **Changed in 0.2.0:** Q1 and Q2 answered by the owner — the datastore token is
 optional and defaults to `running`; fan-out confirms then warns; `--stale-ok`
 is opt-in.
@@ -208,20 +208,30 @@ exit code and per-row marking are EdgeConnect-specific (D-EC-3).
 
 ### Fan-out cost behavior (Decision 7)
 
-A `fanout` command **confirms, then warns**:
+**The thing being guarded against is elapsed time.** A `fabric` command makes
+one call *per appliance*; on a large fabric that is a lot of calls and a long
+wait, and an operator who did not realise they had asked for that deserves to
+be told before it starts, not after.
 
 * **Interactive** (a TTY on stdin and stderr) — prompt before running, naming
-  the target count and the per-appliance call it will make. `--yes` skips it.
-* **Non-interactive** (piped, scripted, CI) — a prompt would hang a pipeline,
-  which is the failure class #78 exists to remove. So it does not prompt: it
-  **warns on stderr**, names the same cost, and proceeds.
+  the appliance count and how long it is expected to take:
 
-> **Interpretation flagged.** The owner's answer was "confirm, then warn". This
-> reads it as *confirm where a prompt is possible, warn where it is not* — the
-> only arrangement in which both halves can be true, since a prompt in a
-> pipeline cannot be answered. If the intent was instead "prompt **and** also
-> warn", or "prompt the first time then warn thereafter", say so and this
-> section changes; nothing else depends on it.
+  ```
+  This queries 42 appliances (1 call each) and may take around 2 minutes.
+  Continue? [y/N]
+  ```
+
+  `--yes` / `-y` skips the prompt.
+
+* **Non-interactive** (piped, scripted, CI) — a prompt cannot be answered and
+  would hang the pipeline, which is the failure class #78 exists to remove. So
+  it does not prompt: it **warns on stderr with the same two figures** and
+  proceeds.
+
+The appliance count comes from the resolver cache, so the warning itself costs
+no API call. The duration estimate is count × observed per-call latency,
+rounded coarsely and clearly hedged — a wrong-but-honest "around 2 minutes"
+is more useful than silence, and precision here would be false.
 
 Warnings go to stderr so piped output stays machine-parseable.
 

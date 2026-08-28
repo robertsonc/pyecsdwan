@@ -1,98 +1,84 @@
-# Compatibility and migration
+# Migration
 
-**Feature:** `001-cli-command-taxonomy` · **Version:** 0.2.0 · **Status:** draft
-**Changed in 0.2.0:** replacements use the short form now that the datastore
-token defaults to `running` (Q1). The explicit `running` spelling also works.
+**Feature:** `001-cli-command-taxonomy` · **Version:** 0.3.0 · **Status:** draft
+**Changed in 0.3.0:** the owner confirmed pyecsdwan has **not shipped to
+production**, so there are no old commands to maintain. The compatibility-alias
+design in 0.1.0/0.2.0 is withdrawn; old forms are **removed**, not aliased.
 
-Principle VI: an old command form either keeps working, or fails loudly naming
-its replacement. It never silently changes meaning.
+## The decision, and what it deletes
 
-## The one dangerous case
+Principle VI ("reversible evolution") exists to protect people who are already
+running the thing. Nobody is. There are no scripts to break, no muscle memory
+to respect, and no removal boundary to negotiate — Q3 is answered by not
+needing an answer.
 
-Most rows below are renames — the same data, spelled differently, so an alias
-with a warning is safe. **One row is not.**
+Keeping aliases anyway would have cost real work and left the CLI carrying two
+spellings for every renamed command, forever by default, to protect users who
+do not exist. So:
 
-```
-show appliance BR1-EC bgp
-```
+| Was planned (0.2.0) | Now |
+|---|---|
+| Alias + deprecation warning on every renamed form | **Removed.** The old form is not accepted. |
+| Hard-fail window for the one meaning-change | **Not needed.** The new meaning simply applies. |
+| Removal boundary (Q3) | **Not needed.** Nothing to remove later. |
+| Behavior tests for every legacy form | **Not needed.** Replaced by tests that the old form is *gone*. |
 
-* **Today:** fetches the `appliance/bgp` resource, normalizes it, and prints
-  *modeled configuration*.
-* **Under this grammar:** `show appliance <name> <domain>` is the *operational*
-  form, so the same tokens would return BGP session state.
+**Principle VI is not being violated — it does not apply.** Its subject is an
+operator who would be surprised, and there is no such operator. Recorded here
+rather than in the constitution's exception register for that reason: this is
+"out of scope", not "departing with an expiry".
 
-Same input, different kind of data, no error. That is precisely the failure
-Principle VI exists to prevent, and an alias-with-warning does not prevent it —
-a warning that scrolls past still leaves the operator reading session state
-believing it is configuration.
+## What changes for the operator
 
-**Therefore this form must fail during the migration window**, not warn:
+| Old form | New form |
+|---|---|
+| `show run` | `show configuration fabric` |
+| `show run <section>` | `show configuration fabric <section>` |
+| `show run appliance <name>` | `show configuration appliance <name> --format native` |
+| `show appliance <name> <kind> [<instance>]` | **split by intent** — `show appliance <name> <domain> ...` for state, `show configuration appliance <name> <kind>` for config |
+| `show <kind> [<instance>]` *(orch-scope)* | `show configuration <kind> [<instance>]` |
+| `show appliance <name> appliance/<kind>` | `show appliance <name> <kind>` (#77, shipped) |
+| `show flows summary` | `show fabric flows summary` |
+| `show flow <ip>` | `show fabric flow <ip>` |
 
-```
-$ show appliance BR1-EC bgp
-error: `show appliance <name> <kind>` has split into two commands, because it
-       previously returned configuration while the new grammar reads this
-       position as operational state.
+Unchanged: `show appliances`, `show version`, `show journal`, `show pending`,
+`show locks`, `show candidate`, `show coverage`, config-mode `show`,
+`show compare` / `show | compare`, and every non-read command (`set`,
+`delete`, `commit`, `confirm`, `discard`, `rollback`, `api`, `diff`).
 
-  configuration:  show configuration appliance BR1-EC bgp
-  operational:    show appliance BR1-EC bgp summary | neighbors | routes
+## The one that was dangerous is now simply gone
 
-  This form will become the operational one in <BOUNDARY>.
-```
+`show appliance BR1-EC bgp` returned modeled configuration and now means
+operational state — same tokens, different data. 0.2.0 handled that with a
+hard-fail window, because a warning that scrolls past still leaves an operator
+reading session state believing it is configuration.
 
-Exit 2 (`invalid`). Refusing to guess is the whole point: the two answers are
-both plausible and only the operator knows which they meant.
-
-At the declared boundary the form starts working again with the operational
-meaning. Between now and then it is unavailable — a deliberate cost, and the
-only option that cannot mislead.
-
-## Migration table
-
-| Existing form | Status | Replacement | Mechanism |
-|---|---|---|---|
-| `show run` | rename | `show configuration fabric` | alias + warning |
-| `show run <section>` | rename | `show configuration fabric <section>` | alias + warning |
-| `show run appliance <name>` | rename | `show configuration appliance <name> --format native` | alias + warning |
-| `show appliance <name> <kind>` *(shell)* | **meaning change** | split — see above | **hard fail** |
-| `show appliance <name> <kind> <instance>` *(shell)* | **meaning change** | split — see above | **hard fail** |
-| `show <kind> [<instance>]` *(shell, orch-scope)* | rename | `show configuration <kind> [<instance>]` | alias + warning |
-| `show appliance <name> appliance/<kind>` | leakage (#77) | `show ... <kind>` (prefix dropped) | alias + warning |
-| `show <kind>` where kind is `generated/<op-id>` | leakage (#77) | taxonomy-approved noun, or Tier-0 `api` | alias + warning |
-| `show appliances` | unchanged | — | — |
-| `show version` | unchanged | — | — |
-| `show flows summary` | scope noun added | `show fabric flows summary` | alias + warning |
-| `show flow <ip>` | scope noun added | `show fabric flow <ip>` | alias + warning |
-| `show journal` / `pending` / `locks` / `candidate` / `coverage` | unchanged | — | CLI state, not fabric (grammar §2) |
-| `show` *(config mode)* | unchanged | — | candidate, per D-JUN-1 |
-| `show compare` / `show \| compare` | both kept | — | D-NSO-3 |
-| `set` / `delete --appliance <name>` | unchanged spelling | — | already matches scope ordering |
-| `diff` / `compare` / `commit` / `confirm` / `discard` / `rollback` / `api` | unchanged | — | not read commands |
+With no existing users, there is nobody holding the old meaning, so the new one
+just applies. **The hard-fail is withdrawn** — it was protection for a
+population that does not exist, and keeping it would refuse a command that
+ought to work.
 
 ## Rules
 
-1. **Warnings go to stderr**, so piped output stays machine-parseable.
-2. **An alias warning names the exact replacement**, never a doc link alone.
-3. **Aliases are tested for behavior, not acceptance** — a test asserting the
-   old form is accepted proves nothing; it must assert the old form returns
-   what it always returned.
-4. **The hard-fail row is tested for refusal**, including that its message
-   names both replacements.
-5. **`--format native` inherits the existing allowlist unchanged.** `show run
-   appliance` is the one surface reaching an appliance's command interpreter,
-   and its deny-by-default validator (40 refusal cases) is not relaxed by being
+1. **Removed means removed.** An old form produces `invalid` (exit 2) with the
+   normal "unknown command / valid next tokens" message — not a special
+   deprecation path, because there is no deprecation.
+2. **Tests assert absence, not aliasing.** For each row above, a test that the
+   old spelling is *not* accepted, so the removal cannot silently regress into
+   a half-supported form.
+3. **The `#77` legacy `appliance/<kind>` acceptance is withdrawn too.** It
+   shipped in #82 as a warned alias under the old plan; #74 removes it and the
+   warning with it. Registry keys stay internal, full stop.
+4. **`--format native` inherits the existing allowlist unchanged.** `show run
+   appliance` is the one surface reaching an appliance's command interpreter;
+   its deny-by-default validator (40 refusal cases) is not relaxed by being
    renamed.
+5. **Documentation carries before/after examples anyway** (#74 asks for them).
+   Not for compatibility — for anyone reading an older sitrep or issue and
+   wondering why the command in it no longer exists.
 
-## Removal boundary
+## If this turns out to be wrong
 
-**Open question — the owner's call.** The table above says `<BOUNDARY>`
-because the project has no release cadence yet to anchor it to. Options:
-
-* the next MINOR release after ratification, or
-* a fixed date, or
-* "when `show coverage` reports the taxonomy applied to every curated kind".
-
-Whichever is chosen goes in the constitution's amendment record and in
-`--help`. Until it is chosen, aliases have no expiry, which by Principle VI's
-own logic makes them permanent by default — so this is worth settling before
-#74 begins rather than after.
+The moment there is a real user, this decision inverts and Principle VI applies
+in full. That is a one-line trigger worth naming: **the first external
+installation is the point at which command removal stops being free.**
