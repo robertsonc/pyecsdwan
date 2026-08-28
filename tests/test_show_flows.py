@@ -76,6 +76,13 @@ class RecordingClient(OrchClient):
         json_body: Any = None,
         params: dict[str, Any] | None = None,
         expected: Any = None,
+        # #67 added these to OrchClient.request. Accepted and ignored: this
+        # double exists to record *what was asked for*, and it never retries
+        # because it never fails at the transport layer. The `type: ignore`
+        # above is why mypy did not catch the mismatch — a narrowed override on
+        # a test double is invisible until it is called.
+        retry_policy: Any = None,
+        scope: str = "orchestrator",
     ) -> Any:
         self.calls.append((method, path, dict(params or {})))
         if (

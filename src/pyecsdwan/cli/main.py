@@ -32,6 +32,7 @@ from typer.core import TyperGroup
 
 from pyecsdwan import config, evidence, locking, runtime, specs, txn
 from pyecsdwan import registry as registry_mod
+from pyecsdwan import retry as retry_mod
 from pyecsdwan.candidate import CandidateCorruptError, CandidateStore
 from pyecsdwan.cli import fanout, outcomes, reference, render
 from pyecsdwan.cli.outcomes import Outcome
@@ -1705,6 +1706,15 @@ def api(
     body_data, body_sha = _load_body(body)
     state = _state(ctx)
     rt_ctx, _registry, settings = _bootstrap(state)
+    # Tier-0 never replays (#67). An operator typing an arbitrary path has not
+    # told us the endpoint is read-only, and the API has GETs whose own spec
+    # summaries say "Clear idle time", "Generate the Sys Dump file" and "Delete
+    # specific/all segment BGP state". The policy and its reason are journaled
+    # so an audit can answer "was this call sent once?" without re-deriving it.
+    scope = "appliance" if appliance is not None else "orchestrator"
+    policy, reason = retry_mod.effective_policy(
+        method_upper, path, retry_mod.Retry.NEVER, scope=scope
+    )
     journal = TxnJournal.create(settings.host, [Ref(kind="api", name=f"{method_upper} {path}")])
     journal.append(
         "RAW_API",
@@ -1712,17 +1722,27 @@ def api(
         path=path,
         params=params,
         body_sha256=body_sha,
+        retry_policy=policy.value,
+        retry_reason=reason,
         status="sent",
     )
     try:
         if appliance is not None:
             ne_pk = rt_ctx.resolver.ne_pk_for(appliance)
             response = rt_ctx.client.appliance_request(
-                method_upper, ne_pk, _with_params(path, params), json_body=body_data
+                method_upper,
+                ne_pk,
+                _with_params(path, params),
+                json_body=body_data,
+                retry_policy=retry_mod.Retry.NEVER,
             )
         else:
             response = rt_ctx.client.request(
-                method_upper, path, json_body=body_data, params=params or None
+                method_upper,
+                path,
+                json_body=body_data,
+                params=params or None,
+                retry_policy=retry_mod.Retry.NEVER,
             )
     except (OrchApiError, ResolveError, ValueError) as exc:
         journal.set_state(TxnState.AUDIT_ONLY, response_summary=f"error: {exc}")
