@@ -11,13 +11,16 @@ from graphlib import CycleError, TopologicalSorter
 from typing import Any
 
 from pyecsdwan.contract import (
+    RESERVED_CLI_WORDS,
     CanonicalState,
     Ctx,
     NotCurated,
     RawState,
     Ref,
     Resource,
+    Scope,
     Tier,
+    default_cli_name,
 )
 
 
@@ -29,16 +32,118 @@ class UnknownKind(KeyError):
         )
 
 
+class AliasError(ValueError):
+    """A CLI name is reserved, or collides within its scope (issue #77).
+
+    Raised at *registration* — so at import, in every test run and at startup —
+    rather than when an operator types the ambiguous name. A collision is a
+    developer's problem and must fail for a developer.
+    """
+
+
+@dataclasses.dataclass(frozen=True)
+class CliResolution:
+    """The kind a user-facing token resolved to, and how it was spelled."""
+
+    kind: str
+    #: True when the operator used the internal registry key (``appliance/x``)
+    #: rather than the CLI noun. Accepted during the migration window, and the
+    #: caller is expected to warn (issue #77, `compatibility.md`).
+    legacy: bool = False
+
+
 class Registry:
     def __init__(self) -> None:
         self._plugins: dict[str, Resource] = {}
+        #: ``(scope, cli-name) -> kind``. Scoped, not flat: `zones` exists as
+        #: both `appliance/zones` and an orchestrator-scope `zones`, and they
+        #: are different objects. A flat namespace would collide on day one,
+        #: which is why #77 says aliases are unique *within each scope*.
+        self._by_cli: dict[tuple[str, str], str] = {}
 
     def register(self, resource: Resource) -> None:
         if not resource.kind:
             raise ValueError(f"{type(resource).__name__} has no kind set")
         if resource.kind in self._plugins:
             raise ValueError(f"duplicate resource kind {resource.kind!r}")
+        names = self._cli_names_for(resource)
+        scope = resource.scope.value
+        for name in names:
+            if name in RESERVED_CLI_WORDS:
+                raise AliasError(
+                    f"{resource.kind!r} claims CLI name {name!r}, which the command "
+                    f"grammar reserves ({', '.join(sorted(RESERVED_CLI_WORDS))}). "
+                    f"Set `cli_name` to something else."
+                )
+            existing = self._by_cli.get((scope, name))
+            if existing is not None and existing != resource.kind:
+                raise AliasError(
+                    f"CLI name {name!r} is claimed by both {existing!r} and "
+                    f"{resource.kind!r} in {scope} scope. Names must be unique "
+                    f"within a scope; set `cli_name` on one of them."
+                )
         self._plugins[resource.kind] = resource
+        for name in names:
+            self._by_cli[(scope, name)] = resource.kind
+
+    @staticmethod
+    def _cli_names_for(resource: Resource) -> list[str]:
+        primary = resource.cli_name or default_cli_name(resource.kind)
+        out = [primary]
+        out.extend(a for a in resource.cli_aliases if a not in out)
+        return out
+
+    def cli_name(self, kind: str) -> str:
+        """The user-facing noun for a kind — what help and errors should say."""
+        resource = self.get(kind)
+        return resource.cli_name or default_cli_name(kind)
+
+    def cli_names(self, scope: Scope | str | None = None) -> list[str]:
+        """Every *offerable* user-facing noun, optionally restricted to a scope.
+
+        Drives completion and the "valid next tokens" listing a nonterminal
+        prints, so it must never contain a registry key.
+
+        Tier-1 generated stubs are excluded. Their ``normalize()`` raises
+        ``NotCurated`` by design, so completing one offers the operator a name
+        that cannot work — and the only spelling they have is a raw operation
+        id (``generated/appliance_post_virtualif_vti_by_vti_name``), which is
+        the leakage this issue is about. They stay *resolvable* if typed, so
+        the answer is `NotCurated` rather than "unknown kind", and
+        ``show coverage`` still lists them.
+        """
+        want = scope.value if isinstance(scope, Scope) else scope
+        return sorted(
+            name
+            for (sc, name), kind in self._by_cli.items()
+            if (want is None or sc == want) and self._plugins[kind].tier >= Tier.CURATED
+        )
+
+    def resolve_cli(self, token: str, scope: Scope | str | None = None) -> CliResolution:
+        """Resolve a user-typed noun to a kind, within a scope.
+
+        Accepts the internal registry key too, flagged as ``legacy`` so the
+        caller can warn rather than silently blessing it.
+        """
+        want = scope.value if isinstance(scope, Scope) else scope
+        if want is not None:
+            kind = self._by_cli.get((want, token))
+            if kind is not None:
+                return CliResolution(kind=kind)
+        else:
+            hits = {k for (_sc, name), k in self._by_cli.items() if name == token}
+            if len(hits) == 1:
+                return CliResolution(kind=next(iter(hits)))
+            if len(hits) > 1:
+                raise AliasError(
+                    f"{token!r} is ambiguous across scopes ({', '.join(sorted(hits))}); "
+                    f"name the scope, e.g. `show appliance <name> {token}`."
+                )
+        if token in self._plugins:
+            # The internal key still works during the migration window.
+            return CliResolution(kind=token, legacy=True)
+        known = self.cli_names(want)
+        raise UnknownKind(token, known)
 
     def get(self, kind: str) -> Resource:
         try:

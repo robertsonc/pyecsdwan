@@ -119,10 +119,10 @@ collides today — 42 bare names checked against them.
 - [ ] A compatibility table maps every existing command to its replacement and removal policy
 - [ ] Golden UX tests are derivable directly from the spec
 - [ ] #48/#49-style scope and discoverability confusion is covered by acceptance tests
-- [ ] Alias collisions fail at startup/test time, never at operator runtime
+- [x] Alias collisions fail at startup/test time, never at operator runtime
 - [x] Q1 and Q2 answered and the grammar updated accordingly
-- [ ] Reserved words rejected as kind aliases at startup (R12)
-- [ ] Owner approves the grammar — epic #70's migration gate
+- [x] Reserved words rejected as kind aliases at startup (R12)
+- [x] Owner approves the grammar — epic #70's migration gate (approved 2026-08-28)
 
 ## Evidence expected
 
