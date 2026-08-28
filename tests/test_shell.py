@@ -99,12 +99,31 @@ def test_completer_offers_appliance_names_after_show_appliance(
 
 
 def test_completer_offers_kinds_after_show_appliance_name(state: ShellState) -> None:
+    """After an appliance name, completion offers appliance-scope nouns only.
+
+    This used to assert `bio` was offered — but `bio` is *orchestrator*-scope,
+    so the old completer was suggesting kinds that cannot be used in that
+    position at all, alongside registry keys like `appliance/bgp` that repeat
+    scope the operator has already given (#77).
+    """
     completer = ShellCompleter(state)
     options = completer._options(["show", "appliance", "S1-ecv-01"])
-    assert "bio" in options
+    assert "bgp" in options and "banners" in options
+    assert "bio" not in options, "orchestrator-scope kind offered in appliance position"
+    assert not [o for o in options if "/" in o], f"registry keys leaked: {options}"
 
 
 def test_completer_set_appliance_unaffected(state: ShellState) -> None:
-    # Regression check: the pre-existing set/delete completion path.
+    """The set/delete completion path resolves names exactly as `show` does.
+
+    Previously this asserted the whole registry-key list; both surfaces now
+    offer the same appliance-scope nouns, which is Principle IV's "one grammar
+    across interfaces" made testable.
+    """
+    from pyecsdwan.contract import Scope
+
     completer = ShellCompleter(state)
-    assert completer._options(["set", "appliance", "S1-ecv-01"]) == default_registry.kinds()
+    options = completer._options(["set", "appliance", "S1-ecv-01"])
+    assert options == default_registry.cli_names(Scope.APPLIANCE)
+    assert options == completer._options(["show", "appliance", "S1-ecv-01"])
+    assert not [o for o in options if "/" in o], f"registry keys leaked: {options}"

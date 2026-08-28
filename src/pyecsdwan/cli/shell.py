@@ -36,7 +36,7 @@ from rich.table import Table
 from pyecsdwan import __version__, config, journal, locking, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.contract import Ctx, Ref, Resource, Scope
-from pyecsdwan.registry import Registry
+from pyecsdwan.registry import Registry, UnknownKind
 from pyecsdwan.reports import versions
 
 if TYPE_CHECKING:
@@ -182,6 +182,34 @@ def _tokenize(line: str, console: Console) -> list[str] | None:
         return None
 
 
+def _resolve_kind(token: str, appliance: str | None, state: ShellState) -> str:
+    """User-facing noun -> internal registry kind (issue #77).
+
+    Scope comes from the command, not from the operator: naming an appliance
+    selects appliance scope, and naming none selects the Orchestrator — which
+    is exactly what `grammar.md` §3 says the absent scope noun means. So
+    `zones` is unambiguous in either position even though it names two
+    different objects.
+
+    A token that resolves in neither is retried in appliance scope, so the
+    caller can answer "that is appliance-scope, use `appliance <name> ...`"
+    instead of the much less useful "unknown resource kind".
+    """
+    scope = Scope.APPLIANCE if appliance is not None else Scope.ORCHESTRATOR
+    try:
+        resolution = state.registry.resolve_cli(token, scope)
+    except UnknownKind:
+        resolution = state.registry.resolve_cli(token, Scope.APPLIANCE)
+    if resolution.legacy:
+        _warn(
+            state.console,
+            f"{token!r} is an internal registry key; use "
+            f"{state.registry.cli_name(resolution.kind)!r}. "
+            f"The old form still works, and will be removed at a declared boundary.",
+        )
+    return resolution.kind
+
+
 def _parse_ref(args: list[str], state: ShellState, usage: str) -> tuple[Ref, list[str]]:
     """Split ``[appliance <name>] <kind> <name> <rest...>`` into (Ref, rest)."""
     appliance: str | None = None
@@ -192,16 +220,18 @@ def _parse_ref(args: list[str], state: ShellState, usage: str) -> tuple[Ref, lis
         args = args[2:]
     if len(args) < 2:
         raise ValueError(usage)
-    kind, name, rest = args[0], args[1], args[2:]
-    resource = state.registry.get(kind)  # raises UnknownKind with a known-kinds hint
+    token, name, rest = args[0], args[1], args[2:]
+    kind = _resolve_kind(token, appliance, state)
+    resource = state.registry.get(kind)
+    noun = state.registry.cli_name(kind)
     if appliance is not None and resource.scope is not Scope.APPLIANCE:
         raise ValueError(
-            f"{kind} is {resource.scope.value}-scope; omit the 'appliance' form: "
-            f"{kind} <name> ..."
+            f"{noun} is {resource.scope.value}-scope; omit the 'appliance' form: "
+            f"{noun} <name> ..."
         )
     if appliance is None and resource.scope is Scope.APPLIANCE:
         raise ValueError(
-            f"{kind} is appliance-scope; use: appliance <appliance-name> {kind} <name> ..."
+            f"{noun} is appliance-scope; use: appliance <appliance-name> {noun} <name> ..."
         )
     return Ref(kind=kind, name=name, appliance=appliance), rest
 
@@ -540,16 +570,17 @@ def _show_generic(args: list[str], state: ShellState) -> None:
         args = args[2:]
     if not args or len(args) > 2:
         raise ValueError(_SHOW_GENERIC_USAGE)
-    kind = args[0]
+    kind = _resolve_kind(args[0], appliance, state)
     resource = state.registry.get(kind)
+    noun = state.registry.cli_name(kind)
     if appliance is not None and resource.scope.value != "appliance":
         # Mirrors the symmetric check in _parse_ref (set/delete): an
         # orchestrator-scoped kind silently ignoring an `appliance <name>`
         # prefix produced confusing "(not present)"-style results instead of
         # a clear rejection (#48).
         raise ValueError(
-            f"{kind} is {resource.scope.value}-scope; omit the 'appliance' form: "
-            f"show {kind} [<instance>]"
+            f"{noun} is {resource.scope.value}-scope; omit the 'appliance' form: "
+            f"show {noun} [<instance>]"
         )
 
     # Ordered before enumeration deliberately: an appliance-scoped kind with no
@@ -557,12 +588,12 @@ def _show_generic(args: list[str], state: ShellState) -> None:
     # confusion, burying the one message that actually tells the operator what
     # to type.
     if resource.scope.value == "appliance" and appliance is None:
-        raise ValueError(f"{kind} is appliance-scoped; use 'show appliance <name> {kind} ...'")
+        raise ValueError(f"{noun} is appliance-scoped; use 'show appliance <name> {noun} ...'")
 
     if len(args) == 2:
         instance = args[1]
     else:
-        instance, appliance = _resolve_instance(resource, kind, appliance, state)
+        instance, appliance = _resolve_instance(resource, noun, appliance, state)
 
     ref = Ref(kind=kind, name=instance, appliance=appliance)
     canonical = resource.normalize(resource.fetch(state.ctx, ref))
@@ -804,9 +835,12 @@ class ShellCompleter(Completer):
         return []
 
     def _target_options(self, first: str, prior: list[str]) -> list[str]:
-        kinds = self.state.registry.kinds()
+        # User-facing nouns, never registry keys (#77) — and scoped, so the
+        # position after an appliance name offers appliance nouns and the bare
+        # position offers Orchestrator ones. Completing `appliance/zones` after
+        # the operator already typed `appliance BR1-EC` was the leak.
         if len(prior) == 1:
-            options = [*kinds, "appliance"]
+            options = [*self.state.registry.cli_names(Scope.ORCHESTRATOR), "appliance"]
             if first == "show" and self.state.mode == MODE_OPERATIONAL:
                 options.extend(_SHOW_SPECIALS)
             return options
@@ -814,7 +848,7 @@ class ShellCompleter(Completer):
             if len(prior) == 2:
                 return self._appliance_names()
             if len(prior) == 3:
-                return kinds
+                return self.state.registry.cli_names(Scope.APPLIANCE)
         if first == "show" and prior[1] == "transactions" and len(prior) == 2:
             return ["pending"]
         # `flows` completes to its one subcommand; `flow` takes a free-form

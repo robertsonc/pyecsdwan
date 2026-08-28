@@ -133,7 +133,9 @@ def test_an_appliance_scoped_kind_without_an_appliance_says_what_to_type(
     """This message must not be buried behind fabric-wide enumeration."""
     out = _shell(shell_state, f"show {SINGLETON_KIND}")
     assert "appliance-scoped" in out, out
-    assert f"show appliance <name> {SINGLETON_KIND}" in out, out
+    # The remedy is spelled with the user-facing noun, not the registry key
+    # the operator happened to type (#77).
+    assert "show appliance <name> banners" in out, out
 
 
 def test_every_terminal_state_produces_visible_output(shell_state: ShellState) -> None:
@@ -275,3 +277,52 @@ def test_genuine_ambiguity_on_one_appliance_still_asks(
     assert "name required" in out and "BR1-EC" in out, out
     assert "wan1" in out and "wan2" in out, out
     assert "elsewhere" not in out, out
+
+
+# -- user-facing nouns in the shell (#77) -----------------------------------
+
+
+def test_the_noun_works_without_the_registry_prefix(shell_state: ShellState) -> None:
+    """The headline of #77: `banners`, not `appliance/banners`."""
+    out = _shell(shell_state, "show appliance BR1-EC banners")
+    assert "appliance/banners:BR1-EC:global" in out, out
+    assert "internal registry key" not in out, out
+
+
+def test_the_registry_key_still_works_but_warns(shell_state: ShellState) -> None:
+    """Compatibility with a visible nudge — never a silent blessing."""
+    out = _shell(shell_state, f"show appliance BR1-EC {SINGLETON_KIND}")
+    assert "internal registry key" in out, out
+    assert "'banners'" in out, out
+    assert "appliance/banners:BR1-EC:global" in out, out  # and it still worked
+
+
+def test_the_two_zones_are_different_objects_reached_by_scope(
+    shell_state: ShellState,
+) -> None:
+    """The collision that forced a per-scope namespace, exercised end to end."""
+    appliance_side = _shell(shell_state, "show appliance BR1-EC zones")
+    assert "appliance/zones:BR1-EC" in appliance_side, appliance_side
+    assert "internal registry key" not in appliance_side, appliance_side
+
+
+def test_set_and_show_resolve_a_noun_identically(shell_state: ShellState) -> None:
+    """Principle IV: one grammar across interfaces."""
+    from pyecsdwan.cli.shell import _parse_ref
+
+    ref, _rest = _parse_ref(
+        ["appliance", "BR1-EC", "banners", "global", "motd", "hi"],
+        shell_state,
+        "usage",
+    )
+    assert ref.kind == SINGLETON_KIND
+    assert ref.appliance == "BR1-EC"
+
+
+def test_an_orchestrator_noun_typed_without_a_scope_still_works(
+    shell_state: ShellState,
+) -> None:
+    """An absent scope noun means the Orchestrator — it is not ambiguity."""
+    out = _shell(shell_state, "show interface-labels")
+    assert "unknown resource kind" not in out, out
+    assert "ambiguous" not in out, out

@@ -8,9 +8,9 @@ unlinked task has not been started.
 | # | Task | Depends on | Acceptance | Issue |
 |---|---|---|---|---|
 | ~~T0~~ | ~~Owner answers Q1 and Q2; grammar updated~~ | — | **Done** — grammar 0.2.0; both recorded in `spec.md` | — |
-| T1 | Owner approves the grammar and the acceptance table | T0 | Recorded approval; epic #70's gate satisfied | #70 |
-| T2 | CLI name/alias contract on `Resource`, per-scope, uniqueness **and reserved words** checked at import | T1 | `show appliance X deployment` resolves without `appliance/`; synthetic collision fails at startup; a kind named `running` is rejected (R12) | #77 |
-| T3 | User-facing nouns throughout parsing, completion, help, usage, errors, docs | T2 | No registry key appears in any operator-visible string | #77 |
+| ~~T1~~ | ~~Owner approves the grammar and the acceptance table~~ | T0 | **Done** — approved 2026-08-28; epic #70's migration gate open | #70 |
+| ~~T2~~ | ~~CLI name/alias contract on `Resource`~~ | T1 | **Done** — `cli_name`/`cli_aliases`, per-scope index, reserved words and collisions refused at registration | #77 |
+| T3 | User-facing nouns throughout parsing, completion, help, usage, errors, docs | T2 | **Partly done** — shell parsing, completion and errors carry nouns; `main.py` subcommand help/usage still to do | #77 |
 | T4 | Offline command reference view (domain, scope, instances, mutability, support status) | T2 | Runs with no Orchestrator connection | #77 |
 | T5 | Outcome classifier + renderer for the eleven outcomes, human and JSON | — | One test per outcome, both modes; `{}`/`None`/`""`/204/`[]` each intentional | #78 |
 | T6 | Bounded timeout on every appliance read; every terminal path returns to the prompt | T5 | `show appliance S1-ecv-01 banners` always produces a visible result | #78 |

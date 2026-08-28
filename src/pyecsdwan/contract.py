@@ -194,6 +194,35 @@ class ApplyResult:
         return ApplyResult(ok=True, changed=False, message=message)
 
 
+#: Tokens the command grammar needs for itself, so they cannot also name a
+#: resource (issue #71 R12). This constraint arrived with the owner's Q1
+#: answer: once the datastore token is optional, ``show configuration <token>``
+#: must decide whether ``<token>`` is a datastore, a scope noun, or a kind.
+#: While the token was mandatory the position was unambiguous and none of this
+#: was needed.
+RESERVED_CLI_WORDS: frozenset[str] = frozenset(
+    {"running", "candidate", "appliance", "fabric", "configuration"}
+)
+
+
+def default_cli_name(kind: str) -> str:
+    """The user-facing noun for a kind, when the plugin does not name one.
+
+    ``appliance/`` is a *scope* prefix, and the command has already established
+    scope by the time a kind is read — so repeating it is duplication and it is
+    dropped.
+
+    ``generated/`` is deliberately **not** stripped. It marks tier, not scope,
+    and what sits beneath it is a raw operation id
+    (``generated/appliance_post_virtualif_vti_by_vti_name``). Stripping the
+    prefix would leave that id as the "friendly" name, which is not an
+    improvement — a Tier-1 stub has no curated noun to offer yet, and saying so
+    is more honest than inventing one.
+    """
+    prefix = "appliance/"
+    return kind[len(prefix) :] if kind.startswith(prefix) else kind
+
+
 class ResourceError(Exception):
     """Base error for resource operations."""
 
@@ -241,6 +270,17 @@ class Resource:
     #: Spec endpoints this resource covers, as ``"<scope> <METHOD> <path>"``
     #: keys (see ``pyecsdwan.specs.endpoint_key``). Drives ``show coverage``.
     endpoints: tuple[str, ...] = ()
+    #: User-facing CLI noun (issue #77). Empty means "derive it" — see
+    #: :func:`default_cli_name`. Set this only when the derived name is wrong.
+    #:
+    #: The operator should never have to type a registry key. ``kind`` stays
+    #: the stable internal identifier used by the candidate store, the journal
+    #: and every API contract; this is what the command line calls it. The two
+    #: are deliberately separate so a nicer noun never becomes a state
+    #: migration.
+    cli_name: str = ""
+    #: Extra accepted spellings for the same resource, within the same scope.
+    cli_aliases: tuple[str, ...] = ()
 
     # -- mandatory plugin surface -------------------------------------------
 
