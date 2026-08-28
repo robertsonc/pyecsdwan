@@ -71,8 +71,18 @@ pyecsdwan(config)# exit
 pyecsdwan> exit
 ```
 
-Operational mode: `show appliances`, `show <kind> [<name>]`, `show journal`,
-`show transactions pending`, `show coverage`.
+Operational mode splits by *intent* (#70), and no token sequence resolves to
+two:
+
+```
+pyecsdwan> show appliances | journal | locks | coverage | commands
+pyecsdwan> show configuration [running|candidate] ...   # configuration
+pyecsdwan> show appliance <name> bgp summary            # live protocol state
+pyecsdwan> show fabric version                          # live, every appliance
+```
+
+`show commands` lists the whole surface — intent, scope, mutability and
+support status — and needs no Orchestrator connection at all.
 
 ## Scriptable subcommands (automation / CI)
 
@@ -87,9 +97,22 @@ ec-cli load interface-labels global labels.yaml   # declarative desired state
 ec-cli api get /appliance       # Tier-0 raw passthrough (audit-journaled)
 ec-cli api post /gms/interfaceLabels --body labels.json
 ec-cli api get /systemInfo --appliance BR1-EC     # via appliance proxy
+ec-cli show commands            # every command: intent / scope / support (offline)
 ec-cli show coverage            # every kind: scope / reversibility / tier
 ec-cli show coverage --endpoints --tier 2         # every spec endpoint x tier
-ec-cli plugin promote appliance/bgp               # run the Tier-2 checklist
+ec-cli plugin promote bgp --appliance BR1-EC      # run the Tier-2 checklist
+```
+
+Reads, split by intent — configuration and operational state are different
+commands over different sources, and the exit code says which terminal state
+was reached (`grammar.md` §5):
+
+```bash
+ec-cli show configuration appliance BR1-EC banners     # normalized config
+ec-cli show configuration appliance BR1-EC --format native   # vendor text
+ec-cli show configuration fabric security              # fabric config, by section
+ec-cli show appliance BR1-EC bgp neighbors --json      # live protocol state
+ec-cli show fabric version                             # live, every appliance
 ```
 
 ## Tier-1 spec pipeline (`tools/`)
