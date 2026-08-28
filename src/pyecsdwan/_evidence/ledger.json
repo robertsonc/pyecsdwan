@@ -1,0 +1,209 @@
+{
+  "schema": 1,
+  "note": "Every curated resource sits at mock-verified: green against the bundled mock, and nothing more. This repository does have live-read history \u2014 Phase-2/3 plugins carry payload shapes captured against a real lab Orchestrator, and six template-section names were confirmed against a real Default Template Group (docs/sitrep/2026-08-26-fanout.md, docs/sitrep/2026-08-26-handoff.md) \u2014 but not one of those observations recorded the Orchestrator version it was made against, so none of them can promote a resource past mock-verified. That is the finding, not a gap in the tooling: an observation without a version tells the next operator nothing about their fabric. docs/live-validation.md is the protocol for producing evidence that does count.",
+  "support": {
+    "orchestrator": [],
+    "ecos": [],
+    "auth_modes": [],
+    "spec_baseline": "7.2.0"
+  },
+  "records": [
+    {
+      "kind": "app-express-association",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "app-express-group",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "appliance/acl",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "appliance/banners",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "appliance/bgp",
+      "level": "mock-verified",
+      "notes": "read+diff only; `apply()` raises \u2014 no modeled write endpoint in either vendored spec (#16 Stage 2)"
+    },
+    {
+      "kind": "appliance/deployment",
+      "level": "mock-verified",
+      "notes": "payload shape (incl. the `vifs` key) captured live 2026-08-26; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
+      "source": "docs/sitrep/2026-08-26-fanout.md"
+    },
+    {
+      "kind": "appliance/dhcp",
+      "level": "mock-verified",
+      "notes": "confirmed live 2026-08-26 to live inside the deployment object rather than its own endpoint; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
+      "source": "docs/sitrep/2026-08-26-fanout.md"
+    },
+    {
+      "kind": "appliance/inbound-shaper",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "appliance/logging",
+      "level": "mock-verified",
+      "notes": "`logging` confirmed live 2026-08-26 as a real template section name; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
+      "source": "docs/sitrep/2026-08-26-fanout.md"
+    },
+    {
+      "kind": "appliance/loopback",
+      "level": "mock-verified",
+      "notes": "read+diff only; no per-appliance loopback write endpoint is documented (#18)"
+    },
+    {
+      "kind": "appliance/mgmt-services",
+      "level": "mock-verified",
+      "notes": "`mgmtServices` confirmed live 2026-08-26 as a real template section name; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
+      "source": "docs/sitrep/2026-08-26-fanout.md"
+    },
+    {
+      "kind": "appliance/nat-maps",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "appliance/nat-pools",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "appliance/optimization-map",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "appliance/ospf",
+      "level": "mock-verified",
+      "notes": "read+diff only; `apply()` raises \u2014 no modeled write endpoint in either vendored spec (#17 Stage 2)"
+    },
+    {
+      "kind": "appliance/qos-map",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "appliance/route-map",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "appliance/routes",
+      "level": "mock-verified",
+      "notes": "`routes` confirmed live 2026-08-26 as a real template section name; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
+      "source": "docs/sitrep/2026-08-26-fanout.md"
+    },
+    {
+      "kind": "appliance/security-maps",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "appliance/shaper",
+      "level": "mock-verified",
+      "notes": "`shaper` confirmed live 2026-08-26 as a real template section name; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
+      "source": "docs/sitrep/2026-08-26-fanout.md"
+    },
+    {
+      "kind": "appliance/snmp",
+      "level": "mock-verified",
+      "notes": "`snmp` confirmed live 2026-08-26 as a real template section name; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
+      "source": "docs/sitrep/2026-08-26-fanout.md"
+    },
+    {
+      "kind": "appliance/vrrp",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "appliance/zones",
+      "level": "mock-verified",
+      "notes": "confirmed live 2026-08-26 to have no Default/id-0 row; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
+      "source": "docs/sitrep/2026-08-26-fanout.md"
+    },
+    {
+      "kind": "bio",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "bio-association",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "generated/appliance_post_virtualif_vti_by_vti_name",
+      "level": "implemented",
+      "notes": "generated stub; normalize() raises NotCurated, so it cannot be planned or committed"
+    },
+    {
+      "kind": "generated/orchestrator_post_alarm_correlation_settings",
+      "level": "implemented",
+      "notes": "generated stub; normalize() raises NotCurated, so it cannot be planned or committed"
+    },
+    {
+      "kind": "interface-labels",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "internal-subnets",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "ip-address-group",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "ip-service-group",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "loopback-orch",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "overlay-priority",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "region",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "region-association",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "regional-overlay",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "schedule-timezone",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "security-policy",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "snat-maps",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "template-association",
+      "level": "mock-verified",
+      "notes": "read live 2026-08-26 while grounding template ownership; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
+      "source": "docs/sitrep/2026-08-26-fanout.md"
+    },
+    {
+      "kind": "template-group",
+      "level": "mock-verified",
+      "notes": "a real Default Template Group's selected-section list read live 2026-08-26; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
+      "source": "docs/sitrep/2026-08-26-fanout.md"
+    },
+    {
+      "kind": "template-group-priority",
+      "level": "mock-verified"
+    },
+    {
+      "kind": "zones",
+      "level": "mock-verified"
+    }
+  ]
+}

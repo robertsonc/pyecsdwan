@@ -4,6 +4,20 @@ Transactional safety is never auto-granted: an OpenAPI spec cannot express
 reversibility, async-job semantics, or template ownership. Coverage grows
 through three tiers; `ec-cli show coverage` reports where every kind stands.
 
+**Tier is not evidence (#66).** This document is about how carefully a resource
+was *written*, which is decided in a code review and tops out at Tier 2. What
+anyone has *seen it do* on real gear is a separate, independent axis — the
+evidence ladder in `docs/live-validation.md`, recorded per resource in
+`src/pyecsdwan/_evidence/ledger.json` and reported by
+`ec-cli show coverage --evidence`.
+
+A resource can be immaculately curated and have never touched a fabric. Today
+all 41 of them are: every curated kind sits at `mock-verified`, and no write
+path anywhere in this tool has been run and rolled back on real gear at a
+recorded version. Completing every box below does not change that, and
+`ec-cli plugin promote` now says so rather than letting a green checklist read
+as production readiness.
+
 ## Tier 0 — raw passthrough (day-0 coverage of everything)
 
 `ec-cli api get|post|put|delete <path> [--body file] [--appliance NAME]`
@@ -185,6 +199,10 @@ command answers without one (generated stubs implement no `list_refs()`).
 It does **not** flip the tier. `tier = Tier.CURATED` is a source declaration a
 reviewer signs off on, not a runtime toggle; when every machine-checkable box
 is green the command prints the change to make and leaves it to you.
+
+It also prints the resource's **evidence level**, and says plainly when a green
+checklist is a statement about the code and not about any fabric. Those are the
+two things a reader is most likely to conflate, so they are printed together.
 
 **Caveat on Tier-1 kinds** (see `docs/futures/README.md`): the command gates
 the idempotency checks behind `tier >= CURATED`, so for a generated stub the

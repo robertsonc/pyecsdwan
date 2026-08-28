@@ -52,7 +52,9 @@ recorded in each resource's module docstring.
 
 Every epic-#4 write path is spec-confirmed but **not live-write-tested** —
 session access was read-only throughout. See `docs/futures/README.md`
-§"Write semantics needing live confirmation" before trusting one.
+§"Write semantics needing live confirmation" before trusting one. Since #66
+this is recorded per resource rather than only in prose: `ec-cli show coverage
+--evidence` reports it, and the ledger it reads is validated on load.
 
 **Tier-1 spec pipeline (#6) — complete.** `tools/spec_sync.py` fetches and
 diffs the published OpenAPI spec against the `src/pyecsdwan/_specs/`
@@ -199,7 +201,7 @@ So *anything and everything* is reachable now via Tier 0; curated plugins
 | **Tier-1 spec pipeline** (#6) ✅ | `tools/spec_sync.py`, model/binding/stub codegen, `show coverage`, promotion gating | #25–#29 |
 | **Fleet lifecycle** (#7) | discovery/approval, decommission cascade, preconfig, backup/restore, upgrades, licensing — IRREVERSIBLE class | in-epic checklist |
 | **Fabric ops & observability** (#8) | `drift`, declarative bulk apply, JSON Schema, dashboard-parity views | #54 (✅ shipped) + in-epic checklist |
-| **Production hardening** (#9) | concurrency, MCP trust boundary, CI/packaging, async-job fail-closed, evidence ladder, retry policy | #62–#68 (#62, #63, #64, #65 ✅ shipped; #66, #67, #68 open) |
+| **Production hardening** (#9) | concurrency, MCP trust boundary, CI/packaging, async-job fail-closed, evidence ladder, retry policy | #62–#68 (#62, #63, #64, #65, #66 ✅ shipped; #67, #68 open) |
 | **CLI information architecture** (#70) ✅ | intent-separated command taxonomy, spec-driven design; constitution + design corpus + grammar, then the migration itself | #49, #71–#78 (all shipped; one flag decision open) |
 | **(v2) RBAC broker** (#10) | direct-to-appliance access, gated — explicitly out of v1 scope | in-epic checklist |
 
@@ -209,9 +211,29 @@ commands, sub-issues #55–#59); the rest of #8 stays an in-epic checklist.
 the operational/v2 epics (#7–#10) carry their breakdown as checklists and get
 sharded into issues when their phase starts.
 
-## Parity map (Orchestrator UI area → status)
+## Parity map (Orchestrator UI area → code status)
 
-| Orchestrator UI area | Status |
+**What ✅ means here, precisely (#66).** It means the code shipped and is green
+against the bundled mock Orchestrator — `mock-verified` on the evidence ladder.
+It does **not** mean anyone has run a write against real gear. Today **no
+resource in this tool has live change-and-rollback evidence**: not one write
+path has been executed and rolled back on a fabric at a recorded version.
+
+That is not a caveat on a few rows, it is the state of all 41 of them, which is
+why it is stated once here rather than repeated in every cell — a per-row claim
+maintained by hand is a claim that drifts. The machine-readable answer is
+`src/pyecsdwan/_evidence/ledger.json`, checked on load and by
+`tests/test_evidence.py`, and readable offline:
+
+```
+ec-cli show coverage --evidence
+```
+
+`docs/live-validation.md` is the protocol for producing evidence that counts.
+Until a row's resource reaches `live-change-and-rollback-verified`, treat its
+write path as code that has never met a fabric.
+
+| Orchestrator UI area | Code status |
 |---|---|
 | Templates & template groups (content + association) | ✅ shipped (Phase 1) |
 | Business Intent Overlays (config + appliance association) | ✅ shipped (Phase 1) |
