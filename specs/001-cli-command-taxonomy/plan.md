@@ -32,8 +32,7 @@ that are already tested.
 
 ## Constitution check
 
-Constitution 0.1.0 (draft — findings recorded, not blocking, per
-`.specify/README.md`).
+Constitution **1.0.0, ratified 2026-08-28** — these checks are binding.
 
 | Principle | Applies? | How this design satisfies it | Risk |
 |---|---|---|---|
@@ -42,7 +41,7 @@ Constitution 0.1.0 (draft — findings recorded, not blocking, per
 | **III. Model-first, labelled native** | Yes | Native is a `--format` value on running configuration only (Decision 5); R10 forbids reaching it by default | Retiring `show run appliance` is a visible break; alias + warning |
 | **IV. One grammar across interfaces** | Yes | Outermost-first ordering both surfaces (Decision 3); R4 tests them paired | `--appliance` flag vs `appliance` noun stays a spelling difference; acceptable, tested |
 | **V. Evidence-gated support** *(non-negotiable)* | Yes | Spec's *Evidence expected* states design-only now, mock-verified at #74, and names `unsupported` vs `not_found` as unverifiable without gear | The mock cannot faithfully distinguish those two; must stay labelled unverified |
-| **VI. Reversible evolution** | Yes | `compatibility.md` covers every existing form; behavior-asserting tests; the one meaning-change hard-fails rather than warning | Removal boundary undecided (Q3) — an alias with no expiry is permanent by default |
+| **VI. Reversible evolution** | **No — out of scope** | Its subject is an operator who would be surprised by a change, and pyecsdwan has no production users. Old forms are removed, not aliased (Q3) | Inverts the moment there is a first external installation; named in `compatibility.md` |
 
 **No non-negotiable principle is unsatisfied.** Two risks under II and V are
 carried openly rather than designed away: `stale` exiting 0, and the mock's
@@ -81,6 +80,7 @@ None. No convention is departed from.
 | The hard-fail window is disruptive for anyone scripting `show appliance X <kind>` | Deliberate; needs a release note, and Q3's boundary bounds it |
 | A future kind introduces a second cross-scope collision | R6's startup check fails for a developer, not an operator |
 | ~~`stale` exiting 0 lets a cached answer read as fresh~~ | **Closed by Q2** — cached data requires `--stale-ok`, so it is never served unasked |
+| The no-compatibility decision is wrong because an unknown user exists | Accepted deliberately; the trigger to revisit is named in `compatibility.md` |
 | A kind alias collides with a reserved word once the datastore token is optional | R12's validator fails at startup, for a developer not an operator |
 | The outcome layer touches every read path | Landed first and separately, so a regression is attributable |
 | ~~Grammar churn if Q1 is answered after tests are written~~ | **Closed** — answered before any test was written, which is what blocking on it bought |

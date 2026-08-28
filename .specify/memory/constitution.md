@@ -1,8 +1,8 @@
 # pyecsdwan constitution
 
-**Version:** 0.1.0 (draft — not yet ratified)
-**Status:** proposed for ratification by the repository owner
-**Last amended:** 2026-08-27
+**Version:** 1.0.0 — **ratified**
+**Status:** in force. Ratified by the repository owner 2026-08-28.
+**Last amended:** 2026-08-28
 
 This document governs how pyecsdwan is designed and what "done" means. It
 exists because the project's real rules were already strong but scattered
@@ -235,3 +235,4 @@ rewrite shipped resources, or block urgent fixes:
 | Version | Date | Change | Invalidates |
 |---|---|---|---|
 | 0.1.0 | 2026-08-27 | Initial draft for ratification (#75). Six principles, three non-negotiable. | — |
+| 1.0.0 | 2026-08-28 | **Ratified** by the owner, unchanged from 0.1.0. The constitution check now *blocks* rather than merely recording findings. | Nothing. Plans written against 0.1.0 remain valid; their checks become binding. |

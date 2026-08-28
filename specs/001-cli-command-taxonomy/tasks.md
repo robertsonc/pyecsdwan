@@ -16,10 +16,10 @@ unlinked task has not been started.
 | T6 | Bounded timeout on every appliance read; every terminal path returns to the prompt | T5 | `show appliance S1-ecv-01 banners` always produces a visible result | #78 |
 | T7 | Audit remaining appliance-scoped resources for the same silent path | T6 | Every kind exercised; findings filed | #78 |
 | T8 | Parser: new grammar, scope nouns, nonterminal listing | T1, T3 | R1–R5, R10 tests green; nonterminals list next tokens | #74 |
-| T9 | Compatibility aliases with stderr warnings; the hard-fail for the meaning-change form | T8 | Behavior-asserting tests, not acceptance tests; refusal names both replacements | #74 |
+| T9 | **Remove** the old forms (no aliases — Q3), including #77's legacy `appliance/<kind>` acceptance | T8 | A test per row of `compatibility.md` asserting the old spelling is not accepted | #74 |
 | T10 | BGP operational views — **spec** in `specs/002-appliance-operational-views/` | T1 | Source-verified; `routes` reported unsupported (no endpoint exists) | #72 |
 | T11 | Golden UX tests derived from `grammar.md` §7 | T8, T10 | Every row of the worked-examples table is a test | #74 |
-| T12 | Removal boundary decided (Q3) and documented in `--help` and the constitution record | T1 | Aliases carry an expiry | #74 |
+| ~~T12~~ | ~~Removal boundary decided (Q3)~~ | — | **Withdrawn** — no aliases to remove; nothing has shipped | — |
 
 ## Sequencing notes
 
