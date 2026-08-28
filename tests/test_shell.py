@@ -59,13 +59,30 @@ def test_show_appliance_alone_gives_usage_not_unknown_kind(state: ShellState) ->
     assert "usage: show" in out
 
 
-def test_show_appliance_name_alone_gives_usage(state: ShellState) -> None:
+def test_the_appliance_prefix_is_not_silently_dropped_in_either_tree(
+    state: ShellState,
+) -> None:
+    """#48's root cause, checked on both branches that now carry the prefix."""
+    for line in (
+        "show configuration appliance S1-ecv-01 bio",
+        "show configuration appliance S1-ecv-01 bio DEFAULT",
+    ):
+        out = _run(state, line)
+        assert "orchestrator-scope" in out, out
+        assert "(not present)" not in out, out
+
+
+def test_show_appliance_name_alone_names_its_continuations(state: ShellState) -> None:
+    """`show appliance <name>` is a nonterminal (D-NSO-2): it lists what may
+    follow and exits 0, rather than picking a domain or erroring."""
     out = _run(state, "show appliance S1-ecv-01")
-    assert "usage: show" in out
+    assert "valid next tokens" in out
+    # Nothing lives here yet, and the honest answer says where configuration went.
+    assert "show configuration appliance S1-ecv-01 <kind>" in out
 
 
 def test_show_appliance_name_orchestrator_kind_rejected(state: ShellState) -> None:
-    out = _run(state, "show appliance S1-ecv-01 bio")
+    out = _run(state, "show configuration appliance S1-ecv-01 bio")
     assert "orchestrator-scope" in out
     assert "(not present)" not in out
 
@@ -73,7 +90,7 @@ def test_show_appliance_name_orchestrator_kind_rejected(state: ShellState) -> No
 def test_show_appliance_name_orchestrator_kind_instance_rejected(state: ShellState) -> None:
     # The exact failure mode from #48: this used to silently drop the
     # appliance qualifier and print a misleading "(not present)".
-    out = _run(state, "show appliance S1-ecv-01 bio DEFAULT")
+    out = _run(state, "show configuration appliance S1-ecv-01 bio DEFAULT")
     assert "orchestrator-scope" in out
     assert "(not present)" not in out
 
@@ -107,7 +124,7 @@ def test_completer_offers_kinds_after_show_appliance_name(state: ShellState) -> 
     scope the operator has already given (#77).
     """
     completer = ShellCompleter(state)
-    options = completer._options(["show", "appliance", "S1-ecv-01"])
+    options = completer._options(["show", "configuration", "appliance", "S1-ecv-01"])
     assert "bgp" in options and "banners" in options
     assert "bio" not in options, "orchestrator-scope kind offered in appliance position"
     assert not [o for o in options if "/" in o], f"registry keys leaked: {options}"
@@ -125,5 +142,8 @@ def test_completer_set_appliance_unaffected(state: ShellState) -> None:
     completer = ShellCompleter(state)
     options = completer._options(["set", "appliance", "S1-ecv-01"])
     assert options == default_registry.cli_names(Scope.APPLIANCE)
-    assert options == completer._options(["show", "appliance", "S1-ecv-01"])
-    assert not [o for o in options if "/" in o], f"registry keys leaked: {options}"
+    # `show` reaches the same position through `configuration`, because it must
+    # name a datastore and `set` does not — the verb already is one.
+    show = completer._options(["show", "configuration", "appliance", "S1-ecv-01"])
+    assert set(options) < set(show), show
+    assert not [o for o in show if "/" in o], f"registry keys leaked: {show}"

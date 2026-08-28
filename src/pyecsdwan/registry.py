@@ -41,17 +41,6 @@ class AliasError(ValueError):
     """
 
 
-@dataclasses.dataclass(frozen=True)
-class CliResolution:
-    """The kind a user-facing token resolved to, and how it was spelled."""
-
-    kind: str
-    #: True when the operator used the internal registry key (``appliance/x``)
-    #: rather than the CLI noun. Accepted during the migration window, and the
-    #: caller is expected to warn (issue #77, `compatibility.md`).
-    legacy: bool = False
-
-
 class Registry:
     def __init__(self) -> None:
         self._plugins: dict[str, Resource] = {}
@@ -119,31 +108,32 @@ class Registry:
             if (want is None or sc == want) and self._plugins[kind].tier >= Tier.CURATED
         )
 
-    def resolve_cli(self, token: str, scope: Scope | str | None = None) -> CliResolution:
+    def resolve_cli(self, token: str, scope: Scope | str | None = None) -> str:
         """Resolve a user-typed noun to a kind, within a scope.
 
-        Accepts the internal registry key too, flagged as ``legacy`` so the
-        caller can warn rather than silently blessing it.
+        Registry keys are **not** accepted. ``appliance/banners`` was briefly
+        taken as a warned alias (#77 as shipped in #82); #74's migration
+        withdrew it along with the warning, because a key the operator can type
+        is a key that reaches scripts and then has to be supported. ``kind``
+        stays internal — the candidate store, the journal and the API contracts
+        are keyed on it, which is the whole reason renaming a noun must not be
+        a state migration.
         """
         want = scope.value if isinstance(scope, Scope) else scope
         if want is not None:
             kind = self._by_cli.get((want, token))
             if kind is not None:
-                return CliResolution(kind=kind)
+                return kind
         else:
             hits = {k for (_sc, name), k in self._by_cli.items() if name == token}
             if len(hits) == 1:
-                return CliResolution(kind=next(iter(hits)))
+                return next(iter(hits))
             if len(hits) > 1:
                 raise AliasError(
                     f"{token!r} is ambiguous across scopes ({', '.join(sorted(hits))}); "
                     f"name the scope, e.g. `show appliance <name> {token}`."
                 )
-        if token in self._plugins:
-            # The internal key still works during the migration window.
-            return CliResolution(kind=token, legacy=True)
-        known = self.cli_names(want)
-        raise UnknownKind(token, known)
+        raise UnknownKind(token, self.cli_names(want))
 
     def get(self, kind: str) -> Resource:
         try:
@@ -183,6 +173,72 @@ class Registry:
         upserts.sort(key=lambda r: rank[r.kind])
         removals.sort(key=lambda r: rank[r.kind], reverse=True)
         return upserts + removals
+
+
+class AmbiguousInstances(ValueError):
+    """One selector in one scope matches more than one instance (issue #76).
+
+    Within a scope the operator can type, the selector is the whole of a
+    ``Ref``: a name once an appliance is named, and (appliance, name)
+    fabric-wide. So two refs that collide on that selector are not two things
+    the operator could choose between — they are one address that ``fetch()``
+    will answer for arbitrarily, and whichever object it returns is a guess.
+
+    Either ``list_refs()`` yielded a harmless duplicate or it flattened two
+    genuinely distinct objects onto one address. From here those look
+    identical, and only the second is dangerous — so this is reported as a
+    resource defect rather than silently resolved by keeping whichever ref
+    arrived first.
+    """
+
+
+def scoped_instances(resource: Resource, ctx: Ctx, appliance: str | None) -> list[Ref]:
+    """The instances of ``resource`` addressable from the operator's scope.
+
+    One implementation, used by every surface that discovers instances — the
+    shell's ``show``, its completer, and ``plugin promote`` (issue #76's
+    "common registry/helper contract so every resource does not implement
+    scoping differently"). Before this each carried its own copy of the filter
+    and they disagreed about the rest.
+
+    ``list_refs()`` enumerates the whole fabric by design, and that is the
+    right answer for a fabric-wide view: one attributed ref per appliance.
+    Once the operator has named an appliance, a ref on any *other* appliance
+    is not a candidate, and offering one produced the reported bug:
+
+        appliance/nat-maps: name required; instances: global, global, global
+
+    Six identical names, none of them wrong, and no hint that ``global`` was
+    the answer — because the appliance had already been chosen and every one
+    of those refs but one belonged to a different appliance.
+
+    Scoping therefore narrows the selector as well as the list. With an
+    appliance named the selector is the bare name; without one it is
+    (appliance, name), so the per-appliance singletons survive distinctly
+    instead of collapsing into a single ``deployment``. A collision *within*
+    the selector in force raises :class:`AmbiguousInstances`.
+
+    Ordering is (appliance, name) so callers that take the first ref — the
+    promotion checklist samples one — get the same instance every run, where
+    raw ``list_refs()`` order was whatever the resource happened to build.
+    """
+    refs = list(resource.list_refs(ctx))
+    if appliance is not None:
+        refs = [r for r in refs if r.appliance == appliance]
+
+    seen: set[str] = set()
+    for ref in refs:
+        if ref.key() in seen:
+            where = f" on {appliance}" if appliance else ""
+            raise AmbiguousInstances(
+                f"{resource.kind}: {ref.name!r}{where} matches more than one instance, "
+                f"so it cannot address either of them. This is a defect in "
+                f"{type(resource).__name__}.list_refs()."
+            )
+        seen.add(ref.key())
+    # Every ref survives: a collision raised above, so nothing is ever dropped
+    # quietly. The set is the check, not a dedupe.
+    return sorted(refs, key=lambda r: (r.appliance or "", r.name))
 
 
 #: Process-wide default registry; plugins self-register on import.

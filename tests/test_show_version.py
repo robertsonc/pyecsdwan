@@ -1,4 +1,4 @@
-"""``show version``: fabric version report, active + backup partitions (#57).
+"""``show fabric version``: fabric version report, active + backup partitions (#57).
 
 The two conditions this command exists to surface are what most of these tests
 pin: **fleet version skew** (BR2-EC is a minor release behind) and a
@@ -421,7 +421,7 @@ def _invoke(settings: config.Settings, args: list[str], monkeypatch: Any) -> Any
 def test_cli_show_version_renders_the_report(
     settings_for_mock: config.Settings, monkeypatch: Any
 ) -> None:
-    result = _invoke(settings_for_mock, ["show", "version"], monkeypatch)
+    result = _invoke(settings_for_mock, ["show", "fabric", "version"], monkeypatch)
     assert result.exit_code == 0, result.output
     assert "Orchestrator 9.4.2.40100" in result.output
     assert "BR2-EC" in result.output
@@ -433,7 +433,7 @@ def test_cli_json_emits_full_per_partition_data(
 ) -> None:
     """`--json` is not the rendered summary: every partition, with every field
     the appliance reported, has to be in there."""
-    result = _invoke(settings_for_mock, ["show", "version", "--json"], monkeypatch)
+    result = _invoke(settings_for_mock, ["show", "fabric", "version", "--json"], monkeypatch)
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
 
@@ -474,11 +474,13 @@ def test_cli_json_emits_full_per_partition_data(
 def test_cli_no_cache_is_reported_and_succeeds(
     settings_for_mock: config.Settings, monkeypatch: Any
 ) -> None:
-    result = _invoke(settings_for_mock, ["show", "version", "--no-cache"], monkeypatch)
+    result = _invoke(settings_for_mock, ["show", "fabric", "version", "--no-cache"], monkeypatch)
     assert result.exit_code == 0, result.output
     assert "--no-cache" in result.output
 
-    as_json = _invoke(settings_for_mock, ["show", "version", "--no-cache", "--json"], monkeypatch)
+    as_json = _invoke(
+        settings_for_mock, ["show", "fabric", "version", "--no-cache", "--json"], monkeypatch
+    )
     assert as_json.exit_code == 0, as_json.output
     assert json.loads(as_json.output)["cached"] is False
 
@@ -495,7 +497,7 @@ def test_show_version_has_no_transactional_side_effects(
     assert candidate.ordered_items() == []
     assert journal.list_txns() == []
 
-    result = _invoke(settings_for_mock, ["show", "version"], monkeypatch)
+    result = _invoke(settings_for_mock, ["show", "fabric", "version"], monkeypatch)
     assert result.exit_code == 0, result.output
 
     assert CandidateStore(settings_for_mock.host).ordered_items() == []
@@ -530,7 +532,7 @@ def shell_state(settings_for_mock: config.Settings) -> ShellState:
 
 
 def test_shell_show_version(shell_state: ShellState) -> None:
-    dispatch_operational("show version", shell_state)
+    dispatch_operational("show fabric version", shell_state)
     out = shell_state.console.export_text()
     assert "Orchestrator 9.4.2.40100" in out
     assert "version skew" in out
@@ -538,18 +540,25 @@ def test_shell_show_version(shell_state: ShellState) -> None:
 
 
 def test_shell_show_version_is_read_only(shell_state: ShellState) -> None:
-    dispatch_operational("show version", shell_state)
+    dispatch_operational("show fabric version", shell_state)
     assert len(shell_state.candidate) == 0
     assert journal.list_txns() == []
 
 
-def test_shell_completes_version_as_a_show_special(shell_state: ShellState) -> None:
+def test_shell_completes_version_under_the_fabric_scope(shell_state: ShellState) -> None:
     from pyecsdwan.cli.shell import ShellCompleter
 
     completer = ShellCompleter(shell_state)
     from prompt_toolkit.document import Document
 
     completions = [
-        c.text for c in completer.get_completions(Document("show ver"), None)  # type: ignore[arg-type]
+        c.text
+        for c in completer.get_completions(Document("show fabric ver"), None)  # type: ignore[arg-type]
     ]
     assert "version" in completions
+    # It is a fabric-wide read — one call per appliance — so it lives under the
+    # scope noun that says so, and no longer at the top level (#74).
+    top = [
+        c.text for c in completer.get_completions(Document("show ver"), None)  # type: ignore[arg-type]
+    ]
+    assert "version" not in top

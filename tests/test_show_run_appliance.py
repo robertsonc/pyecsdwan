@@ -1,4 +1,4 @@
-"""`show run appliance <name>` — appliance CLI running-config (issue #56).
+"""`show configuration appliance <name>` — appliance CLI running-config (issue #56).
 
 The deliverable this file guards is the **allowlist**, not the printing. Every
 smuggling shape gets its own case: a second command appended with `;`, `&&`,
@@ -106,7 +106,7 @@ def _sealed_ctx() -> Ctx:
     "command",
     [
         "show running-config",
-        "show version",
+        "show fabric version",
         "display running-config",
         "show interfaces gigabit0/1",
         "show ip route 10.0.0.0/8",
@@ -370,11 +370,11 @@ def test_broadcast_needs_at_least_one_appliance() -> None:
 
 
 def _cli(fabric: dict[str, Any], *args: str) -> Any:
-    return runner.invoke(cli_main.app, ["--mock", fabric["port"], "show", "run", *args])
+    return runner.invoke(cli_main.app, ["--mock", fabric["port"], "show", "configuration", *args])
 
 
 def test_cli_prints_the_appliances_running_config(fabric: dict[str, Any]) -> None:
-    result = _cli(fabric, "appliance", "BR1-EC")
+    result = _cli(fabric, "appliance", "BR1-EC", "--format", "native")
     assert result.exit_code == 0, result.output
     assert "# BR1-EC running-config" in result.output
     assert "hostname BR1-EC" in result.output
@@ -383,7 +383,7 @@ def test_cli_prints_the_appliances_running_config(fabric: dict[str, Any]) -> Non
 def test_cli_json_wraps_the_text_with_the_appliance_it_came_from(
     fabric: dict[str, Any],
 ) -> None:
-    result = _cli(fabric, "appliance", "BR1-EC", "--json")
+    result = _cli(fabric, "appliance", "BR1-EC", "--json", "--format", "native")
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["command"] == "show running-config"
@@ -395,7 +395,7 @@ def test_cli_json_wraps_the_text_with_the_appliance_it_came_from(
 
 
 def test_cli_json_attributes_each_appliance_to_its_own_text(fabric: dict[str, Any]) -> None:
-    result = _cli(fabric, "appliance", "BR1-EC", "BR2-EC", "--json")
+    result = _cli(fabric, "appliance", "BR1-EC", "BR2-EC", "--json", "--format", "native")
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     by_name = {a["appliance"]: a["text"] for a in payload["appliances"]}
@@ -407,7 +407,7 @@ def test_cli_json_attributes_each_appliance_to_its_own_text(fabric: dict[str, An
 def test_cli_unknown_appliance_is_a_clean_error_not_a_traceback(
     fabric: dict[str, Any],
 ) -> None:
-    result = _cli(fabric, "appliance", "BR1-ECX")
+    result = _cli(fabric, "appliance", "BR1-ECX", "--format", "native")
     assert result.exit_code != 0
     combined = result.output + (str(result.exception) if result.exception else "")
     assert "unknown appliance" in combined
@@ -415,7 +415,7 @@ def test_cli_unknown_appliance_is_a_clean_error_not_a_traceback(
 
 
 def test_cli_partial_failure_is_reported_and_exits_nonzero(fabric: dict[str, Any]) -> None:
-    result = _cli(fabric, "appliance", "BR1-EC", "BR1-ECX", "--json")
+    result = _cli(fabric, "appliance", "BR1-EC", "BR1-ECX", "--json", "--format", "native")
     assert result.exit_code == 2, result.output
     payload = json.loads(result.stdout)
     assert [a["appliance"] for a in payload["appliances"]] == ["BR1-EC"]
@@ -424,7 +424,9 @@ def test_cli_partial_failure_is_reported_and_exits_nonzero(fabric: dict[str, Any
 
 def test_cli_broadcast_goes_through_broadcastcli(fabric: dict[str, Any]) -> None:
     mstate: MockState = fabric["state"]
-    result = _cli(fabric, "appliance", "BR1-EC", "BR2-EC", "--broadcast", "--json")
+    result = _cli(
+        fabric, "appliance", "BR1-EC", "BR2-EC", "--broadcast", "--json", "--format", "native"
+    )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["mode"] == "broadcast"
@@ -435,7 +437,7 @@ def test_cli_broadcast_goes_through_broadcastcli(fabric: dict[str, Any]) -> None
 
 def test_cli_broadcast_failure_exits_nonzero(fabric: dict[str, Any]) -> None:
     fabric["state"].fail_next_action = True
-    result = _cli(fabric, "appliance", "BR1-EC", "--broadcast")
+    result = _cli(fabric, "appliance", "BR1-EC", "--broadcast", "--format", "native")
     assert result.exit_code == 2, result.output
 
 
@@ -452,21 +454,21 @@ def test_cli_broadcast_timeout_exits_nonzero(
     monkeypatch.setattr(
         cli_main.applianceconfig, "broadcast_running_config", lambda *a, **k: timed_out
     )
-    result = _cli(fabric, "appliance", "BR1-EC", "--broadcast")
+    result = _cli(fabric, "appliance", "BR1-EC", "--broadcast", "--format", "native")
     assert result.exit_code == 2, result.output
     assert "TIMEOUT" in result.output
 
 
 def test_cli_show_run_alone_is_the_fabric_report(fabric: dict[str, Any]) -> None:
-    """The #55/#56 split at the CLI: `show run` is the group's
+    """The #55/#56 split at the CLI: `show configuration fabric` is the group's
     `invoke_without_command=True` callback (the fabric configuration
-    breakdown), `show run appliance <name>` is its subcommand. This file owns
+    breakdown), `show configuration appliance <name>` is its subcommand. This file owns
     the subcommand half; `tests/test_show_run.py` owns the report itself.
 
     Was a "Missing command" assertion until #55 filled the callback in — the
     seam existed precisely so this test would have to be changed on purpose.
     """
-    result = _cli(fabric)
+    result = _cli(fabric, "fabric")
     assert result.exit_code == 0, result.output
     # The fabric report, not this file's per-appliance running-config.
     assert "overlays" in result.output
@@ -493,51 +495,54 @@ def _shell(state: ShellState, line: str) -> str:
 
 
 def test_shell_show_run_appliance_prints_the_config(shell_state: ShellState) -> None:
-    out = _shell(shell_state, "show run appliance BR1-EC")
+    out = _shell(shell_state, "show configuration appliance BR1-EC --format native")
     assert "# BR1-EC (3.NE)" in out
     assert "hostname BR1-EC" in out
 
 
 def test_shell_show_run_appliance_handles_several_names(shell_state: ShellState) -> None:
-    out = _shell(shell_state, "show run appliance BR1-EC BR2-EC")
+    out = _shell(shell_state, "show configuration appliance BR1-EC BR2-EC --format native")
     assert "# BR1-EC running-config" in out
     assert "# BR2-EC running-config" in out
 
 
 def test_shell_bare_show_run_is_the_fabric_report(shell_state: ShellState) -> None:
-    """The same split in the shell: bare `show run` is #55's fabric report,
+    """The same split in the shell: bare `show configuration fabric` is #55's fabric report,
     and it reaches it through the branch that used to raise the usage error.
 
     Asserted the usage line until #55 landed — changed on purpose, and kept
-    here so the two halves of `show run` stay pinned from both entry points.
+    here so the two halves of `show configuration fabric` stay pinned from both entry points.
     """
-    out = _shell(shell_state, "show run")
+    out = _shell(shell_state, "show configuration fabric")
     assert "overlays" in out
     assert "usage:" not in out
 
 
 def test_shell_show_run_garbage_is_a_usage_error(shell_state: ShellState) -> None:
-    assert "usage: show run appliance" in _shell(shell_state, "show run wibble")
-    assert "usage: show run appliance" in _shell(shell_state, "show run appliance")
+    usage = "usage: show configuration [running] fabric [<section>]"
+    assert usage in _shell(shell_state, "show configuration fabric wibble")
+    assert usage in _shell(shell_state, "show configuration fabric appliance")
 
 
 def test_shell_unknown_appliance_is_a_red_line_not_a_crash(shell_state: ShellState) -> None:
-    out = _shell(shell_state, "show run appliance BR1-ECX")
+    out = _shell(shell_state, "show configuration appliance BR1-ECX --format native")
     assert "unknown appliance" in out
 
 
 def test_shell_show_run_leaves_no_candidate_or_journal(shell_state: ShellState) -> None:
-    _shell(shell_state, "show run appliance BR1-EC BR2-EC")
+    _shell(shell_state, "show configuration appliance BR1-EC BR2-EC --format native")
     assert journal.list_txns() == []
     assert len(shell_state.candidate) == 0
 
 
 def test_shell_completes_show_run_appliance_names(shell_state: ShellState) -> None:
-    """A third seam test: `show run` used to complete to `appliance` and
-    nothing else, because #55's bare form took no arguments. It now also takes
-    a section name (`show run overlays`), so the completer offers both — see
-    tests/test_show_run.py for the section half."""
+    """A third seam test, following the command through the tree: the scope
+    noun, then the appliance name, then the flag that selects vendor text."""
     completer = ShellCompleter(shell_state)
-    assert "run" in completer._options(["show"])
-    assert "appliance" in completer._options(["show", "run"])
-    assert "BR1-EC" in completer._options(["show", "run", "appliance"])
+    assert "configuration" in completer._options(["show"])
+    assert "appliance" in completer._options(["show", "configuration"])
+    assert "BR1-EC" in completer._options(["show", "configuration", "appliance"])
+    assert "--format" in completer._options(["show", "configuration", "appliance", "BR1-EC"])
+    assert completer._options(
+        ["show", "configuration", "appliance", "BR1-EC", "--format"]
+    ) == ["native"]
