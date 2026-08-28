@@ -35,7 +35,7 @@ from rich.table import Table
 
 from pyecsdwan import __version__, config, journal, locking, txn
 from pyecsdwan.candidate import CandidateStore
-from pyecsdwan.contract import Ctx, Ref, Scope
+from pyecsdwan.contract import Ctx, Ref, Resource, Scope
 from pyecsdwan.registry import Registry
 from pyecsdwan.reports import versions
 
@@ -552,29 +552,78 @@ def _show_generic(args: list[str], state: ShellState) -> None:
             f"show {kind} [<instance>]"
         )
 
+    # Ordered before enumeration deliberately: an appliance-scoped kind with no
+    # appliance used to enumerate the whole fabric first and report *that*
+    # confusion, burying the one message that actually tells the operator what
+    # to type.
+    if resource.scope.value == "appliance" and appliance is None:
+        raise ValueError(f"{kind} is appliance-scoped; use 'show appliance <name> {kind} ...'")
+
     if len(args) == 2:
         instance = args[1]
     else:
-        refs = list(resource.list_refs(state.ctx))
-        if len(refs) == 1:
-            instance = refs[0].name
-            appliance = appliance or refs[0].appliance
-        elif not refs:
-            raise ValueError(f"{kind}: name required (no instances to enumerate)")
-        else:
-            names = ", ".join(r.name for r in refs)
-            raise ValueError(f"{kind}: name required; instances: {names}")
+        instance, appliance = _resolve_instance(resource, kind, appliance, state)
 
-    if resource.scope.value == "appliance" and appliance is None:
-        raise ValueError(f"{kind} is appliance-scoped; use 'show appliance <name> {kind} ...'")
     ref = Ref(kind=kind, name=instance, appliance=appliance)
     canonical = resource.normalize(resource.fetch(state.ctx, ref))
     state.console.print(f"# {ref}", style="dim", markup=False, highlight=False)
     if canonical is None:
         _info(state.console, "(not present)")
         return
+    if not canonical:
+        # `CanonicalState` is dict | list | None, and None is handled above, so
+        # this is an empty container: a real answer — the appliance holds no
+        # configuration for this kind — and a different answer from "(not
+        # present)". Rendered as YAML it would be a bare `{}`, which in a
+        # scrollback is indistinguishable from the command having done nothing.
+        _info(state.console, "(empty — no configuration for this kind)")
+        return
     text = yaml.safe_dump(canonical, sort_keys=True, default_flow_style=False)
     state.console.print(text.rstrip("\n"), markup=False, highlight=False)
+
+
+def _resolve_instance(
+    resource: Resource, kind: str, appliance: str | None, state: ShellState
+) -> tuple[str, str | None]:
+    """Pick the instance when the operator gave a kind but no name.
+
+    ``list_refs()`` enumerates the whole fabric. The operator has already named
+    the appliance, so a ref on any *other* appliance is not a candidate — and
+    without that filter an appliance-scoped singleton offered one identical
+    name per appliance and then refused to act on any of them:
+
+        appliance/banners: name required; instances: global, global, global
+
+    Three names, all the same, none of them wrong, and no indication that
+    ``global`` was the answer. That is issue #76's unscoped discovery
+    surfacing as issue #78's unusable command.
+    """
+    refs = list(resource.list_refs(state.ctx))
+    if appliance is not None:
+        refs = [r for r in refs if r.appliance == appliance]
+    # Dedupe by name, keeping first sighting. Safe because appliance-scoped
+    # kinds are filtered to one appliance above, and orchestrator-scoped names
+    # are already unique within their scope.
+    by_name: dict[str, Ref] = {}
+    for ref in refs:
+        by_name.setdefault(ref.name, ref)
+
+    if len(by_name) == 1:
+        only = next(iter(by_name.values()))
+        return only.name, appliance or only.appliance
+    if not by_name:
+        if appliance is not None:
+            # Distinguish "this appliance has none" from "there is no such
+            # appliance" (#78). ne_pk_for raises the resolver's own
+            # `unknown appliance 'X'` — with its did-you-mean suggestion —
+            # which is a better answer than reporting zero instances on a
+            # target that does not exist.
+            state.ctx.resolver.ne_pk_for(appliance)
+        where = f" on {appliance}" if appliance else ""
+        raise ValueError(f"{kind}: no instances found{where}")
+    names = ", ".join(sorted(by_name))
+    where = f" on {appliance}" if appliance else ""
+    raise ValueError(f"{kind}: name required{where}; instances: {names}")
 
 
 # -- config commands ---------------------------------------------------------

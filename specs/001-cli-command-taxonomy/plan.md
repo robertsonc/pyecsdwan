@@ -1,7 +1,8 @@
 # Implementation plan: intent-separated CLI command taxonomy
 
 **Feature:** `001-cli-command-taxonomy` · **Spec:** `./spec.md` · **Date:** 2026-08-27
-**Status:** blocked on Q1 and Q2 (see spec *Open questions*)
+**Status:** unblocked — Q1 and Q2 answered (grammar 0.2.0). Remaining gate is
+the owner's approval of the grammar itself, per epic #70.
 
 ## Approach
 
@@ -37,7 +38,7 @@ Constitution 0.1.0 (draft — findings recorded, not blocking, per
 | Principle | Applies? | How this design satisfies it | Risk |
 |---|---|---|---|
 | **I. Intent-separated interfaces** *(non-negotiable)* | Yes — this is the feature | Four named intents; `grammar.md` §7 maps every command to exactly one; R2 forbids overlap | The `show appliance X <kind>` split is a real behavior change; handled by hard-fail, not alias |
-| **II. Safety truth over convenience** *(non-negotiable)* | Yes | Eleven distinguishable outcomes (§5); only `ok`/`empty`/`stale` exit 0; R8 forbids zero-character renders | `stale` exiting 0 is a judgement — annotation must be impossible to miss, which is Q2 |
+| **II. Safety truth over convenience** *(non-negotiable)* | Yes | Eleven distinguishable outcomes (§5); only `ok`/`empty`/`stale` exit 0; R8 forbids zero-character renders | **Resolved by Q2**: `--stale-ok` is opt-in, so `stale` is never reached by default and exiting 0 honours an explicit request |
 | **III. Model-first, labelled native** | Yes | Native is a `--format` value on running configuration only (Decision 5); R10 forbids reaching it by default | Retiring `show run appliance` is a visible break; alias + warning |
 | **IV. One grammar across interfaces** | Yes | Outermost-first ordering both surfaces (Decision 3); R4 tests them paired | `--appliance` flag vs `appliance` noun stays a spelling difference; acceptable, tested |
 | **V. Evidence-gated support** *(non-negotiable)* | Yes | Spec's *Evidence expected* states design-only now, mock-verified at #74, and names `unsupported` vs `not_found` as unverifiable without gear | The mock cannot faithfully distinguish those two; must stay labelled unverified |
@@ -79,9 +80,10 @@ None. No convention is departed from.
 |---|---|
 | The hard-fail window is disruptive for anyone scripting `show appliance X <kind>` | Deliberate; needs a release note, and Q3's boundary bounds it |
 | A future kind introduces a second cross-scope collision | R6's startup check fails for a developer, not an operator |
-| `stale` exiting 0 lets a cached answer read as fresh | Q2; annotation design must make age unmissable |
+| ~~`stale` exiting 0 lets a cached answer read as fresh~~ | **Closed by Q2** — cached data requires `--stale-ok`, so it is never served unasked |
+| A kind alias collides with a reserved word once the datastore token is optional | R12's validator fails at startup, for a developer not an operator |
 | The outcome layer touches every read path | Landed first and separately, so a regression is attributable |
-| Grammar churn if Q1 is answered "default to running" after tests are written | Why Q1 blocks the plan rather than being assumed |
+| ~~Grammar churn if Q1 is answered after tests are written~~ | **Closed** — answered before any test was written, which is what blocking on it bought |
 
 ## Verification strategy
 

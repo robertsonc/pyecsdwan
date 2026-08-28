@@ -43,6 +43,24 @@ repository's tooling (ruff, mypy `--strict`, pytest) nor its workflow. Noticed
 while wiring up CI for #65 and deliberately left alone there: it is
 documentation reconciliation, which is issue #68's subject.
 
+## The mock cannot exercise per-appliance-distinct instance names
+
+Every appliance-scoped kind in the bundled mock is a per-appliance singleton
+named `global`. That makes the mock unable to reach the case appliance-scoped
+instance discovery actually exists for — a kind whose instance *names differ
+per appliance* — because deduplication alone resolves a singleton and the
+appliance filter never has to do any work.
+
+Found while fixing #76/#78: the first three tests written against the mock
+passed with the filter deleted. The three that catch it use a synthetic
+`list_refs` (`tests/test_show_scoping.py`), which is honest but isolates the
+logic from the fixtures.
+
+Worth giving one appliance-scoped kind genuinely per-appliance instances in
+`mock/server.py` so the real path is covered end to end. Same class of gap as
+the `/gms/versions` fixture in epic #54, where `installed[0] == current` let
+the wrong implementation pass every assertion.
+
 ## Other deferred items
 
 - ~~**Tier-1 codegen**~~ — shipped as epic #6 (#25 `spec_sync.py`, #26

@@ -1,6 +1,8 @@
 # Feature specification: intent-separated CLI command taxonomy
 
-**Feature:** `001-cli-command-taxonomy` · **Version:** 0.1.0 · **Status:** draft
+**Feature:** `001-cli-command-taxonomy` · **Version:** 0.2.0 · **Status:** draft
+**Changed in 0.2.0:** Q1 and Q2 answered by the owner; all eight required
+decisions are now resolved. Grammar updated accordingly.
 **Issues:** #71 (this spec), under epic #70. Consumes #75 (constitution) and
 #73 (design corpus). Feeds #72 (BGP views), #74 (migration), #77, #78.
 **Date:** 2026-08-27
@@ -65,7 +67,9 @@ schema. Incomplete commands list valid next tokens instead of guessing.
 | R8 | No renderer reduces a valid response to zero visible characters | Test over `{}`, `None`, `""`, HTTP 204, `[]` (#78) |
 | R9 | Every existing command form has a recorded replacement and mechanism | `compatibility.md`; test asserts old-form *behavior*, not acceptance |
 | R10 | Native output is reachable only by explicit request | Grammar test: no default path yields native |
-| R11 | Fan-out commands declare cost before running; one unreachable target is a marked row | Existing `fanout` tests extended per D-EC-3 |
+| R11 | Fan-out commands declare cost before running — prompting when interactive, warning on stderr when not; one unreachable target is a marked row | Existing `fanout` tests extended per D-EC-3; both TTY and piped paths tested |
+| R12 | `running`, `candidate`, `appliance`, `fabric`, `configuration` are reserved and rejected as kind aliases | Alias validator test; a synthetic kind named `running` fails at startup |
+| R13 | Cached data is served only under `--stale-ok`; without it a read is live or it fails | Test that a stale cache entry is not silently used |
 
 ## Required decisions
 
@@ -76,27 +80,34 @@ making one.
 
 | # | Decision | Resolution |
 |---|---|---|
-| 1 | Is `running` mandatory under `show configuration`? | **ESCALATED — Q1** |
+| 1 | Is `running` mandatory under `show configuration`? | **Optional, defaults to `running`.** Shorter for the common read and matches IOS. `candidate` is never implicit, so the only unnamed datastore is the live one. Introduces reserved words — see R12. |
 | 2 | Does `show compare` replace or alias `show \| compare`? | **Alias.** Both kept (D-NSO-3). It is in operators' fingers and costs nothing. |
 | 3 | Canonical scope ordering | **Outermost-first**, uniform across interfaces: scope → kind → instance (D-NSO-1, D-EC-1). |
 | 4 | Semantics of "candidate" | **Staged intent**, not a materialized tree. Junos's candidate lives on the device; ours is a client-side changeset materialized against server state at compare/commit (`candidate.py`). The grammar must not imply a tree. |
 | 5 | Is native a format, a source, or both? | **A format of running configuration.** Junos (`\| display`), NSO (`ios:` namespace) and kubectl (`-o`) agree independently (D-JUN-3, D-NSO-4, D-K8S-4). |
 | 6 | Resource-kind aliases | **Per-scope user-facing nouns**, registry keys internal. `zones` is the one live collision and is why the namespace is scoped, not flat (#77). |
-| 7 | Cost/freshness flags and defaults | **ESCALATED — Q2** |
+| 7 | Cost/freshness flags and defaults | **Fan-out confirms, then warns** — prompt where a TTY makes one answerable, warn on stderr and proceed where it does not. `--stale-ok` is **opt-in**; without it a read is live or it fails. |
 | 8 | Exit codes and output schema | **Resolved** — `grammar.md` §5, from gNMI's taxonomy extended with the distributed cases (D-GNMI-2). |
 
 ## Open questions
 
-| # | Question | Blocks? | Owner |
-|---|---|---|---|
-| Q1 | Is the datastore token mandatory (`show configuration running appliance X`) or does bare `show configuration appliance X` default to running? Mandatory is unambiguous and verbose; a default is shorter and matches IOS's `show running-config`, but means the most common read has an unstated datastore. | **Yes** — changes the grammar table and every example | owner |
-| Q2 | Should a `fanout` command require confirmation, warn, or just run? And is `--stale-ok` opt-in (safe, slower) or is cached-with-annotation the default (faster, needs the annotation to be impossible to miss)? | **Yes** — changes R11 and the flag table | owner |
-| Q3 | Removal boundary for compatibility aliases — next MINOR, a date, or a coverage condition? | No — #74 needs it, this spec does not | owner |
-| Q4 | Does `show fabric <domain>` warrant existing where the Orchestrator has a single-call answer, or should those stay unscoped (`show version`)? Currently inconsistent: `show version` is Orchestrator+fanout but unscoped, while `show flows summary` gains `fabric`. | No — resolvable during #74 | owner or implementer |
+| # | Question | Blocks? | Owner | State |
+|---|---|---|---|---|
+| Q1 | Is the datastore token mandatory, or does it default to running? | was blocking | owner | **Answered: default to running.** Grammar 0.2.0. |
+| Q2 | Fan-out cost behavior, and is `--stale-ok` opt-in? | was blocking | owner | **Answered: confirm then warn; `--stale-ok` opt-in.** Grammar 0.2.0. |
+| Q3 | Removal boundary for compatibility aliases — next MINOR, a date, or a coverage condition? | No — #74 needs it, this spec does not | owner | open |
+| Q4 | Does `show fabric <domain>` warrant existing where the Orchestrator has a single-call answer, or should those stay unscoped (`show version`)? Currently inconsistent: `show version` is Orchestrator+fanout but unscoped, while `show flows summary` gains `fabric`. | No — resolvable during #74 | owner or implementer | open |
 
-**Q1 and Q2 block the plan.** Proceeding on either would mean picking a default
-and calling it a decision, which `.specify/README.md` names as the failure mode
-of the clarification step.
+**Nothing blocks the plan now.** One reading is flagged rather than assumed
+silently: "confirm, then warn" is implemented as *confirm where a prompt can be
+answered, warn where it cannot*, since a prompt in a pipeline would hang — the
+failure class #78 exists to remove. See `grammar.md` §6; correcting it changes
+that section and nothing else.
+
+Q1's answer introduced a constraint that did not exist under the mandatory
+form: with the token optional, `show configuration <token>` must disambiguate
+datastore from scope from kind, so five words are now reserved (R12). No kind
+collides today — 42 bare names checked against them.
 
 ## Acceptance criteria
 
@@ -109,7 +120,9 @@ of the clarification step.
 - [ ] Golden UX tests are derivable directly from the spec
 - [ ] #48/#49-style scope and discoverability confusion is covered by acceptance tests
 - [ ] Alias collisions fail at startup/test time, never at operator runtime
-- [ ] Q1 and Q2 answered and the grammar updated accordingly
+- [x] Q1 and Q2 answered and the grammar updated accordingly
+- [ ] Reserved words rejected as kind aliases at startup (R12)
+- [ ] Owner approves the grammar — epic #70's migration gate
 
 ## Evidence expected
 

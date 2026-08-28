@@ -1,6 +1,8 @@
 # Compatibility and migration
 
-**Feature:** `001-cli-command-taxonomy` · **Version:** 0.1.0 · **Status:** draft
+**Feature:** `001-cli-command-taxonomy` · **Version:** 0.2.0 · **Status:** draft
+**Changed in 0.2.0:** replacements use the short form now that the datastore
+token defaults to `running` (Q1). The explicit `running` spelling also works.
 
 Principle VI: an old command form either keeps working, or fails loudly naming
 its replacement. It never silently changes meaning.
@@ -32,7 +34,7 @@ error: `show appliance <name> <kind>` has split into two commands, because it
        previously returned configuration while the new grammar reads this
        position as operational state.
 
-  configuration:  show configuration running appliance BR1-EC bgp
+  configuration:  show configuration appliance BR1-EC bgp
   operational:    show appliance BR1-EC bgp summary | neighbors | routes
 
   This form will become the operational one in <BOUNDARY>.
@@ -49,12 +51,12 @@ only option that cannot mislead.
 
 | Existing form | Status | Replacement | Mechanism |
 |---|---|---|---|
-| `show run` | rename | `show configuration running fabric` | alias + warning |
-| `show run <section>` | rename | `show configuration running fabric <section>` | alias + warning |
-| `show run appliance <name>` | rename | `show configuration running appliance <name> --format native` | alias + warning |
+| `show run` | rename | `show configuration fabric` | alias + warning |
+| `show run <section>` | rename | `show configuration fabric <section>` | alias + warning |
+| `show run appliance <name>` | rename | `show configuration appliance <name> --format native` | alias + warning |
 | `show appliance <name> <kind>` *(shell)* | **meaning change** | split — see above | **hard fail** |
 | `show appliance <name> <kind> <instance>` *(shell)* | **meaning change** | split — see above | **hard fail** |
-| `show <kind> [<instance>]` *(shell, orch-scope)* | rename | `show configuration running <kind> [<instance>]` | alias + warning |
+| `show <kind> [<instance>]` *(shell, orch-scope)* | rename | `show configuration <kind> [<instance>]` | alias + warning |
 | `show appliance <name> appliance/<kind>` | leakage (#77) | `show ... <kind>` (prefix dropped) | alias + warning |
 | `show <kind>` where kind is `generated/<op-id>` | leakage (#77) | taxonomy-approved noun, or Tier-0 `api` | alias + warning |
 | `show appliances` | unchanged | — | — |
