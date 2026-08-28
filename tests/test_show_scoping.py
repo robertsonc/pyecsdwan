@@ -277,7 +277,12 @@ def test_genuine_ambiguity_on_one_appliance_still_asks(
     shell_state: ShellState, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The filter must not turn a real choice into a silent guess — and the
-    names it offers must all be on the appliance that was named."""
+    names it offers must all be on the appliance that was named.
+
+    Several instances is a *nonterminal*, not a usage error: the operator
+    typed a valid prefix and the answer is the list of names that may follow
+    it (D-NSO-2). It exits 0, because the question asked was answered.
+    """
     resource = default_registry.get(SINGLETON_KIND)
     monkeypatch.setattr(
         type(resource),
@@ -285,9 +290,10 @@ def test_genuine_ambiguity_on_one_appliance_still_asks(
         _multi_instance_refs({"BR1-EC": ["wan1", "wan2"], "BR2-EC": ["elsewhere"]}),
     )
     out = _shell(shell_state, f"show configuration appliance BR1-EC {SINGLETON_NOUN}")
-    assert "name required" in out and "BR1-EC" in out, out
+    assert "valid next tokens" in out and "BR1-EC" in out, out
     assert "wan1" in out and "wan2" in out, out
     assert "elsewhere" not in out, out
+    assert shell_state.exit_code == 0, out
 
 
 # -- user-facing nouns in the shell (#77) -----------------------------------

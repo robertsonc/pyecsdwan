@@ -68,6 +68,7 @@ _CONFIG_COMMANDS: tuple[str, ...] = (
 #: precedent for a fifth category.
 _SHOW_CLI_STATE: tuple[str, ...] = (
     "appliances",
+    "commands",
     "coverage",
     "journal",
     "locks",
@@ -475,6 +476,13 @@ def _show_operational(args: list[str], state: ShellState) -> None:
         _show_pending(state)
     elif head == "coverage":
         _show_coverage(state)
+    elif head == "commands":
+        if args[1:]:
+            raise ValueError("usage: show commands")
+        from pyecsdwan.cli import reference
+        from pyecsdwan.cli.render import render_command_reference
+
+        render_command_reference(state.console, reference.build(state.registry))
     elif head == "configuration":
         _show_configuration(args[1:], state)
     elif head == "fabric":
@@ -990,10 +998,22 @@ def _resolve_instance(
             # target that does not exist.
             state.ctx.resolver.ne_pk_for(appliance)
         where = f" on {appliance}" if appliance else ""
-        raise ValueError(f"{kind}: no instances found{where}")
-    names = ", ".join(r.name for r in refs)
+        # `not_found`, not `invalid`: the path the operator typed is valid and
+        # the object it names does not exist (grammar.md §5). Reporting it as
+        # a malformed command told a script the caller had a bug.
+        raise outcomes.CommandOutcome(
+            outcomes.Outcome.NOT_FOUND,
+            f"{kind}: no instances found{where}",
+            remedy=f"name one explicitly: ... {kind} <instance>",
+        )
+    # Several instances is a *nonterminal*, not an invalid command: the
+    # operator typed a valid prefix and the answer is the list of names that
+    # may follow it (D-NSO-2). Raising a usage error here exited 2 and told a
+    # script the command was malformed, while the scriptable CLI's own
+    # `_render_resource` had always treated the same case as a nonterminal —
+    # a Principle IV divergence the command reference's round-trip found.
     where = f" on {appliance}" if appliance else ""
-    raise ValueError(f"{kind}: name required{where}; instances: {names}")
+    raise Nonterminal(f"{kind}{where}", [r.name for r in refs])
 
 
 # -- config commands ---------------------------------------------------------

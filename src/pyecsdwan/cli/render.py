@@ -14,6 +14,8 @@ from rich.table import Table
 from rich.text import Text
 
 from pyecsdwan import txn
+from pyecsdwan.cli import reference
+from pyecsdwan.cli.reference import CommandRow
 from pyecsdwan.diffing import render_diff_lines
 from pyecsdwan.journal import TxnJournal
 from pyecsdwan.reports.bgpstate import BgpState
@@ -198,3 +200,40 @@ def render_bgp_neighbors(console: Console, state: BgpState, peer: str | None = N
                 style="dim",
             )
         )
+
+
+def render_command_reference(console: Console, rows: list[CommandRow]) -> None:
+    """The offline command reference (#77, T4).
+
+    Grouped by intent, because the intent split is the thing the taxonomy
+    exists to make visible — a flat alphabetical list would hide exactly what
+    an operator needs to see, which is that configuration and operational
+    state are different commands over different sources.
+    """
+    for intent in (reference.CLI_STATE, reference.OPERATIONAL, reference.CONFIGURATION):
+        group = [r for r in rows if r.intent == intent]
+        if not group:
+            continue
+        table = Table(title=f"{intent} ({len(group)})")
+        table.add_column("command", overflow="fold")
+        table.add_column("scope")
+        table.add_column("address")
+        table.add_column("mutability")
+        table.add_column("support", overflow="fold")
+        for row in group:
+            unsupported = row.support.startswith("unsupported")
+            table.add_row(
+                row.command,
+                row.scope,
+                row.address,
+                row.mutability,
+                Text(row.support, style="yellow") if unsupported else row.support,
+            )
+        console.print(table)
+    console.print(
+        Text(
+            f"{len(rows)} commands. Offline: this reads the registry and the "
+            f"vendored baselines, never the Orchestrator.",
+            style="dim",
+        )
+    )
