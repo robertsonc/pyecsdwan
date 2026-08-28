@@ -34,6 +34,7 @@ from pyecsdwan import config, locking, runtime, specs, txn
 from pyecsdwan import registry as registry_mod
 from pyecsdwan.candidate import CandidateCorruptError, CandidateStore
 from pyecsdwan.cli import fanout, render
+from pyecsdwan.cli.outcomes import Outcome
 from pyecsdwan.client import OrchApiError
 from pyecsdwan.contract import Ctx, Ref, Resource, Reversibility, Scope, Tier
 from pyecsdwan.journal import TxnJournal, TxnState, list_txns
@@ -210,6 +211,14 @@ def _coerce_value(raw: str) -> Any:
     if re.fullmatch(r"[+-]?\d+", raw):
         return int(raw)
     return raw
+
+
+#: Operational domains under `show appliance NAME`. One so far (specs/002).
+APPLIANCE_DOMAINS: tuple[str, ...] = ("bgp",)
+#: `bgp` leaves. `routes` is listed and answers `unsupported`: no BGP
+#: route-table endpoint exists in either vendored baseline, and hiding it
+#: would make the CLI look like it never considered the question.
+BGP_VIEWS: tuple[str, ...] = ("summary", "neighbors", "routes")
 
 
 def _resolve_kind(registry: Registry, token: str, appliance: str | None) -> str:
@@ -2020,34 +2029,39 @@ def show_appliance(
     domain: Annotated[
         str | None, typer.Argument(metavar="[DOMAIN]", help="Operational domain to read.")
     ] = None,
+    view: Annotated[
+        str | None,
+        typer.Argument(metavar="[VIEW]", help="Domain view, e.g. summary | neighbors | routes."),
+    ] = None,
+    peer: Annotated[
+        str | None, typer.Argument(metavar="[PEER]", help="Drill down to one neighbor.")
+    ] = None,
+    stale_ok: Annotated[
+        bool,
+        typer.Option("--stale-ok", help="Accept the Orchestrator's cached copy (Decision 7)."),
+    ] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
 ) -> None:
     """Operational state of one appliance.
 
-    Nothing lives here yet — the domains are specified in
-    `specs/002-appliance-operational-views` and not implemented — so this
-    command's whole job is the rename, and it is the one rename in the
-    migration that could have hurt someone. `show appliance NAME bgp` returned
-    modeled configuration before #74 and names operational state after it:
-    same tokens, different data. Answering it with either would be exactly the
-    failure Principle II exists to prevent.
+    `bgp` is the first domain (specs/002). Anything else that resolves as a
+    configuration kind is the *renamed* form and is refused: it returned
+    configuration before #74 and names operational state now — same tokens,
+    different data — so answering with either would be exactly the failure
+    Principle II exists to prevent.
     """
     if domain is None:
-        console.print(f"show appliance {name} — valid next tokens:")
-        console.print("  (none)")
-        console.print(
-            "no operational domains are implemented yet "
-            "(specs/002-appliance-operational-views); for configuration use "
-            f"'ec-cli show configuration appliance {name} KIND'"
-        )
-        raise typer.Exit(0)
-    _rt, registry, _settings = _bootstrap(_state(ctx))
+        _nonterminal(f"show appliance {name}", list(APPLIANCE_DOMAINS))
+    rt_ctx, registry, _settings = _bootstrap(_state(ctx))
+    if domain == "bgp":
+        _show_bgp(rt_ctx, name, view, peer, stale_ok=stale_ok, as_json=as_json)
+        return
     try:
         kind = _resolve_kind_quietly(registry, domain, name)
     except UnknownKind:
         _fail(
-            f"unknown operational domain {domain!r} for appliance {name!r}. "
-            f"No operational domains are implemented yet "
-            f"(specs/002-appliance-operational-views)."
+            f"unknown operational domain {domain!r} for appliance {name!r} — "
+            f"valid next tokens: {', '.join(APPLIANCE_DOMAINS)}"
         )
     noun = registry.cli_name(kind)
     _fail(
@@ -2057,6 +2071,111 @@ def show_appliance(
         f"operational state, so it is refused rather than answered with "
         f"different data than it used to return."
     )
+
+
+def _show_bgp(
+    rt_ctx: Ctx,
+    name: str,
+    view: str | None,
+    peer: str | None,
+    *,
+    stale_ok: bool,
+    as_json: bool,
+) -> None:
+    """`ec-cli show appliance NAME bgp [summary|neighbors [PEER]|routes]`.
+
+    A bare `bgp` lists the leaves and makes **no API call** — #72's guardrail
+    that a nonterminal is contextual help, not an implicit expensive fetch.
+    """
+    from pyecsdwan.reports import bgpstate
+
+    if view is None:
+        _nonterminal(
+            f"show appliance {name} bgp",
+            ["summary", "neighbors [PEER]", "routes (unsupported)"],
+        )
+    if view == "routes":
+        _terminal_outcome(
+            Outcome.UNSUPPORTED,
+            "no BGP route-table endpoint exists in the supported Orchestrator "
+            "or ECOS API, so this view cannot be built from a verified source.",
+            remedy=(
+                f"route counts are in 'ec-cli show appliance {name} bgp summary' "
+                f"(num_bgp_rtes_rcvd, num_ebgp_rtes, num_ibgp_rtes, "
+                f"num_subs_installed); per-peer counts are in 'neighbors'. "
+                f"If you have a source this missed, 'ec-cli api' reaches it raw."
+            ),
+            as_json=as_json,
+        )
+    if view not in ("summary", "neighbors"):
+        _fail(f"unknown bgp view {view!r} — valid next tokens: {', '.join(BGP_VIEWS)}")
+    if view == "summary" and peer is not None:
+        _fail(f"usage: ec-cli show appliance {name} bgp summary")
+
+    result = bgpstate.collect(rt_ctx, name, cached=stale_ok)
+    if as_json:
+        payload = result.as_json()
+        if view == "neighbors" and peer is not None:
+            payload["neighbors"] = [n for n in payload["neighbors"] if n["peer_ip"] == peer]
+        payload["view"] = view
+        payload["status"] = _bgp_status(result, view, peer).value
+        console.print_json(json.dumps(payload, default=str))
+    elif view == "summary":
+        render.render_bgp_summary(console, result)
+    else:
+        render.render_bgp_neighbors(console, result, peer=peer)
+
+    status = _bgp_status(result, view, peer)
+    if status is Outcome.OK:
+        return
+    if not as_json:
+        detail = (
+            f"{name} has no BGP neighbor {peer}"
+            if status is Outcome.NOT_FOUND
+            else (
+                f"{name} reports neighborCount={result.neighbor_count} but returned "
+                f"{len([n for n in result.neighbors if not n.configured_only])} peer rows; "
+                f"the table above is incomplete."
+            )
+        )
+        err_console.print(Text(f"{status.value}: {detail}", style="bold red"))
+    raise typer.Exit(status.exit_code)
+
+
+def _bgp_status(result: Any, view: str | None, peer: str | None) -> Outcome:
+    """Which outcome this read reached.
+
+    Computed once and used for both the exit code and the JSON `status`, so a
+    script branching on either gets the same answer — two derivations is how
+    they come to disagree.
+    """
+    if view == "neighbors" and peer is not None:
+        if not any(n.peer_ip == peer for n in result.neighbors):
+            return Outcome.NOT_FOUND
+    if not result.rows_match_count:
+        return Outcome.PARTIAL
+    return Outcome.OK
+
+
+def _terminal_outcome(
+    outcome: Outcome, detail: str, *, remedy: str = "", as_json: bool = False
+) -> NoReturn:
+    """Report a terminal state and exit with its code (`grammar.md` §5).
+
+    `unsupported` is not printed in red: it is a statement about the product,
+    not about the appliance, and colouring it like a failure sends someone to
+    debug a healthy device.
+    """
+    if as_json:
+        console.print_json(
+            json.dumps({"status": outcome.value, "detail": detail, "remedy": remedy})
+        )
+    else:
+        style = "yellow" if outcome is Outcome.UNSUPPORTED else "bold red"
+        err_console.print(Text(f"{outcome.value}: {detail}", style=style))
+        if remedy:
+            err_console.print(Text(remedy, style="dim"))
+    raise typer.Exit(outcome.exit_code)
 
 
 def _resolve_kind_quietly(registry: Registry, token: str, appliance: str | None) -> str:

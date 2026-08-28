@@ -12,12 +12,13 @@ unlinked task has not been started.
 | ~~T2~~ | ~~CLI name/alias contract on `Resource`~~ | T1 | **Done** — `cli_name`/`cli_aliases`, per-scope index, reserved words and collisions refused at registration | #77 |
 | T3 | User-facing nouns throughout parsing, completion, help, usage, errors, docs | T2 | **Partly done** — both surfaces resolve nouns through `Registry.resolve_cli` and print them in errors; `main.py` subcommand *help text* still to do | #77 |
 | T4 | Offline command reference view (domain, scope, instances, mutability, support status) | T2 | Runs with no Orchestrator connection | #77 |
-| T5 | Outcome classifier + renderer for the eleven outcomes, human and JSON | — | One test per outcome, both modes; `{}`/`None`/`""`/204/`[]` each intentional | #78 |
 | T6 | Bounded timeout on every appliance read; every terminal path returns to the prompt | T5 | `show appliance S1-ecv-01 banners` always produces a visible result | #78 |
 | T7 | Audit remaining appliance-scoped resources for the same silent path | T6 | Every kind exercised; findings filed | #78 |
 | T8 | Parser: new grammar, scope nouns, nonterminal listing | T1, T3 | **Done** — both surfaces: `show configuration` subtree, `fabric`/`appliance` scope nouns, nonterminals listing next tokens at exit 0, correspondence tested | #74 |
 | T9 | **Remove** the old forms (no aliases — Q3), including #77's legacy `appliance/<kind>` acceptance | T8 | **Done** — parametrized absence test per row on both surfaces; the registry-key acceptance is withdrawn | #74 |
-| T10 | BGP operational views — **spec** in `specs/002-appliance-operational-views/` | T1 | Source-verified; `routes` reported unsupported (no endpoint exists) | #72 |
+| T10 | BGP operational views — **spec** in `specs/002-appliance-operational-views/` | T1 | **Done** — source-verified; `routes` reported unsupported (no endpoint exists) | #72 |
+| T14 | BGP operational views — **implementation** | T8, T10 | **Done** — `show appliance NAME bgp summary\|neighbors [PEER]\|routes` on both surfaces; the four schema traps each have a test that the obvious implementation fails | #72, #74 |
+| T5 | Outcome classifier + exit codes for the eleven outcomes | — | **Partly done** — `cli/outcomes.py` carries the table, asserted against `grammar.md` §5 by parsing it; `ok`/`not_found`/`unsupported`/`partial` are reached by the BGP views, the rest are not yet wired | #74 |
 | T11 | Golden UX tests derived from `grammar.md` §7 | T8, T10 | **Partly done** — `tests/test_grammar_parity.py` covers every configuration row on both surfaces; the operational rows wait on T10 | #74 |
 | T13 | Fan-out cost gate (§6, Decision 7) | T8 | **Done** — prompt when a TTY can answer, warn on stderr and proceed when not; count from the resolver cache, duration from observed latency; only the sections that actually fan out are gated | #74 |
 | ~~T12~~ | ~~Removal boundary decided (Q3)~~ | — | **Withdrawn** — no aliases to remove; nothing has shipped | — |

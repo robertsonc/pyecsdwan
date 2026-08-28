@@ -1,6 +1,6 @@
 # Feature specification: appliance operational views, starting with BGP
 
-**Feature:** `002-appliance-operational-views` · **Version:** 0.1.0 · **Status:** draft
+**Feature:** `002-appliance-operational-views` · **Version:** 1.0.0 · **Status:** implemented
 **Issues:** #72, under epic #70. Consumes `001-cli-command-taxonomy` (grammar
 approved 2026-08-28). **Blocks #74**, which states it depends on this spec.
 **Date:** 2026-08-28
@@ -101,7 +101,10 @@ bare `... bgp` lists the leaves rather than fetching anything.
 
 ## Non-goals
 
-* Not implementing the views — #74 does that, and depends on this spec.
+* ~~Not implementing the views — #74 does that, and depends on this spec.~~
+  **Superseded**: implemented alongside #74's parser work, because the
+  `show appliance <name> <domain>` branch shipped empty and an empty branch
+  in a released grammar is a worse artefact than an unimplemented one.
 * Not parsing native CLI text to synthesise a route table. #72's guardrail
   forbids it without versioned fixtures and an explicit maturity status, and
   Principle V would make that a Tier-0 claim at best.

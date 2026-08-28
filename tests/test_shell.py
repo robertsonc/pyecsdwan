@@ -74,11 +74,14 @@ def test_the_appliance_prefix_is_not_silently_dropped_in_either_tree(
 
 def test_show_appliance_name_alone_names_its_continuations(state: ShellState) -> None:
     """`show appliance <name>` is a nonterminal (D-NSO-2): it lists what may
-    follow and exits 0, rather than picking a domain or erroring."""
+    follow and exits 0, rather than picking a domain or erroring.
+
+    It also makes no API call — #72's guardrail that a bare nonterminal is
+    contextual help, not an implicit expensive fetch.
+    """
     out = _run(state, "show appliance S1-ecv-01")
     assert "valid next tokens" in out
-    # Nothing lives here yet, and the honest answer says where configuration went.
-    assert "show configuration appliance S1-ecv-01 <kind>" in out
+    assert "bgp" in out
 
 
 def test_show_appliance_name_orchestrator_kind_rejected(state: ShellState) -> None:
