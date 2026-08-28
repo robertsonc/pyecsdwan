@@ -1,4 +1,4 @@
-"""``show flows summary`` (#58) and ``show flow <ip>`` (#59).
+"""``show fabric flows summary`` (#58) and ``show fabric flow <ip>`` (#59).
 
 Both commands read ``GET /flow`` — the real endpoint; the parent issue's
 ``GET /flow/{neId}/q`` exists in neither vendored spec — and share one row
@@ -496,18 +496,18 @@ def test_rows_are_sorted_by_appliance_for_a_stable_table(world: dict[str, Any]) 
     assert names == sorted(names)
 
 
-# -- shell dispatch: `show flow` and `show flows` are one character apart -----
+# -- shell dispatch: `show fabric flow` and `show fabric flows` are one character apart -----
 
 
 def test_shell_show_flows_summary_renders_the_matrix(world: dict[str, Any]) -> None:
-    output = _shell(world, "show flows summary")
+    output = _shell(world, "show fabric flows summary")
     assert "HUB1-EC" in output
     assert "RealTime" in output
     assert "total" in output
 
 
 def test_shell_show_flow_renders_the_search(world: dict[str, Any]) -> None:
-    output = _shell(world, "show flow 10.1.1.5")
+    output = _shell(world, "show fabric flow 10.1.1.5")
     assert "10.1.1.5:443" in output
     assert "HUB1-EC" in output
 
@@ -516,24 +516,24 @@ def test_shell_bare_show_flow_is_a_usage_error_not_the_summary(
     world: dict[str, Any],
 ) -> None:
     """One character apart, entirely different reports."""
-    output = _shell(world, "show flow")
-    assert "usage: show flow <ip>" in output
+    output = _shell(world, "show fabric flow")
+    assert "usage: show fabric flow <ip>" in output
     assert "RealTime" not in output
 
 
 def test_shell_bare_show_flows_demands_the_subcommand(world: dict[str, Any]) -> None:
-    assert "usage: show flows summary" in _shell(world, "show flows")
-    assert "usage: show flows summary" in _shell(world, "show flows 10.1.1.5")
+    assert "usage: show fabric flows summary" in _shell(world, "show fabric flows")
+    assert "usage: show fabric flows summary" in _shell(world, "show fabric flows 10.1.1.5")
 
 
 def test_shell_show_flow_rejects_extra_arguments(world: dict[str, Any]) -> None:
-    assert "usage: show flow <ip>" in _shell(world, "show flow 10.1.1.5 extra")
+    assert "usage: show fabric flow <ip>" in _shell(world, "show fabric flow 10.1.1.5 extra")
 
 
 def test_shell_show_flow_reports_a_bad_address_without_a_traceback(
     world: dict[str, Any],
 ) -> None:
-    assert "not an IP address" in _shell(world, "show flow nope")
+    assert "not an IP address" in _shell(world, "show fabric flow nope")
 
 
 def test_completer_offers_both_and_distinguishes_them(world: dict[str, Any]) -> None:
@@ -545,12 +545,16 @@ def test_completer_offers_both_and_distinguishes_them(world: dict[str, Any]) -> 
 
         return [c.text for c in completer.get_completions(Document(text), CompleteEvent())]
 
-    assert {"flow", "flows"} <= set(complete("show "))
-    assert set(complete("show flow")) == {"flow", "flows"}
-    assert complete("show flows ") == ["summary"]
-    # `show flow` takes a free-form address, so it suggests nothing rather
+    # Both live under the `fabric` scope noun now: they are fabric-wide reads,
+    # and the old grammar put them at top level where nothing said so.
+    assert {"flow", "flows"} <= set(complete("show fabric "))
+    assert set(complete("show fabric flow")) == {"flow", "flows"}
+    assert complete("show fabric flows ") == ["summary"]
+    # `show fabric flow` takes a free-form address, so it suggests nothing rather
     # than offering `summary` and inviting the two commands to be confused.
-    assert complete("show flow ") == []
+    assert complete("show fabric flow ") == []
+    # And neither is reachable at the top level any more (#74).
+    assert {"flow", "flows"} & set(complete("show ")) == set()
 
 
 def test_naming_an_appliance_twice_does_not_double_count_it(

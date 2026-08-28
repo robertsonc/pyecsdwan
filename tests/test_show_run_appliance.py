@@ -1,4 +1,4 @@
-"""`show run appliance <name>` — appliance CLI running-config (issue #56).
+"""`show configuration appliance <name>` — appliance CLI running-config (issue #56).
 
 The deliverable this file guards is the **allowlist**, not the printing. Every
 smuggling shape gets its own case: a second command appended with `;`, `&&`,
@@ -106,7 +106,7 @@ def _sealed_ctx() -> Ctx:
     "command",
     [
         "show running-config",
-        "show version",
+        "show fabric version",
         "display running-config",
         "show interfaces gigabit0/1",
         "show ip route 10.0.0.0/8",
@@ -458,9 +458,9 @@ def test_cli_broadcast_timeout_exits_nonzero(
 
 
 def test_cli_show_run_alone_is_the_fabric_report(fabric: dict[str, Any]) -> None:
-    """The #55/#56 split at the CLI: `show run` is the group's
+    """The #55/#56 split at the CLI: `show configuration fabric` is the group's
     `invoke_without_command=True` callback (the fabric configuration
-    breakdown), `show run appliance <name>` is its subcommand. This file owns
+    breakdown), `show configuration appliance <name>` is its subcommand. This file owns
     the subcommand half; `tests/test_show_run.py` owns the report itself.
 
     Was a "Missing command" assertion until #55 filled the callback in — the
@@ -493,51 +493,54 @@ def _shell(state: ShellState, line: str) -> str:
 
 
 def test_shell_show_run_appliance_prints_the_config(shell_state: ShellState) -> None:
-    out = _shell(shell_state, "show run appliance BR1-EC")
+    out = _shell(shell_state, "show configuration appliance BR1-EC --format native")
     assert "# BR1-EC (3.NE)" in out
     assert "hostname BR1-EC" in out
 
 
 def test_shell_show_run_appliance_handles_several_names(shell_state: ShellState) -> None:
-    out = _shell(shell_state, "show run appliance BR1-EC BR2-EC")
+    out = _shell(shell_state, "show configuration appliance BR1-EC BR2-EC --format native")
     assert "# BR1-EC running-config" in out
     assert "# BR2-EC running-config" in out
 
 
 def test_shell_bare_show_run_is_the_fabric_report(shell_state: ShellState) -> None:
-    """The same split in the shell: bare `show run` is #55's fabric report,
+    """The same split in the shell: bare `show configuration fabric` is #55's fabric report,
     and it reaches it through the branch that used to raise the usage error.
 
     Asserted the usage line until #55 landed — changed on purpose, and kept
-    here so the two halves of `show run` stay pinned from both entry points.
+    here so the two halves of `show configuration fabric` stay pinned from both entry points.
     """
-    out = _shell(shell_state, "show run")
+    out = _shell(shell_state, "show configuration fabric")
     assert "overlays" in out
     assert "usage:" not in out
 
 
 def test_shell_show_run_garbage_is_a_usage_error(shell_state: ShellState) -> None:
-    assert "usage: show run appliance" in _shell(shell_state, "show run wibble")
-    assert "usage: show run appliance" in _shell(shell_state, "show run appliance")
+    usage = "usage: show configuration [running] fabric [<section>]"
+    assert usage in _shell(shell_state, "show configuration fabric wibble")
+    assert usage in _shell(shell_state, "show configuration fabric appliance")
 
 
 def test_shell_unknown_appliance_is_a_red_line_not_a_crash(shell_state: ShellState) -> None:
-    out = _shell(shell_state, "show run appliance BR1-ECX")
+    out = _shell(shell_state, "show configuration appliance BR1-ECX --format native")
     assert "unknown appliance" in out
 
 
 def test_shell_show_run_leaves_no_candidate_or_journal(shell_state: ShellState) -> None:
-    _shell(shell_state, "show run appliance BR1-EC BR2-EC")
+    _shell(shell_state, "show configuration appliance BR1-EC BR2-EC --format native")
     assert journal.list_txns() == []
     assert len(shell_state.candidate) == 0
 
 
 def test_shell_completes_show_run_appliance_names(shell_state: ShellState) -> None:
-    """A third seam test: `show run` used to complete to `appliance` and
-    nothing else, because #55's bare form took no arguments. It now also takes
-    a section name (`show run overlays`), so the completer offers both — see
-    tests/test_show_run.py for the section half."""
+    """A third seam test, following the command through the tree: the scope
+    noun, then the appliance name, then the flag that selects vendor text."""
     completer = ShellCompleter(shell_state)
-    assert "run" in completer._options(["show"])
-    assert "appliance" in completer._options(["show", "run"])
-    assert "BR1-EC" in completer._options(["show", "run", "appliance"])
+    assert "configuration" in completer._options(["show"])
+    assert "appliance" in completer._options(["show", "configuration"])
+    assert "BR1-EC" in completer._options(["show", "configuration", "appliance"])
+    assert "--format" in completer._options(["show", "configuration", "appliance", "BR1-EC"])
+    assert completer._options(
+        ["show", "configuration", "appliance", "BR1-EC", "--format"]
+    ) == ["native"]

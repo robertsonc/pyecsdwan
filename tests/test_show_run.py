@@ -1,4 +1,4 @@
-"""``show run``: the fabric configuration breakdown (issue #55).
+"""``show configuration fabric``: the fabric configuration breakdown (issue #55).
 
 The report's job is orientation, so what these tests mostly pin is that it
 stays *honest* while the fabric misbehaves: a section whose endpoint is dead
@@ -624,39 +624,52 @@ def _shell(state: ShellState, line: str) -> str:
 
 
 def test_shell_bare_show_run_renders_the_fabric_report(shell_state: ShellState) -> None:
-    out = _shell(shell_state, "show run")
+    out = _shell(shell_state, "show configuration fabric")
     assert "overlays (1)" in out
     assert "CorpFabric" in out
     assert "deployment (3)" in out
 
 
 def test_shell_show_run_scopes_to_one_section(shell_state: ShellState) -> None:
-    out = _shell(shell_state, "show run overlays")
+    out = _shell(shell_state, "show configuration fabric overlays")
     assert "overlays (1)" in out
     assert "deployment" not in out
 
 
 def test_shell_unknown_section_lists_the_valid_ones(shell_state: ShellState) -> None:
-    out = _shell(shell_state, "show run wibble")
+    out = _shell(shell_state, "show configuration fabric wibble")
     assert "unknown section 'wibble'" in out
     for name in fabric.SECTIONS:
         assert name in out
-    # And still names the other form, so a mistyped `appliance` is not a dead end.
-    assert "usage: show run appliance" in out
+    assert "usage: show configuration [running] fabric [<section>]" in out
 
 
-def test_shell_show_run_appliance_is_unchanged(shell_state: ShellState) -> None:
-    """`appliance` is matched before the section names: `appliance` and the
-    `appliances` section differ by one character and must not be guessed at."""
-    assert "# BR1-EC (3.NE)" in _shell(shell_state, "show run appliance BR1-EC")
-    assert "usage: show run appliance" in _shell(shell_state, "show run appliance")
+def test_the_appliance_and_appliances_ambiguity_is_gone_by_construction(
+    shell_state: ShellState,
+) -> None:
+    """`appliance` and the `appliances` *section* differ by one character.
+
+    The old grammar had them in the same position under `show run`, so the
+    parser matched `appliance` first and hoped. They are now under different
+    scope nouns, so neither can be reached from the other's position and there
+    is nothing left to guess at.
+    """
+    native = _shell(shell_state, "show configuration appliance BR1-EC --format native")
+    assert "# BR1-EC (3.NE)" in native
+
+    # `appliance` is not a section...
+    section = _shell(shell_state, "show configuration fabric appliance")
+    assert "unknown section 'appliance'" in section
+    # ...and `appliances` is, still.
+    assert "unknown section" not in _shell(shell_state, "show configuration fabric appliances")
 
 
 def test_shell_completer_offers_both_forms(shell_state: ShellState) -> None:
+    """The two halves now sit under different tokens, and completion follows."""
     completer = ShellCompleter(shell_state)
-    options = completer._options(["show", "run"])
-    assert "appliance" in options
-    assert set(fabric.SECTIONS) <= set(options)
+    assert set(fabric.SECTIONS) <= set(completer._options(["show", "configuration", "fabric"]))
+    assert "appliance" in completer._options(["show", "configuration"])
+    assert "fabric" in completer._options(["show", "configuration"])
 
 
 # -- read-only ----------------------------------------------------------------
@@ -682,17 +695,17 @@ class _WriteRefusingClient:
     def appliance_request(self, method: str, ne_pk: str, ecos_path: str, **kwargs: Any) -> Any:
         self.methods.append(method)
         if method != "GET":
-            raise AssertionError(f"show run sent {method} to the appliance proxy")
+            raise AssertionError(f"show configuration fabric sent {method} to the appliance proxy")
         return self._inner.appliance_request(method, ne_pk, ecos_path, **kwargs)
 
     def post(self, *args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("show run issued a POST")
+        raise AssertionError("show configuration fabric issued a POST")
 
     def put(self, *args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("show run issued a PUT")
+        raise AssertionError("show configuration fabric issued a PUT")
 
     def delete(self, *args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("show run issued a DELETE")
+        raise AssertionError("show configuration fabric issued a DELETE")
 
 
 def test_the_report_only_ever_reads(world: dict[str, Any]) -> None:
@@ -706,7 +719,7 @@ def test_the_report_only_ever_reads(world: dict[str, Any]) -> None:
 def test_show_run_leaves_no_candidate_journal_or_transaction(
     world: dict[str, Any], shell_state: ShellState
 ) -> None:
-    _shell(shell_state, "show run")
+    _shell(shell_state, "show configuration fabric")
     result = _cli(world)
     assert result.exit_code == 0, result.output
 

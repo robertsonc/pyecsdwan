@@ -22,7 +22,7 @@ from __future__ import annotations
 import dataclasses
 import re
 import shlex
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -61,17 +61,27 @@ _CONFIG_COMMANDS: tuple[str, ...] = (
     "show",
     "top",
 )
-_SHOW_SPECIALS: tuple[str, ...] = (
+#: `show <token>` where the subject is the tool, not the fabric: transaction
+#: and audit state. Deliberately left under bare `show` (grammar.md §2) — it is
+#: neither network-operational nor configuration, and the corpus has no
+#: precedent for a fifth category.
+_SHOW_CLI_STATE: tuple[str, ...] = (
     "appliances",
     "coverage",
-    "flow",
-    "flows",
     "journal",
     "locks",
-    "run",
     "transactions",
-    "version",
 )
+#: Scope nouns (grammar.md §3). Outermost-first and mandatory: EdgeConnect
+#: always has a subject, so there is no implicit "this device".
+_SCOPE_NOUNS: tuple[str, ...] = ("appliance", "fabric")
+#: Datastore qualifiers under `show configuration`. `running` is the default
+#: and may always be written explicitly; `candidate` is never implicit, so an
+#: operator cannot be shown staged intent believing it is the device.
+_DATASTORES: tuple[str, ...] = ("running", "candidate")
+#: Operational domains under a scope noun. `fabric` has three today; `appliance`
+#: has none until specs/002-appliance-operational-views lands.
+_FABRIC_DOMAINS: tuple[str, ...] = ("flow", "flows", "version")
 #: CLI token -> txn.commit() keyword argument.
 _COMMIT_FLAGS: dict[str, str] = {
     "force": "force",
@@ -89,20 +99,39 @@ _DELETE_USAGE = (
     "usage: delete <kind> <name> [<path...>]  |  "
     "delete appliance <appliance-name> <kind> <name> [<path...>]"
 )
-_SHOW_OPERATIONAL_USAGE = (
-    "usage: show <appliances | journal | locks | coverage | version | "
-    "transactions pending | run [<section> | appliance <name>] | flows summary | "
-    "flow <ip> | <kind> [<name>]>"
-)
 # `show flow` and `show flows` differ by one character and mean different
 # things, so each insists on its own shape rather than guessing at the other.
-_SHOW_FLOWS_USAGE = "usage: show flows summary"
-_SHOW_FLOW_USAGE = "usage: show flow <ip>[/<prefix>]"
+_SHOW_FLOWS_USAGE = "usage: show fabric flows summary"
+_SHOW_FLOW_USAGE = "usage: show fabric flow <ip>[/<prefix>]"
 _ROLLBACK_USAGE = "usage: rollback <n>  |  rollback pending"
-_SHOW_GENERIC_USAGE = "usage: show [appliance <name>] <kind> [<instance>]"
-#: Both forms: the per-appliance CLI running-config (#56) and the fabric-wide
-#: configuration breakdown (#55), optionally scoped to one section.
-_SHOW_RUN_USAGE = "usage: show run appliance <name> [<name>...]  |  show run [<section>]"
+_SHOW_GENERIC_USAGE = (
+    "usage: show configuration [running] [appliance <name>] <kind> [<instance>]"
+)
+#: The per-appliance vendor text (#56). `--format native` is what selects it;
+#: without the flag the same path renders normalized configuration.
+_SHOW_NATIVE_USAGE = (
+    "usage: show configuration [running] appliance <name> [<name>...] --format native"
+)
+#: The fabric-wide configuration breakdown (#55), optionally scoped to one
+#: section.
+_SHOW_FABRIC_CONFIG_USAGE = "usage: show configuration [running] fabric [<section>]"
+
+
+class Nonterminal(Exception):
+    """A valid prefix that names its continuations — not an error (D-NSO-2).
+
+    `show appliance BR1-EC bgp` is the canonical case: three views live under
+    it and the shell must never pick one. Carried as an exception so any depth
+    of the tree can answer "you are here, these are the next tokens" without
+    every intermediate frame having to return a sentinel; the dispatcher
+    renders it at exit 0, in the ordinary style rather than in red.
+    """
+
+    def __init__(self, path: str, options: Sequence[str], note: str = "") -> None:
+        super().__init__(path)
+        self.path = path
+        self.options = list(options)
+        self.note = note
 
 
 @dataclasses.dataclass
@@ -139,7 +168,11 @@ def build_state(
 
 
 def _error(console: Console, message: str) -> None:
-    console.print(message, style="bold red", markup=False, highlight=False)
+    # soft_wrap for the same reason running-config output uses it: these
+    # messages name the command to type instead, and a remedy rich has broken
+    # across two lines cannot be pasted. The terminal still wraps it visually;
+    # what it no longer does is put a newline inside the command.
+    console.print(message, style="bold red", markup=False, highlight=False, soft_wrap=True)
 
 
 def _warn(console: Console, message: str) -> None:
@@ -286,8 +319,23 @@ def dispatch_operational(line: str, state: ShellState) -> None:
         _run_operational(tokens, state)
     except (KeyboardInterrupt, SystemExit):
         raise
+    except Nonterminal as nonterminal:
+        _render_nonterminal(state.console, nonterminal)
     except Exception as exc:  # noqa: BLE001 - dispatch boundary: any command failure becomes a red line; the shell survives
         _error(state.console, _format_error(exc))
+
+
+def _render_nonterminal(console: Console, nonterminal: Nonterminal) -> None:
+    """Print a prefix's valid continuations. Exit 0: this answered the question
+    that was asked, which was "what can follow this?"."""
+    console.print(f"{nonterminal.path} — valid next tokens:", markup=False, highlight=False)
+    if nonterminal.options:
+        for option in nonterminal.options:
+            console.print(f"  {option}", markup=False, highlight=False)
+    else:
+        _info(console, "  (none)")
+    if nonterminal.note:
+        console.print(nonterminal.note, markup=False, highlight=False, soft_wrap=True)
 
 
 def dispatch_config(line: str, state: ShellState) -> None:
@@ -356,8 +404,23 @@ def _leave_config(state: ShellState) -> None:
 
 
 def _show_operational(args: list[str], state: ShellState) -> None:
+    """The read tree (grammar.md §2).
+
+    Three branches, one per intent, and no token sequence resolves to two —
+    that is Principle I made structural rather than documented:
+
+    * ``show <cli-state>``    — the tool's own state
+    * ``show <scope> ...``    — operational state of the network
+    * ``show configuration``  — configuration, at a named datastore
+
+    The pre-#74 tree had no such split: ``show appliance BR1-EC bgp`` returned
+    modeled configuration and ``show version`` returned live state, from the
+    same position, distinguished only by which noun happened to be typed.
+    """
     if not args:
-        raise ValueError(_SHOW_OPERATIONAL_USAGE)
+        raise Nonterminal(
+            "show", [*_SHOW_CLI_STATE, *_SCOPE_NOUNS, "configuration"]
+        )
     head = args[0]
     if head == "appliances":
         _show_appliances(state)
@@ -377,16 +440,168 @@ def _show_operational(args: list[str], state: ShellState) -> None:
         _show_pending(state)
     elif head == "coverage":
         _show_coverage(state)
-    elif head == "version":
+    elif head == "configuration":
+        _show_configuration(args[1:], state)
+    elif head == "fabric":
+        _show_fabric_operational(args[1:], state)
+    elif head == "appliance":
+        _show_appliance_operational(args[1:], state)
+    else:
+        raise ValueError(
+            f"unknown command 'show {head}' — valid next tokens: "
+            f"{', '.join([*_SHOW_CLI_STATE, *_SCOPE_NOUNS, 'configuration'])}"
+        )
+
+
+# -- operational state -------------------------------------------------------
+
+
+def _show_fabric_operational(args: list[str], state: ShellState) -> None:
+    """``show fabric <domain> ...`` — live state across every appliance."""
+    if not args:
+        raise Nonterminal("show fabric", list(_FABRIC_DOMAINS))
+    head = args[0]
+    if head == "version":
+        if args[1:]:
+            raise ValueError("usage: show fabric version")
         _show_version(state)
     elif head == "flows":
         _show_flows_summary(args[1:], state)
     elif head == "flow":
         _show_flow(args[1:], state)
-    elif head == "run":
-        _show_run(args[1:], state)
     else:
-        _show_generic(args, state)
+        raise ValueError(
+            f"unknown domain {head!r} under 'show fabric' — valid next tokens: "
+            f"{', '.join(_FABRIC_DOMAINS)}"
+        )
+
+
+def _show_appliance_operational(args: list[str], state: ShellState) -> None:
+    """``show appliance <name> <domain>`` — live state of one appliance.
+
+    Nothing lives here yet: the domains are specified in
+    ``specs/002-appliance-operational-views`` and not implemented. That makes
+    this branch's whole job the *rename*, and it is the one rename in the
+    migration that could have hurt someone.
+
+    Before #74, `show appliance BR1-EC bgp` returned modeled configuration.
+    It now names operational state — same tokens, different data. Answering it
+    with either one silently would be the exact failure Principle II exists to
+    prevent, so it is refused, and the refusal says where the configuration
+    went.
+    """
+    if not args:
+        raise ValueError("usage: show appliance <name> <domain>")
+    name, rest = args[0], args[1:]
+    if not rest:
+        raise Nonterminal(
+            f"show appliance {name}",
+            [],
+            "no operational domains are implemented yet "
+            "(specs/002-appliance-operational-views); for configuration use "
+            f"'show configuration appliance {name} <kind>'",
+        )
+    domain = rest[0]
+    try:
+        kind = _resolve_kind(domain, name, state)
+    except UnknownKind:
+        raise ValueError(
+            f"unknown operational domain {domain!r} for appliance {name!r}. "
+            f"No operational domains are implemented yet "
+            f"(specs/002-appliance-operational-views)."
+        ) from None
+    # It resolved as a configuration kind, so this is the renamed form.
+    noun = state.registry.cli_name(kind)
+    raise ValueError(
+        f"{noun} is configuration, not operational state — use:\n"
+        f"    show configuration appliance {name} {noun}"
+        f"{' ' + rest[1] if len(rest) > 1 else ''}\n"
+        f"'show appliance <name> {noun}' meant that before #74 and now names "
+        f"operational state, so it is refused rather than answered with "
+        f"different data than it used to return."
+    )
+
+
+# -- configuration -----------------------------------------------------------
+
+
+def _show_configuration(args: list[str], state: ShellState) -> None:
+    """``show configuration [running|candidate] ...`` (grammar.md §2).
+
+    The datastore token is optional and defaults to ``running`` (Decision 1),
+    which makes the common read short at the cost that it does not name its
+    datastore. The mitigation is the asymmetry: ``candidate`` is never
+    implicit, so the only unnamed datastore is the live one and an operator
+    can never be shown staged intent while believing they are looking at the
+    device.
+
+    That optionality is why ``running``, ``candidate``, ``appliance``,
+    ``fabric`` and ``configuration`` are reserved kind names — this position
+    has to decide whether a token is a datastore, a scope noun, or a kind, and
+    it cannot if a kind may be spelled like one (enforced in
+    ``contract.RESERVED_CLI_WORDS``).
+    """
+    datastore = "running"
+    if args and args[0] in _DATASTORES:
+        datastore, args = args[0], args[1:]
+    if datastore == "candidate":
+        if args:
+            raise ValueError("usage: show configuration candidate")
+        _render_candidate(state)
+        return
+    if not args:
+        raise Nonterminal(
+            "show configuration",
+            [*_DATASTORES, *_SCOPE_NOUNS, *state.registry.cli_names(Scope.ORCHESTRATOR)],
+        )
+    head = args[0]
+    if head == "fabric":
+        _show_fabric_config(args[1:], state)
+    elif head == "appliance":
+        _show_appliance_config(args[1:], state)
+    else:
+        _show_generic(args, None, state)
+
+
+def _show_appliance_config(args: list[str], state: ShellState) -> None:
+    """``show configuration [running] appliance <name> [<kind> [<instance>]]``
+    and the ``--format native`` form that replaced ``show run appliance``."""
+    if not args:
+        raise ValueError(_SHOW_GENERIC_USAGE)
+    rest, native = _take_native_flag(args)
+    if native:
+        if not rest:
+            raise ValueError(_SHOW_NATIVE_USAGE)
+        _show_native_config(rest, state)
+        return
+    name, tail = rest[0], rest[1:]
+    if not tail:
+        raise Nonterminal(
+            f"show configuration appliance {name}",
+            [*state.registry.cli_names(Scope.APPLIANCE), "--format native"],
+        )
+    _show_generic(tail, name, state)
+
+
+def _take_native_flag(args: list[str]) -> tuple[list[str], bool]:
+    """Split ``--format native`` off the token list.
+
+    Only ``native`` is accepted here: it selects a different *source* (the
+    appliance's own command interpreter) rather than a different rendering, so
+    it cannot be handled with the yaml/json formats that apply to every read.
+    """
+    if "--format" not in args:
+        return args, False
+    index = args.index("--format")
+    if index + 1 >= len(args):
+        raise ValueError("--format needs a value: native")
+    value = args[index + 1]
+    if value != "native":
+        raise ValueError(
+            f"--format {value!r} is not valid here; 'native' selects the "
+            f"appliance's own configuration text"
+        )
+    return args[:index] + args[index + 2 :], True
 
 
 def _show_appliances(state: ShellState) -> None:
@@ -487,31 +702,21 @@ def _show_flow(args: list[str], state: ShellState) -> None:
     from pyecsdwan.reports import flows as flows_report
 
     render_flow_search(state.console, flows_report.find_flows(state.ctx, args[0]))
-def _show_run(args: list[str], state: ShellState) -> None:
-    """``show run [<section>]`` and ``show run appliance <name> [<name>...]``.
+def _show_native_config(names: list[str], state: ShellState) -> None:
+    """``show configuration [running] appliance <name>... --format native``.
 
-    Bare (#55) it is the fabric configuration breakdown, optionally scoped to
-    one section; with ``appliance`` (#56) it is that appliance's own CLI
-    running-config.
+    The appliance's own configuration text, read through its command
+    interpreter (#56) — the one surface that reaches an ECOS CLI at all. Still
+    read-only: the command sent is the vetted constant in
+    :mod:`pyecsdwan.reports.applianceconfig`, whose deny-by-default validator
+    is unchanged by the rename (compatibility.md rule 5).
 
-    Read-only on both paths: the fabric report is GETs only, and the command
-    sent to an appliance is the vetted constant in
-    :mod:`pyecsdwan.reports.applianceconfig`. Neither touches the candidate,
-    the journal or the transaction engine.
-
-    ``appliance`` is checked before the section names so the per-appliance
-    form keeps its own usage error — ``appliance`` and the ``appliances``
-    section differ by one character, and guessing between them would be worse
-    than saying which one was typed.
+    Several names are accepted because the pre-#74 spelling accepted them and
+    the migration table does not remove that; the flag is what selects the
+    format, so everything before it is a name.
     """
     from pyecsdwan.reports import applianceconfig
 
-    if not args or args[0] != "appliance":
-        _show_fabric_config(args, state)
-        return
-    if len(args) < 2:
-        raise ValueError(_SHOW_RUN_USAGE)
-    names = args[1:]
     if len(names) == 1:
         _print_appliance_config(state, applianceconfig.fetch_running_config(state.ctx, names[0]))
         return
@@ -528,7 +733,7 @@ def _show_run(args: list[str], state: ShellState) -> None:
 
 
 def _show_fabric_config(args: list[str], state: ShellState) -> None:
-    """``show run [<section>]`` (#55) — the fabric configuration breakdown.
+    """``show configuration [running] fabric [<section>]`` (#55).
 
     An unknown section names the valid ones and then the usage line, so a
     typo is answered with what to type rather than with an empty report.
@@ -537,12 +742,12 @@ def _show_fabric_config(args: list[str], state: ShellState) -> None:
     from pyecsdwan.reports import fabric
 
     if len(args) > 1:
-        raise ValueError(_SHOW_RUN_USAGE)
+        raise ValueError(_SHOW_FABRIC_CONFIG_USAGE)
     section = args[0] if args else None
     try:
         fabric.resolve_sections(section)
     except fabric.UnknownSection as exc:
-        raise ValueError(f"{exc}\n{_SHOW_RUN_USAGE}") from None
+        raise ValueError(f"{exc}\n{_SHOW_FABRIC_CONFIG_USAGE}") from None
     render_fabric_config(state.console, fabric.collect(state.ctx, section=section))
 
 
@@ -559,20 +764,15 @@ def _print_appliance_config(state: ShellState, config: ApplianceConfig) -> None:
     )
 
 
-def _show_generic(args: list[str], state: ShellState) -> None:
-    """``show [appliance <name>] <kind> [<instance>]`` — fetch + normalize one
-    resource and print it as YAML. With no instance name, enumerate the kind's
-    known instances via list_refs() (a lone instance is shown directly)."""
-    appliance: str | None = None
-    if args and args[0] == "appliance":
-        # Need at least `appliance <name> <kind>` — an incomplete prefix (just
-        # "appliance", or "appliance <name>") falls through to the generic
-        # usage error below rather than being silently mistaken for a kind or
-        # swallowing the next token as an appliance name.
-        if len(args) < 3:
-            raise ValueError(_SHOW_GENERIC_USAGE)
-        appliance = args[1]
-        args = args[2:]
+def _show_generic(args: list[str], appliance: str | None, state: ShellState) -> None:
+    """``<kind> [<instance>]`` — fetch + normalize one resource and print it as
+    YAML. With no instance name, resolve the kind's instances in the caller's
+    scope (a lone instance is shown directly).
+
+    Scope arrives as an argument rather than being re-parsed here: the tree
+    above has already decided it, and parsing it twice is how the two surfaces
+    came to disagree in the first place (#76).
+    """
     if not args or len(args) > 2:
         raise ValueError(_SHOW_GENERIC_USAGE)
     kind = _resolve_kind(args[0], appliance, state)
@@ -585,7 +785,7 @@ def _show_generic(args: list[str], state: ShellState) -> None:
         # a clear rejection (#48).
         raise ValueError(
             f"{noun} is {resource.scope.value}-scope; omit the 'appliance' form: "
-            f"show {noun} [<instance>]"
+            f"show configuration {noun} [<instance>]"
         )
 
     # Ordered before enumeration deliberately: an appliance-scoped kind with no
@@ -593,7 +793,10 @@ def _show_generic(args: list[str], state: ShellState) -> None:
     # confusion, burying the one message that actually tells the operator what
     # to type.
     if resource.scope.value == "appliance" and appliance is None:
-        raise ValueError(f"{noun} is appliance-scoped; use 'show appliance <name> {noun} ...'")
+        raise ValueError(
+            f"{noun} is appliance-scoped; use "
+            f"'show configuration appliance <name> {noun} ...'"
+        )
 
     if len(args) == 2:
         instance = args[1]
@@ -673,6 +876,14 @@ def _cmd_show_config(args: list[str], state: ShellState) -> None:
         return
     if rest:
         raise ValueError("usage: 'show' or 'show | compare'")
+    _render_candidate(state)
+
+
+def _render_candidate(state: ShellState) -> None:
+    """The staged changeset. Reached two ways, and deliberately one renderer:
+    bare ``show`` in config mode, where the mode carries the intent (D-JUN-1),
+    and ``show configuration candidate`` in operational mode, where it has to
+    be named because ``candidate`` is never the default datastore."""
     if not len(state.candidate):
         _info(state.console, "(candidate is empty)")
         return
@@ -816,57 +1027,104 @@ class ShellCompleter(Completer):
                 yield Completion(option, start_position=-len(current))
 
     def _options(self, prior: list[str]) -> list[str]:
+        """Valid next tokens after ``prior``.
+
+        Walks the same tree the dispatcher does, one frame per token, so a
+        position that offers something is a position the parser accepts —
+        #74's "drive parsing, completion and help from one command definition"
+        as far as two functions that must agree can get without a table.
+        """
         mode = self.state.mode
         if not prior:
             return list(_CONFIG_COMMANDS if mode == MODE_CONFIG else _OPERATIONAL_COMMANDS)
-        first = prior[0]
-        if first in ("set", "delete", "show"):
-            return self._target_options(first, prior)
+        first, rest = prior[0], prior[1:]
+        if first == "show":
+            # Mode carries the intent: in config mode bare `show` is the
+            # candidate and takes only `compare` (D-JUN-1), so offering kind
+            # nouns there would complete a command that does not exist.
+            if mode == MODE_CONFIG:
+                return ["compare"] if not rest else []
+            return self._show_options(rest)
+        if first in ("set", "delete"):
+            return self._ref_options(rest)
         if first == "commit" and mode == MODE_CONFIG:
             return [*_COMMIT_FLAGS, "confirm"]
-        if first == "rollback" and mode == MODE_CONFIG and len(prior) == 1:
+        if first == "rollback" and mode == MODE_CONFIG and not rest:
             return ["pending"]
         return []
 
-    def _target_options(self, first: str, prior: list[str]) -> list[str]:
-        # User-facing nouns, never registry keys (#77) — and scoped, so the
-        # position after an appliance name offers appliance nouns and the bare
-        # position offers Orchestrator ones. Completing `appliance/zones` after
-        # the operator already typed `appliance BR1-EC` was the leak.
-        if len(prior) == 1:
-            options = [*self.state.registry.cli_names(Scope.ORCHESTRATOR), "appliance"]
-            if first == "show" and self.state.mode == MODE_OPERATIONAL:
-                options.extend(_SHOW_SPECIALS)
-            return options
-        if prior[1] == "appliance" and first in ("set", "delete", "show"):
-            if len(prior) == 2:
-                return self._appliance_names()
-            if len(prior) == 3:
-                return self.state.registry.cli_names(Scope.APPLIANCE)
-            if len(prior) == 4:
-                return self._instance_names(prior[3], Scope.APPLIANCE, prior[2])
-        if first == "show" and prior[1] == "transactions" and len(prior) == 2:
+    def _show_options(self, rest: list[str]) -> list[str]:
+        """Operational-mode ``show`` (grammar.md §2)."""
+        if not rest:
+            return [*_SHOW_CLI_STATE, *_SCOPE_NOUNS, "configuration"]
+        head, tail = rest[0], rest[1:]
+        if head == "configuration":
+            return self._configuration_options(tail)
+        if head == "fabric":
+            if not tail:
+                return list(_FABRIC_DOMAINS)
+            # `flows` completes to its one subcommand; `flow` takes a free-form
+            # address, so it deliberately offers nothing rather than suggesting
+            # `summary` and inviting the two to be confused.
+            if tail == ["flows"]:
+                return ["summary"]
+            return []
+        if head == "appliance":
+            # Operational domains for one appliance are specified but not
+            # implemented, so after the name there is nothing honest to offer.
+            return self._appliance_names() if not tail else []
+        if head == "transactions" and not tail:
             return ["pending"]
-        # `flows` completes to its one subcommand; `flow` takes a free-form
-        # address, so it deliberately offers nothing rather than suggesting
-        # `summary` and inviting the two to be confused.
-        if first == "show" and prior[1] == "flows" and len(prior) == 2:
-            return ["summary"]
-        if first == "show" and prior[1] == "run":
-            # Both forms: `appliance` opens the per-appliance running-config
-            # (#56), the section names scope the fabric breakdown (#55).
-            if len(prior) == 2:
-                from pyecsdwan.reports import fabric
-
-                return ["appliance", *fabric.SECTIONS]
-            if prior[2] == "appliance":
-                return self._appliance_names()
-        # Last, so the special forms above keep their own completions: the
-        # position after a bare kind noun is an instance name. The specials are
-        # not registered nouns, so _instance_names would decline them anyway.
-        if len(prior) == 2:
-            return self._instance_names(prior[1], Scope.ORCHESTRATOR, None)
         return []
+
+    def _configuration_options(self, rest: list[str]) -> list[str]:
+        """``show configuration [running|candidate] ...``."""
+        registry = self.state.registry
+        if rest and rest[0] == "candidate":
+            return []
+        if rest and rest[0] == "running":
+            rest = rest[1:]
+            here = [*_SCOPE_NOUNS, *registry.cli_names(Scope.ORCHESTRATOR)]
+        else:
+            here = [*_DATASTORES, *_SCOPE_NOUNS, *registry.cli_names(Scope.ORCHESTRATOR)]
+        if not rest:
+            return here
+        head, tail = rest[0], rest[1:]
+        if head == "fabric":
+            from pyecsdwan.reports import fabric
+
+            return list(fabric.SECTIONS) if not tail else []
+        if head == "appliance":
+            if not tail:
+                return self._appliance_names()
+            if tail[-1] == "--format":
+                return ["native"]
+            if len(tail) == 1:
+                return [*registry.cli_names(Scope.APPLIANCE), "--format"]
+            if len(tail) == 2:
+                return self._instance_names(tail[1], Scope.APPLIANCE, tail[0])
+            return []
+        return self._instance_names(head, Scope.ORCHESTRATOR, None) if not tail else []
+
+    def _ref_options(self, rest: list[str]) -> list[str]:
+        """``set``/``delete``: ``[appliance <name>] <kind> <instance> ...``.
+
+        Scope is a position here exactly as it is in `show`, which is
+        Principle IV's "one grammar across interfaces" at the token level.
+        """
+        registry = self.state.registry
+        if not rest:
+            return [*registry.cli_names(Scope.ORCHESTRATOR), "appliance"]
+        head, tail = rest[0], rest[1:]
+        if head == "appliance":
+            if not tail:
+                return self._appliance_names()
+            if len(tail) == 1:
+                return registry.cli_names(Scope.APPLIANCE)
+            if len(tail) == 2:
+                return self._instance_names(tail[1], Scope.APPLIANCE, tail[0])
+            return []
+        return self._instance_names(head, Scope.ORCHESTRATOR, None) if not tail else []
 
     def _instance_names(self, noun: str, scope: Scope, appliance: str | None) -> list[str]:
         """Instance names for a kind the operator has already named (#49, #76).
