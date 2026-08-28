@@ -17,7 +17,7 @@ unlinked task has not been started.
 | T7 | Audit remaining appliance-scoped resources for the same silent path | T6 | Every kind exercised; findings filed | #78 |
 | T8 | Parser: new grammar, scope nouns, nonterminal listing | T1, T3 | R1–R5, R10 tests green; nonterminals list next tokens | #74 |
 | T9 | Compatibility aliases with stderr warnings; the hard-fail for the meaning-change form | T8 | Behavior-asserting tests, not acceptance tests; refusal names both replacements | #74 |
-| T10 | BGP operational views — `summary`, `neighbors [<ip>]`, `routes` | T8 | Built natively on the taxonomy; no compatibility shim needed | #72 |
+| T10 | BGP operational views — **spec** in `specs/002-appliance-operational-views/` | T1 | Source-verified; `routes` reported unsupported (no endpoint exists) | #72 |
 | T11 | Golden UX tests derived from `grammar.md` §7 | T8, T10 | Every row of the worked-examples table is a test | #74 |
 | T12 | Removal boundary decided (Q3) and documented in `--help` and the constitution record | T1 | Aliases carry an expiry | #74 |
 
@@ -32,6 +32,9 @@ unlinked task has not been started.
   outstanding. This is the one part of the epic worth doing out of order.
 * **T2–T4 (#77) must land before T8**, or the parser change would have to be
   made twice — once against registry keys and again against aliases.
-* **T10 (#72) is deliberately last.** BGP is the proof that the taxonomy works
-  for a real domain; building it before T8 would mean building it against the
-  grammar being replaced.
+* **T10 (#72) comes *before* T8/T9 (#74), not after.** This table originally
+  had it last, on the reasoning that BGP proves the taxonomy on a real domain.
+  That was wrong: #74's own text says it "depends on the approved taxonomy and
+  BGP operational-view spec", and #72 is a *define* issue, not an
+  implementation. The migration needs to know the target tree before it builds
+  it. Corrected 2026-08-28; the issues were right and this plan was not.
