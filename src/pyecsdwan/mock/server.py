@@ -151,6 +151,120 @@ def _seed_bgp_system() -> dict[str, dict[str, Any]]:
     return {"1.NE": dict(disabled), "3.NE": dict(enabled), "5.NE": dict(disabled)}
 
 
+def _seed_bgp_state() -> dict[str, dict[str, Any]]:
+    """`GET /bgp/state` (#72) — protocol state, NOT configuration.
+
+    Three appliances, three deliberately different answers, because a fixture
+    where every appliance says the same thing lets a wrong implementation pass:
+
+    * **3.NE** runs BGP with two established peers. `neighborState` is keyed
+      "0"/"1" as the schema documents, and this is the only appliance whose
+      config also lists a neighbor — so it exercises the config/state
+      correlation.
+    * **5.NE** runs BGP with *three* peers, keyed "0".."2". The schema
+      documents only two keys; an implementation that trusts that, or that
+      treats the object as an array, loses the third and no assertion about
+      3.NE would notice.
+    * **1.NE** has BGP switched off (`bgp_state: 0`). That is an answer, not
+      an error, and not the same answer as `bgp_state: 1` (down).
+
+    5.NE's `neighborCount` deliberately claims 4 against 3 rows: the count is
+    authoritative, so the mismatch must surface as `partial` rather than be
+    silently trusted. No live capture is claimed for that; it is a constructed
+    case for a state the API can express and a reader must not ignore.
+    """
+
+    def peer(ip: str, asn: int, index: int, established: bool = True) -> dict[str, Any]:
+        return {
+            "peer_ip": ip,
+            "asn": asn,
+            "peer_state": 6 if established else 1,
+            "peer_state_str": "Established" if established else "Idle",
+            "local_ip": "192.168.255.13",
+            "rtr_id": "192.168.255.13",
+            "rcvd_pfxs": 12 + index,
+            "sent_pfxs": 4 + index,
+            "rcvd_updates": 340 + index,
+            "sent_updates": 120 + index,
+            "time_established": 1756000000 + index,
+            "time_last_update": 1756000900 + index,
+            "peer_caps": "MP,RR,AS4",
+            "rcvd_last_err": 0,
+            "rcvd_last_err_subcode": 0,
+            "rcvd_last_err_time": 0,
+            "sent_last_err": 0,
+            "sent_last_err_subcode": 0,
+            "sent_last_err_time": 0,
+            "last_err": 0,
+            "last_err_subcode": 0,
+        }
+
+    def summary(state: int, peers: int, active: int) -> dict[str, Any]:
+        return {
+            "bgp_state": state,
+            # Typed integer in the schema, described as a string. Carried as
+            # the schema types it so nothing here silently picks a reading.
+            "bgp_state_str": state,
+            "local_asn": 65534,
+            "local_ip": "192.168.255.13",
+            "rtr_id": "192.168.255.13",
+            "num_peers": peers,
+            "num_peers_active": active,
+            "num_bgp_rtes_rcvd": 26,
+            "num_ebgp_rtes": 20,
+            "num_ibgp_rtes": 6,
+            "num_rib_rtes": 31,
+            "num_rtm_rtes": 31,
+            "num_subs_installed": 9,
+            "reject_mismatches": 0,
+            "reject_unpreferred": 2,
+            "rm_status": 1,
+            "rtm_status": 1,
+            "socket_retry_cnt": 0,
+            "mgmt_stub_last_err": 0,
+            "mgmt_stub_last_err_str": "",
+            "mgmt_stub_last_err_subcode": 0,
+            "mgmt_stub_last_err_time": 0,
+            "mgmt_stub_tot_errors": 0,
+            "tunbgp_last_err": 0,
+            "tunbgp_last_err_str": "",
+            "tunbgp_last_err_subcode": 0,
+            "tunbgp_last_err_time": 0,
+            "tunbgp_tot_errors": 0,
+        }
+
+    return {
+        # BGP not enabled: an answer, and a different one from "down".
+        "1.NE": {
+            "summary": summary(0, 0, 0),
+            "neighbor": {"neighborCount": 0, "neighborState": {}},
+        },
+        "3.NE": {
+            "summary": summary(6, 2, 2),
+            "neighbor": {
+                "neighborCount": 2,
+                "neighborState": {
+                    "0": peer("10.127.1.1", 65001, 0),
+                    "1": peer("10.127.1.9", 65002, 1),
+                },
+            },
+        },
+        # Three peers past the two the schema documents, and a count that
+        # disagrees with the rows.
+        "5.NE": {
+            "summary": summary(6, 4, 3),
+            "neighbor": {
+                "neighborCount": 4,
+                "neighborState": {
+                    "0": peer("10.200.0.1", 65010, 0),
+                    "1": peer("10.200.0.2", 65011, 1),
+                    "2": peer("10.200.0.3", 65012, 2, established=False),
+                },
+            },
+        },
+    }
+
+
 def _seed_bgp_neighbor() -> dict[str, dict[str, Any]]:
     populated = {
         "10.127.1.1": {
@@ -172,7 +286,14 @@ def _seed_bgp_neighbor() -> dict[str, dict[str, Any]]:
             "type": "Branch",
         }
     }
-    return {"1.NE": {}, "3.NE": dict(populated), "5.NE": {}}
+    # 5.NE is configured for a peer that never appears in `/bgp/state` (see
+    # _seed_bgp_state). *Configured but not observed* is a real state and
+    # #72's first guardrail; without a fixture that has one, a view which
+    # silently drops the correlation passes every assertion.
+    unobserved = {
+        "10.200.0.9": {**populated["10.127.1.1"], "remote_as": 65099},
+    }
+    return {"1.NE": {}, "3.NE": dict(populated), "5.NE": dict(unobserved)}
 
 
 # -- end bgp (#16) seed data -----------------------------------------------------
@@ -1833,6 +1954,10 @@ class MockState:
     flows: dict[str, list[dict[str, Any]]] = field(default_factory=_seed_flows)
     #: {nePk: running-config text} returned by the ECOS `cli` proxy path.
     cli_output: dict[str, str] = field(default_factory=_seed_cli_output)
+    #: {nePk: StateObj} served by GET /bgp/state (#72). Protocol state, kept
+    #: apart from `appliance_ecos["bgp/config/*"]` because the API keeps them
+    #: apart and conflating them is what #70 exists to prevent.
+    bgp_state: dict[str, dict[str, Any]] = field(default_factory=_seed_bgp_state)
 
     def reset(self) -> None:
         """Restore every field to its seeded default (in place)."""
@@ -2528,6 +2653,19 @@ def create_app(state: MockState | None = None) -> FastAPI:
     async def orchestrator_versions() -> Any:
         """{current, installed[]} — `current` is the RUNNING Orchestrator."""
         return mock.orchestrator_versions
+
+    @api.get("/bgp/state")
+    async def bgp_state(nePk: str, cached: bool = False, vrfId: str | None = None) -> Any:
+        """BGP protocol state for one appliance (#72).
+
+        `nePk` is required, as the spec says; `cached` is the API's own
+        cached-vs-live switch, so `--stale-ok` maps straight onto it rather
+        than being inferred client-side. An appliance with no entry answers an
+        empty object, which is what an unknown nePk does live — the caller has
+        to tell that apart from "BGP not enabled", and it can: the latter
+        carries `bgp_state: 0`.
+        """
+        return mock.bgp_state.get(nePk, {})
 
     @api.get("/appliancesSoftwareVersions")
     async def appliance_software_versions(nePk: str, cached: bool) -> Any:

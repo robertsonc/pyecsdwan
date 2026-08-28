@@ -119,6 +119,11 @@ WORKED_EXAMPLES = [
     "show configuration zones",
     "show configuration fabric",
     "show configuration fabric security",
+    # The first operational domain (#72): configuration and state now sit
+    # under different tokens, and both surfaces must reach both.
+    "show appliance BR1-EC bgp summary",
+    "show appliance BR1-EC bgp neighbors",
+    "show appliance BR1-EC bgp neighbors 10.127.1.1",
 ]
 
 
@@ -138,6 +143,7 @@ def test_both_surfaces_accept_the_same_command(both: Any, line: str) -> None:
         "show configuration appliance BR1-EC banners",
         "show configuration appliance BR1-EC banners global",
         "show configuration interface-labels",
+        "show appliance BR1-EC bgp summary",
     ],
 )
 def test_both_surfaces_return_the_same_resource(both: Any, line: str) -> None:
@@ -173,7 +179,7 @@ def test_neither_surface_accepts_a_removed_form(both: Any, line: str) -> None:
     "line",
     [
         "show appliance BR1-EC banners",
-        "show appliance BR1-EC bgp",
+        "show appliance BR1-EC zones",
     ],
 )
 def test_both_surfaces_refuse_the_renamed_form_the_same_way(both: Any, line: str) -> None:
@@ -192,7 +198,8 @@ def test_both_surfaces_refuse_the_renamed_form_the_same_way(both: Any, line: str
     ("line", "expected"),
     [
         ("show configuration", ["running", "candidate", "appliance", "fabric"]),
-        ("show appliance BR1-EC", ["(none)"]),
+        ("show appliance BR1-EC", ["bgp"]),
+        ("show appliance BR1-EC bgp", ["summary", "neighbors", "routes"]),
     ],
 )
 def test_both_surfaces_list_the_same_continuations(
@@ -205,6 +212,26 @@ def test_both_surfaces_list_the_same_continuations(
         for token in expected:
             assert token in text, (surface, token, text)
     assert answer.cli_exit == 0, answer.cli
+
+
+@pytest.mark.parametrize("line", ["show appliance BR1-EC bgp routes"])
+def test_both_surfaces_report_an_unsupported_view_identically(both: Any, line: str) -> None:
+    """#72 finding 2: no BGP route-table endpoint exists in either baseline.
+
+    The failure this guards against is one surface quietly answering it — from
+    the config object, or from parsed CLI text — while the other says it cannot
+    be answered. That would make the CLI's honesty depend on which entry point
+    the operator used.
+    """
+    answer = both(line)
+    for surface, text in answer.both():
+        assert "unsupported" in text, (surface, text)
+        # Says why, and what does exist instead.
+        assert "no BGP route-table endpoint" in text, (surface, text)
+        assert "summary" in text, (surface, text)
+        # Not reported as the appliance having failed.
+        assert "unreachable" not in text.lower(), (surface, text)
+    assert answer.cli_exit == 5, answer.cli
 
 
 def test_the_datastore_default_agrees_across_surfaces(both: Any) -> None:

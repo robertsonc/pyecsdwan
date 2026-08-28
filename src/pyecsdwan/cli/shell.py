@@ -35,6 +35,7 @@ from rich.table import Table
 
 from pyecsdwan import __version__, config, journal, locking, txn
 from pyecsdwan.candidate import CandidateStore
+from pyecsdwan.cli import outcomes
 from pyecsdwan.contract import Ctx, Ref, Resource, Scope
 from pyecsdwan.registry import Registry, UnknownKind, scoped_instances
 from pyecsdwan.reports import versions
@@ -79,9 +80,14 @@ _SCOPE_NOUNS: tuple[str, ...] = ("appliance", "fabric")
 #: and may always be written explicitly; `candidate` is never implicit, so an
 #: operator cannot be shown staged intent believing it is the device.
 _DATASTORES: tuple[str, ...] = ("running", "candidate")
-#: Operational domains under a scope noun. `fabric` has three today; `appliance`
-#: has none until specs/002-appliance-operational-views lands.
+#: Operational domains under a scope noun.
 _FABRIC_DOMAINS: tuple[str, ...] = ("flow", "flows", "version")
+_APPLIANCE_DOMAINS: tuple[str, ...] = ("bgp",)
+#: `bgp` leaves. `routes` is listed and answers `unsupported`: no BGP
+#: route-table endpoint exists in either vendored baseline (specs/002 finding
+#: 2), and hiding it would make the CLI look like it never considered the
+#: question an operator is certain to ask.
+_BGP_VIEWS: tuple[str, ...] = ("summary", "neighbors", "routes")
 #: CLI token -> txn.commit() keyword argument.
 _COMMIT_FLAGS: dict[str, str] = {
     "force": "force",
@@ -321,8 +327,30 @@ def dispatch_operational(line: str, state: ShellState) -> None:
         raise
     except Nonterminal as nonterminal:
         _render_nonterminal(state.console, nonterminal)
+    except outcomes.CommandOutcome as outcome:
+        _render_outcome(state, outcome)
     except Exception as exc:  # noqa: BLE001 - dispatch boundary: any command failure becomes a red line; the shell survives
         _error(state.console, _format_error(exc))
+
+
+def _render_outcome(state: ShellState, outcome: outcomes.CommandOutcome) -> None:
+    """A terminal state that is not success, rendered with its exit code.
+
+    Not printed in red unless it is a failure: `unsupported` is a statement
+    about the product, not about the appliance, and colouring it like an error
+    sends someone to debug a healthy device (grammar.md §5).
+    """
+    style = "yellow" if outcome.outcome is outcomes.Outcome.UNSUPPORTED else "bold red"
+    state.console.print(
+        f"{outcome.outcome.value}: {outcome.detail}",
+        style=style,
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    if outcome.remedy:
+        _info(state.console, outcome.remedy)
+    state.exit_code = outcome.outcome.exit_code
 
 
 def _render_nonterminal(console: Console, nonterminal: Nonterminal) -> None:
@@ -456,10 +484,17 @@ def _show_operational(args: list[str], state: ShellState) -> None:
 # -- operational state -------------------------------------------------------
 
 
-def _take_yes_flag(args: list[str]) -> tuple[list[str], bool]:
-    """Strip ``--yes``/``-y`` (grammar.md §6) from anywhere in the token list."""
-    kept = [a for a in args if a not in ("--yes", "-y")]
+def _take_flag(args: list[str], *spellings: str) -> tuple[list[str], bool]:
+    """Strip a boolean flag from anywhere in the token list, reporting whether
+    it was there. Position-independent because the shell's grammar is
+    positional and a flag is not part of that grammar."""
+    kept = [a for a in args if a not in spellings]
     return kept, len(kept) != len(args)
+
+
+def _take_yes_flag(args: list[str]) -> tuple[list[str], bool]:
+    """Strip ``--yes``/``-y`` (grammar.md §6)."""
+    return _take_flag(args, "--yes", "-y")
 
 
 def _gate_fanout(state: ShellState, assume_yes: bool, calls_each: int = 1) -> None:
@@ -512,49 +547,103 @@ def _show_fabric_operational(args: list[str], state: ShellState) -> None:
 
 
 def _show_appliance_operational(args: list[str], state: ShellState) -> None:
-    """``show appliance <name> <domain>`` — live state of one appliance.
+    """``show appliance <name> <domain> ...`` — live state of one appliance.
 
-    Nothing lives here yet: the domains are specified in
-    ``specs/002-appliance-operational-views`` and not implemented. That makes
-    this branch's whole job the *rename*, and it is the one rename in the
-    migration that could have hurt someone.
-
-    Before #74, `show appliance BR1-EC bgp` returned modeled configuration.
-    It now names operational state — same tokens, different data. Answering it
-    with either one silently would be the exact failure Principle II exists to
-    prevent, so it is refused, and the refusal says where the configuration
+    One domain exists so far (`bgp`, specs/002). Everything else that resolves
+    as a configuration kind is the *renamed* form, and gets the one refusal in
+    this migration that could otherwise have hurt someone: before #74 these
+    tokens returned modeled configuration, and they now name operational
+    state. Answering with either silently is what Principle II exists to
+    prevent, so it is refused and the refusal says where the configuration
     went.
     """
     if not args:
         raise ValueError("usage: show appliance <name> <domain>")
     name, rest = args[0], args[1:]
     if not rest:
-        raise Nonterminal(
-            f"show appliance {name}",
-            [],
-            "no operational domains are implemented yet "
-            "(specs/002-appliance-operational-views); for configuration use "
-            f"'show configuration appliance {name} <kind>'",
-        )
-    domain = rest[0]
+        raise Nonterminal(f"show appliance {name}", list(_APPLIANCE_DOMAINS))
+    domain, tail = rest[0], rest[1:]
+    if domain == "bgp":
+        _show_bgp(name, tail, state)
+        return
     try:
         kind = _resolve_kind(domain, name, state)
     except UnknownKind:
         raise ValueError(
-            f"unknown operational domain {domain!r} for appliance {name!r}. "
-            f"No operational domains are implemented yet "
-            f"(specs/002-appliance-operational-views)."
+            f"unknown operational domain {domain!r} for appliance {name!r} — "
+            f"valid next tokens: {', '.join(_APPLIANCE_DOMAINS)}"
         ) from None
-    # It resolved as a configuration kind, so this is the renamed form.
     noun = state.registry.cli_name(kind)
     raise ValueError(
         f"{noun} is configuration, not operational state — use:\n"
         f"    show configuration appliance {name} {noun}"
-        f"{' ' + rest[1] if len(rest) > 1 else ''}\n"
+        f"{' ' + tail[0] if tail else ''}\n"
         f"'show appliance <name> {noun}' meant that before #74 and now names "
         f"operational state, so it is refused rather than answered with "
         f"different data than it used to return."
     )
+
+
+def _show_bgp(appliance: str, args: list[str], state: ShellState) -> None:
+    """``show appliance <name> bgp [summary | neighbors [<ip>] | routes]``.
+
+    A bare ``bgp`` lists the leaves and makes **no API call** — #72's guardrail
+    that a nonterminal is contextual help, not an implicit expensive fetch.
+    """
+    # Decision 7: cached data is served only when asked for. The API has its
+    # own `cached` parameter, so this is honoured at the source rather than
+    # inferred here (#72 finding 3).
+    args, stale_ok = _take_flag(args, "--stale-ok")
+    if not args:
+        raise Nonterminal(
+            f"show appliance {appliance} bgp",
+            ["summary", "neighbors [<ip>]", "routes (unsupported)", "--stale-ok"],
+        )
+    view, rest = args[0], args[1:]
+    if view == "routes":
+        # Not a failure of the appliance, and not something a retry fixes.
+        raise outcomes.CommandOutcome(
+            outcomes.Outcome.UNSUPPORTED,
+            "no BGP route-table endpoint exists in the supported Orchestrator "
+            "or ECOS API, so this view cannot be built from a verified source.",
+            remedy=(
+                f"route counts are in 'show appliance {appliance} bgp summary' "
+                f"(num_bgp_rtes_rcvd, num_ebgp_rtes, num_ibgp_rtes, "
+                f"num_subs_installed); per-peer counts are in 'neighbors'. "
+                f"If you have a source this missed, 'ec-cli api' reaches it raw."
+            ),
+        )
+    if view not in ("summary", "neighbors"):
+        raise ValueError(
+            f"unknown bgp view {view!r} — valid next tokens: {', '.join(_BGP_VIEWS)}"
+        )
+    if view == "summary" and rest:
+        raise ValueError(f"usage: show appliance {appliance} bgp summary")
+    if len(rest) > 1:
+        raise ValueError(f"usage: show appliance {appliance} bgp neighbors [<ip>]")
+
+    from pyecsdwan.cli.render import render_bgp_neighbors, render_bgp_summary
+    from pyecsdwan.reports import bgpstate
+
+    result = bgpstate.collect(state.ctx, appliance, cached=stale_ok)
+    if view == "summary":
+        render_bgp_summary(state.console, result)
+        return
+    peer = rest[0] if rest else None
+    render_bgp_neighbors(state.console, result, peer=peer)
+    if peer is not None and not any(n.peer_ip == peer for n in result.neighbors):
+        raise outcomes.CommandOutcome(
+            outcomes.Outcome.NOT_FOUND,
+            f"{appliance} has no BGP neighbor {peer}",
+            remedy=f"'show appliance {appliance} bgp neighbors' lists the peers it has",
+        )
+    if not result.rows_match_count:
+        raise outcomes.CommandOutcome(
+            outcomes.Outcome.PARTIAL,
+            f"{appliance} reports neighborCount={result.neighbor_count} but returned "
+            f"{len([n for n in result.neighbors if not n.configured_only])} peer rows; "
+            f"the table above is incomplete.",
+        )
 
 
 # -- configuration -----------------------------------------------------------
@@ -1116,9 +1205,17 @@ class ShellCompleter(Completer):
                 return ["summary"]
             return []
         if head == "appliance":
-            # Operational domains for one appliance are specified but not
-            # implemented, so after the name there is nothing honest to offer.
-            return self._appliance_names() if not tail else []
+            if not tail:
+                return self._appliance_names()
+            if len(tail) == 1:
+                return list(_APPLIANCE_DOMAINS)
+            if tail[1] == "bgp":
+                if len(tail) == 2:
+                    return [*_BGP_VIEWS, "--stale-ok"]
+                # Peer addresses are free-form, and offering `summary` after
+                # `neighbors` would suggest a command that does not exist.
+                return []
+            return []
         if head == "transactions" and not tail:
             return ["pending"]
         return []
