@@ -30,7 +30,7 @@ from rich.table import Table
 from rich.text import Text
 from typer.core import TyperGroup
 
-from pyecsdwan import config, locking, runtime, specs, txn
+from pyecsdwan import config, evidence, locking, runtime, specs, txn
 from pyecsdwan import registry as registry_mod
 from pyecsdwan.candidate import CandidateCorruptError, CandidateStore
 from pyecsdwan.cli import fanout, outcomes, reference, render
@@ -837,6 +837,17 @@ def render_version_report(console: Console, report: versions.FabricVersions) -> 
         )
     if not report.cached:
         console.print(Text("read live from each appliance (--no-cache)", style="dim"))
+    # #66: this is the one command that knows both versions, so it is where
+    # "your fabric is outside the verified support matrix" belongs. Printed
+    # once, from the versions the fabric just reported — not guessed from the
+    # vendored spec baseline, which says what the code was written against
+    # rather than what anyone has run it on.
+    warning = evidence.version_warning(
+        "" if report.orchestrator_error else report.orchestrator,
+        report.baseline_version if report.reachable else "",
+    )
+    if warning:
+        console.print(Text(warning, style="yellow"))
 
 
 @fabric_app.command("version")
@@ -883,6 +894,115 @@ def _coverage_notes(resource: Resource) -> str:
     if resource.reversibility is Reversibility.COMPENSABLE:
         return "compensating rollback; commit-confirm supported"
     return "no rollback; commit requires --force"
+
+
+def _evidence_label(kind: str) -> str:
+    """What has been *observed* of this kind, as `show coverage` prints it.
+
+    Distinct from tier, which says how carefully the resource was written.
+    "unrecorded" is not "no evidence": it means the ledger has no row at all,
+    which is a bookkeeping failure rather than an answer, and the gate in
+    `tests/test_evidence.py` exists so it never ships.
+    """
+    record = evidence.ledger().get(kind)
+    return record.level.label if record else "unrecorded"
+
+
+def _unverified_writes(registry: Registry) -> list[str]:
+    """Curated kinds whose write path no one has watched run on real gear.
+
+    #66's "demote or visibly warn". Demotion is wrong here — the code is
+    genuinely curated, and pretending otherwise would misreport tier to make a
+    point about evidence — so `show coverage` warns instead, and the roadmap
+    stops calling these writes shipped.
+    """
+    led = evidence.ledger()
+    if not led.available:
+        return []
+    return sorted(
+        kind
+        for kind in registry.kinds()
+        if registry.get(kind).tier is Tier.CURATED
+        and (led.level(kind) or evidence.Evidence.IMPLEMENTED) < evidence.WRITE_SUPPORTED_FLOOR
+    )
+
+
+def _evidence_rollup(registry: Registry) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for kind in registry.kinds():
+        label = _evidence_label(kind)
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def _evidence_line(registry: Registry, *, pointer: bool = True) -> str:
+    """The one-line warning #66 asks for, in the language of what is missing.
+
+    ``pointer`` is off inside ``--evidence`` itself: pointing a reader at the
+    view they are already looking at is the kind of small dishonesty that
+    makes people stop reading warnings.
+    """
+    led = evidence.ledger()
+    if not led.available:
+        return "evidence ledger not vendored; per-resource evidence unavailable"
+    curated = [k for k in registry.kinds() if registry.get(k).tier is Tier.CURATED]
+    unverified = _unverified_writes(registry)
+    if not unverified:
+        return f"all {len(curated)} curated resource(s) carry live change-and-rollback evidence"
+    tail = " `show coverage --evidence` for the detail." if pointer else ""
+    return (
+        f"{len(unverified)} of {len(curated)} curated resource(s) have no live "
+        f"change-and-rollback evidence: their write paths have never been run against "
+        f"a real fabric.{tail}"
+    )
+
+
+def _support_matrix_lines(registry: Registry) -> list[str]:
+    led = evidence.ledger()
+    matrix = led.support
+    return [
+        f"spec baseline:         {matrix.spec_baseline or 'unknown'}",
+        f"Orchestrator verified: {', '.join(matrix.orchestrator) or 'none'}",
+        f"ECOS verified:         {', '.join(matrix.ecos) or 'none'}",
+        f"auth modes verified:   {', '.join(matrix.auth_modes) or 'none'}",
+    ]
+
+
+def _observed_against(record: evidence.Record | None) -> str:
+    """The versions and date behind a record, as one cell.
+
+    Three columns of em-dashes is a table that has learned nothing; one cell
+    that says "—" says the same thing and leaves room for the notes, which is
+    where the actual information is while every row reads mock-verified.
+    """
+    if record is None:
+        return "—"
+    parts = [p for p in (record.orchestrator, record.ecos) if p]
+    if record.auth_mode:
+        parts.append(record.auth_mode)
+    if record.observed:
+        parts.append(record.observed)
+    return " / ".join(parts) if parts else "—"
+
+
+def _evidence_table(registry: Registry, kinds: list[str]) -> Table:
+    led = evidence.ledger()
+    table = Table(title="resource evidence")
+    table.add_column("kind", overflow="fold")
+    table.add_column("tier", justify="right")
+    table.add_column("evidence")
+    table.add_column("observed against", overflow="fold")
+    table.add_column("notes", overflow="fold")
+    for kind in kinds:
+        record = led.get(kind)
+        table.add_row(
+            kind,
+            str(int(registry.get(kind).tier)),
+            record.level.label if record else "unrecorded",
+            _observed_against(record),
+            (record.notes if record else "") or "",
+        )
+    return table
 
 
 # -- coverage: registered kinds joined onto the spec endpoint universe (#28) ---
@@ -1010,6 +1130,10 @@ def _kind_rows(registry: Registry, kinds: list[str]) -> Table:
     table.add_column("scope")
     table.add_column("reversibility")
     table.add_column("tier", justify="right")
+    # Tier is how it was written; evidence is what anyone has seen it do.
+    # Side by side, because reading one without the other is how "shipped"
+    # came to mean five different things (#66).
+    table.add_column("evidence")
     table.add_column("endpoints", justify="right")
     table.add_column("notes")
     for kind in kinds:
@@ -1019,6 +1143,7 @@ def _kind_rows(registry: Registry, kinds: list[str]) -> Table:
             resource.scope.value,
             resource.reversibility.value,
             str(int(resource.tier)),
+            _evidence_label(kind),
             str(len(resource.endpoints)),
             _coverage_notes(resource),
         )
@@ -1074,18 +1199,41 @@ def show_coverage(
         str | None,
         typer.Option("--scope", help="Restrict to 'orchestrator' or 'appliance'."),
     ] = None,
+    show_evidence: Annotated[
+        bool,
+        typer.Option(
+            "--evidence",
+            help="What has been observed of each kind, and against which versions.",
+        ),
+    ] = False,
+    level: Annotated[
+        str | None,
+        typer.Option(
+            "--level",
+            help="Restrict to one evidence level, e.g. 'mock-verified'.",
+        ),
+    ] = None,
     as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
 ) -> None:
-    """Resource kinds, the endpoints they cover, and the transactional tier.
+    """Resource kinds, the endpoints they cover, the tier, and the evidence.
 
-    Offline: reads the vendored ``_specs/`` baselines and the plugin registry,
-    never the Orchestrator.
+    Tier and evidence answer different questions and are both here on purpose:
+    tier is how carefully the resource was *written*, evidence is what anyone
+    has *seen it do*, and against which Orchestrator (#66).
+
+    Offline: reads the vendored ``_specs/`` baselines, the vendored evidence
+    ledger and the plugin registry, never the Orchestrator.
     """
     registry = _registry_only()
     if kind is not None and kind not in registry:
         _fail(f"unknown resource kind {kind!r}; known kinds: {', '.join(registry.kinds())}")
     if scope is not None and scope not in specs.SCOPES:
         _fail(f"unknown scope {scope!r}; expected one of: {', '.join(specs.SCOPES)}")
+    if level is not None:
+        try:
+            evidence.Evidence.from_label(level)
+        except ValueError as exc:
+            _fail(str(exc))
 
     kinds = [
         k
@@ -1093,6 +1241,7 @@ def show_coverage(
         if (kind is None or k == kind)
         and (tier is None or int(registry.get(k).tier) == tier)
         and (scope is None or registry.get(k).scope.value == scope)
+        and (level is None or _evidence_label(k) == level)
     ]
     all_rows = _endpoint_coverage(registry)
     # Join through endpoint_key(), never raw strings: a declaration writes an
@@ -1112,6 +1261,8 @@ def show_coverage(
     counts = _coverage_rollup(all_rows)
     unknown = _undeclared_keys(registry)
 
+    led = evidence.ledger()
+
     if as_json:
         payload: dict[str, Any] = {
             "spec_versions": {s: specs.spec_version(s) for s in specs.SCOPES},
@@ -1123,16 +1274,42 @@ def show_coverage(
                     "scope": registry.get(k).scope.value,
                     "reversibility": registry.get(k).reversibility.value,
                     "tier": int(registry.get(k).tier),
+                    "evidence": _evidence_label(k),
                     "notes": _coverage_notes(registry.get(k)),
                     "endpoints": list(registry.get(k).endpoints),
                 }
                 for k in kinds
             ],
             "undeclared_in_spec": unknown,
+            # Evidence rides in the same payload as tier so a script asking
+            # "can I use this?" cannot read one without seeing the other.
+            "evidence": {
+                "available": led.available,
+                "note": led.note,
+                "support": led.support.as_json(),
+                "totals": _evidence_rollup(registry),
+                "unverified_writes": _unverified_writes(registry),
+                "records": [r.as_json() for r in (led.get(k) for k in kinds) if r],
+            },
         }
         if endpoints:
             payload["endpoints"] = [dataclasses.asdict(row) for row in rows]
         console.print_json(json.dumps(payload, default=str))
+        return
+
+    if show_evidence:
+        if not led.available:
+            console.print(Text(_evidence_line(registry), style="yellow"))
+            return
+        if not kinds:
+            console.print("no resource kinds match those filters")
+            return
+        console.print(_evidence_table(registry, kinds))
+        for line in _support_matrix_lines(registry):
+            console.print(Text(line, style="dim"))
+        console.print(Text(_evidence_line(registry, pointer=False), style="yellow"))
+        if led.note:
+            console.print(Text(led.note, style="dim"))
         return
 
     if endpoints:
@@ -1155,6 +1332,7 @@ def show_coverage(
         console.print(Text(_TIER0_NOTE, style="dim"))
     else:
         console.print(Text(_no_specs_message(), style="yellow"))
+    console.print(Text(_evidence_line(registry), style="yellow"))
     if unknown:
         err_console.print(
             Text(
@@ -1676,6 +1854,7 @@ def plugin_promote(
                     "ref": str(ref) if ref is not None else None,
                     "green": green,
                     "tier2_evaluated": curated,
+                    "evidence": _evidence_label(kind),
                     "checks": [dataclasses.asdict(c) for c in checks],
                 },
                 default=str,
@@ -1685,6 +1864,14 @@ def plugin_promote(
         console.print(_check_table(noun, checks))
         if ref is not None:
             console.print(Text(f"sampled {ref}", style="dim"))
+        # Green here means the *machine-checkable* boxes pass, which is a
+        # statement about the code and says nothing about whether anyone has
+        # run this resource on a fabric. Printing the evidence level next to
+        # the verdict is what stops "promote passed" from being read as
+        # "ready for production" (#66).
+        console.print(
+            Text(f"evidence: {_evidence_label(kind)} (docs/live-validation.md)", style="dim")
+        )
 
     if failed:
         if not as_json:
@@ -1695,6 +1882,16 @@ def plugin_promote(
     if curated:
         if not as_json:
             console.print(Text(f"ok: {noun} still meets its Tier-2 obligations", style="green"))
+            record = evidence.ledger().get(kind)
+            if record is not None and record.level < evidence.WRITE_SUPPORTED_FLOOR:
+                console.print(
+                    Text(
+                        f"...against the code. Its write path is {record.level.label}: no one "
+                        f"has run a change and a rollback of {noun} on real gear at a recorded "
+                        f"version. docs/live-validation.md is how that gets fixed.",
+                        style="yellow",
+                    )
+                )
         return
     # An un-curated kind reaching here has passed exactly one box: "normalize()
     # refuses". The Tier-2 boxes were not evaluated and *cannot* be while

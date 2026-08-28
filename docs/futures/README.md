@@ -202,6 +202,14 @@ this session's live access was read-only throughout. Before trusting any of
 them with a real change, do a no-op round trip first (GET current, commit it
 back unchanged, confirm the re-plan diffs empty).
 
+Since #66 that no-op round trip has a name (`no-op-round-trip`), a place to be
+recorded (`src/pyecsdwan/_evidence/ledger.json`) and a protocol around it
+(`docs/live-validation.md`). The specific questions below are *what to look at*
+while running it; the ladder is *how the answer gets written down so it counts
+next time*. The 2026-08-26 live reads are the cautionary case: real
+observations, made against real gear, and unusable as support evidence because
+nobody recorded the Orchestrator version.
+
 - **`PUT /gms/overlays/config/regions` merge-vs-replace** (#35). `apply()`
   does a defensive read-modify-write that is correct either way; if PUT
   provably merges, it can send the single entry and drop one GET per apply.

@@ -83,10 +83,13 @@ include-package-data = false
 # `py.typed` keeps the package typed for downstream consumers. The OpenAPI
 # baselines and the Postman-derived payload examples are the source of truth
 # `show coverage` reads: a wheel without them reported an empty endpoint
-# universe as if that were the answer (issue #65).
+# universe as if that were the answer (issue #65). `_evidence/ledger.json` is
+# the same argument for what has been *observed* (#66): an operator deciding
+# whether to point this at production must be able to ask offline, from the
+# wheel they installed.
 # `tests/test_packaging.py` fails if a data file on disk is not covered here.
 [tool.setuptools.package-data]
-pyecsdwan = ["py.typed", "_specs/*.json", "_specs/*.md"]
+pyecsdwan = ["py.typed", "_specs/*.json", "_specs/*.md", "_evidence/*.json"]
 
 [tool.ruff]
 target-version = "py310"
