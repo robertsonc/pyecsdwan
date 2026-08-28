@@ -153,7 +153,7 @@ def test_zones_apply_removal_posts_delete_dependencies_true(settings: Any) -> No
                     "percentComplete": 100,
                     "completionStatus": True,
                     "endTime": 1,
-                    "result": "ok",
+                    "result": "Success",
                 }
             ],
         )
@@ -190,7 +190,7 @@ def test_zones_apply_add_only_uses_delete_dependencies_false(settings: Any) -> N
                     "percentComplete": 100,
                     "completionStatus": True,
                     "endTime": 1,
-                    "result": "ok",
+                    "result": "Success",
                 }
             ],
         )
@@ -266,7 +266,7 @@ def test_zones_rollback_always_uses_delete_dependencies_true(settings: Any) -> N
                     "percentComplete": 100,
                     "completionStatus": True,
                     "endTime": 1,
-                    "result": "ok",
+                    "result": "Success",
                 }
             ],
         )
@@ -361,7 +361,7 @@ def test_secmaps_apply_reinjects_self_then_saves(settings: Any) -> None:
                     "percentComplete": 100,
                     "completionStatus": True,
                     "endTime": 1,
-                    "result": "ok",
+                    "result": "Success",
                 }
             ],
         )
@@ -412,7 +412,7 @@ def test_secmaps_apply_delete_posts_empty_table(settings: Any) -> None:
                     "percentComplete": 100,
                     "completionStatus": True,
                     "endTime": 1,
-                    "result": "ok",
+                    "result": "Success",
                 }
             ],
         )
@@ -441,7 +441,7 @@ def test_secmaps_rollback_reinjects_self_then_saves(settings: Any) -> None:
                     "percentComplete": 100,
                     "completionStatus": True,
                     "endTime": 1,
-                    "result": "ok",
+                    "result": "Success",
                 }
             ],
         )

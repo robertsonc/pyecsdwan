@@ -90,7 +90,7 @@ def _mock_save(ok: bool = True, key: str = "k1") -> Any:
                     "percentComplete": 100,
                     "completionStatus": ok,
                     "endTime": 1,
-                    "result": "ok" if ok else "mock failure",
+                    "result": "Success" if ok else "mock failure",
                 }
             ],
         )

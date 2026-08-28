@@ -149,9 +149,17 @@ def test_keyless_template_push_failure_auto_reverts(world: dict[str, Any]) -> No
     # #22: the same per-appliance breakdown is on the report itself, not
     # just reachable by re-opening the journal — this is what the CLI
     # renders (cli/render.py's render_report).
-    assert len(report.jobs) == 1
+    #
+    # Two outcomes, not one, since #64: the revert's own push is now polled
+    # and confirmed rather than assumed from its 204. A revert that reports
+    # success without checking is the same unverified claim the apply is not
+    # allowed to make — and it is the one running after something has already
+    # gone wrong, so it is the worse place to guess.
+    assert len(report.jobs) == 2, report.jobs
     assert report.jobs[0].state == "FAILED"
     assert report.jobs[0].per_appliance == {"3.NE": "mock failure"}
+    assert report.jobs[1].state == "SUCCESS"
+    assert report.jobs[1].per_appliance == {"3.NE": "Success"}
 
 
 def test_timeout_during_confirm_window_commit_reverts(
@@ -194,12 +202,24 @@ def test_timeout_during_confirm_window_commit_reverts(
     report = txn.commit(ctx, default_registry, plan, settings, confirm_minutes=5)
 
     assert not report.ok
-    assert report.state == TxnState.REVERTED
     assert report.confirm_deadline is None  # the confirm window was never armed
     assert report.jobs and report.jobs[0].state == "TIMEOUT"
     # Nothing was actually associated — the pre-commit (empty) state holds,
     # not a half-applied push silently left in place.
     assert state.template_association["3.NE"] == []
+
+    # ...but the revert is reported REVERT_FAILED, not REVERTED (#64). This
+    # fabric never finishes *any* job, so the revert's own push times out too,
+    # and an unconfirmed revert is not a confirmed one — even though the line
+    # above shows it did in fact land. That asymmetry is the point: the CLI
+    # knows what it POSTed, not what the fabric did with it, and the operator
+    # who is told "reverted" stops looking.
+    #
+    # It also used to say REVERTED unconditionally, because rollback() did not
+    # poll at all — so a revert whose push genuinely failed reported success.
+    assert report.state == TxnState.REVERT_FAILED
+    assert any("manual intervention required" in m for m in report.messages), report.messages
+    assert any("TIMEOUT" in m for m in report.messages), report.messages
 
 
 def test_bio_and_association_dependency_order(world: dict[str, Any]) -> None:

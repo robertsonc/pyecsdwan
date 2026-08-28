@@ -205,7 +205,7 @@ def test_apply_posts_full_list_then_saves(settings):
                     "percentComplete": 100,
                     "completionStatus": True,
                     "endTime": 1,
-                    "result": "ok",
+                    "result": "Success",
                 }
             ],
         )
@@ -286,7 +286,7 @@ def test_rollback_restores_snapshot_then_saves(settings):
                     "percentComplete": 100,
                     "completionStatus": True,
                     "endTime": 1,
-                    "result": "ok",
+                    "result": "Success",
                 }
             ],
         )

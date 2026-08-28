@@ -20,6 +20,7 @@ from pyecsdwan.jobs import (
 STATUS_URL = "https://orch.example.com/gms/rest/action/status"
 ACTION_LOG_URL = "https://orch.example.com/gms/rest/action"
 SAVE_URL = "https://orch.example.com/gms/rest/appliance/saveChanges"
+APPLIANCE_URL = "https://orch.example.com/gms/rest/appliance"
 PRECONFIG_APPLY_URL = "https://orch.example.com/gms/rest/gms/appliance/preconfiguration/apply"
 
 
@@ -33,7 +34,7 @@ def test_single_record_success(settings, monkeypatch):
                 "taskStatus": "Done",
                 "percentComplete": 100,
                 "completionStatus": True,
-                "result": "template pushed",
+                "result": "Success",
                 "endTime": 1724680000000,
             },
         )
@@ -41,7 +42,7 @@ def test_single_record_success(settings, monkeypatch):
     outcome = wait_for_action(OrchClient(settings), "guid-1", settings)
     assert outcome.state == "SUCCESS"
     assert outcome.key == "guid-1"
-    assert outcome.detail == "template pushed"
+    assert outcome.detail == "Success"
     assert outcome.per_appliance == {}
     assert route.calls.last.request.url.params["key"] == "guid-1"
 
@@ -57,7 +58,7 @@ def test_per_appliance_records_one_failure(settings, monkeypatch):
                     "nepk": "1.NE",
                     "endTime": 1724680000000,
                     "completionStatus": True,
-                    "result": "push ok",
+                    "result": "Success",
                 },
                 {
                     "nepk": "2.NE",
@@ -70,7 +71,7 @@ def test_per_appliance_records_one_failure(settings, monkeypatch):
     )
     outcome = wait_for_action(OrchClient(settings), "guid-2", settings)
     assert outcome.state == "FAILED"
-    assert outcome.per_appliance == {"1.NE": "push ok", "2.NE": "boom: policy rejected"}
+    assert outcome.per_appliance == {"1.NE": "Success", "2.NE": "boom: policy rejected"}
     assert "boom: policy rejected" in outcome.detail
 
 
@@ -110,7 +111,7 @@ def _log_record(**overrides):
         "completionStatus": True,
         "startTime": 1724680000500,
         "endTime": 1724680001000,
-        "result": "template pushed",
+        "result": "Success",
     }
     record.update(overrides)
     return record
@@ -133,8 +134,8 @@ def test_keyless_window_polls_until_terminal(settings, monkeypatch):
     outcome = wait_for_recent_action(OrchClient(settings), settings, "3.NE", 1724680000000)
     assert outcome.state == "SUCCESS"
     assert outcome.key == "guid-A"
-    assert outcome.detail == "template pushed"
-    assert outcome.per_appliance == {"3.NE": "template pushed"}
+    assert outcome.detail == "Success"
+    assert outcome.per_appliance == {"3.NE": "Success"}
     assert route.call_count == 3
     params = route.calls.last.request.url.params
     assert params["appliance"] == "3.NE"
@@ -165,9 +166,18 @@ def test_keyless_window_maps_failed_record(settings, monkeypatch):
 
 
 @respx.mock
-def test_keyless_window_picks_newest_guid(settings, monkeypatch):
+def test_keyless_window_refuses_two_guids(settings, monkeypatch):
     """An older push in the window (e.g. an operator's) must not be mistaken
-    for ours: the guid with the newest startTime wins."""
+    for ours — and neither must ours be picked out of the pair by guessing.
+
+    This test used to be `test_keyless_window_picks_newest_guid`, asserting
+    that the newest startTime wins. That heuristic is what #64 withdrew: the
+    newest record is ours only if nobody else pushed after we did, which is
+    an assumption about other people's behaviour, not evidence. Note the
+    inverted stakes in the fixture — the *stale* record is the failed one,
+    so the old rule and the new one disagree about more than which guid to
+    name.
+    """
     monkeypatch.setattr(time, "sleep", lambda seconds: None)
     stale = _log_record(
         guid="guid-old", startTime=1724679999200,
@@ -179,9 +189,11 @@ def test_keyless_window_picks_newest_guid(settings, monkeypatch):
         )
     )
     outcome = wait_for_recent_action(OrchClient(settings), settings, "3.NE", 1724680000000)
-    assert outcome.state == "SUCCESS"
-    assert outcome.key == "guid-new"
-    assert outcome.per_appliance == {"3.NE": "template pushed"}
+    assert outcome.state == "UNKNOWN"
+    # Neither guid is named as *the* key: claiming one would be the guess.
+    assert outcome.key == ""
+    assert "guid-old" in outcome.detail and "guid-new" in outcome.detail
+    assert "concurrent activity" in outcome.detail
 
 
 @respx.mock
@@ -306,14 +318,26 @@ def test_save_changes_rejects_invalid_ne_pk(settings):
 
 
 @respx.mock
-def test_save_changes_keyless_response_tolerated(settings):
-    # Off-spec 204 with no clientKey: accepted-but-unawaited, not a failure.
-    # No /action/status route is registered, so any poll attempt would fail.
+def test_save_changes_keyless_response_is_verified_against_the_fabric(settings):
+    """Off-spec 204 with no clientKey: SUCCESS only with persistence evidence.
+
+    This test used to be `test_save_changes_keyless_response_tolerated` and
+    asserted SUCCESS with "not awaited" in the detail — tolerance that #64
+    withdrew, because the outcome a transaction confirms against cannot be
+    "we did not check". The evidence is `hasUnsavedChanges`, which the
+    appliance inventory reports independently of the save response.
+    """
     route = respx.post(SAVE_URL).mock(return_value=httpx.Response(204))
+    inventory = respx.get(APPLIANCE_URL).mock(
+        return_value=httpx.Response(
+            200, json=[{"nePk": "3.NE", "hostName": "BR1-EC", "hasUnsavedChanges": False}]
+        )
+    )
     outcome = save_changes(OrchClient(settings), ["3.NE"], settings)
     assert route.call_count == 1
+    assert inventory.call_count == 1
     assert outcome.state == "SUCCESS"
-    assert "not awaited" in outcome.detail
+    assert "persistence confirmed" in outcome.detail
 
 
 # -- preconfig apply: numeric taskStatus channel (#23) -----------------------

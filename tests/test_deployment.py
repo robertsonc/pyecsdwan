@@ -130,6 +130,36 @@ def test_list_refs_uses_resolver_appliances(settings):
 # -- unit: write path (respx, validate-then-apply) --------------------------------
 
 
+def _keyed_save(key: str = "save-1", ne_pk: str = "3.NE") -> Any:
+    """A save-changes that returns a client key, and its terminal record.
+
+    These tests used to answer `saveChanges` with a bare `{}` and rely on the
+    keyless branch reporting SUCCESS unawaited — a shortcut that saved two
+    lines of mocking here and, in `jobs.save_changes`, made "we could not
+    check" indistinguishable from "it persisted" (#64). Keyless is off-spec
+    for Orchestrator 9.3+ anyway; a test about deployment payload shapes
+    should not be exercising the off-spec branch.
+    """
+    respx.get(BASE + "/action/status").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "guid": key,
+                    "nepk": ne_pk,
+                    "taskStatus": "Completed",
+                    "percentComplete": 100,
+                    "completionStatus": True,
+                    "endTime": 1,
+                    "result": "Success",
+                }
+            ],
+        )
+    )
+    return respx.post(BASE + "/appliance/saveChanges").mock(
+        return_value=httpx.Response(200, json={"clientKey": key})
+    )
+
 @respx.mock
 def test_apply_validates_then_writes_then_saves(settings):
     validate_route = respx.post(
@@ -138,9 +168,7 @@ def test_apply_validates_then_writes_then_saves(settings):
     write_route = respx.post(
         BASE + "/appliance/rest", params={"nePk": "3.NE", "url": "deployment"}
     ).mock(return_value=httpx.Response(204))
-    save_route = respx.post(BASE + "/appliance/saveChanges").mock(
-        return_value=httpx.Response(200, json={})  # keyless: save_changes reports SUCCESS unawaited
-    )
+    save_route = _keyed_save()
 
     res = Deployment()
     ctx = _ctx(settings)
@@ -173,9 +201,7 @@ def test_apply_short_circuits_on_validate_err(settings):
     write_route = respx.post(
         BASE + "/appliance/rest", params={"nePk": "3.NE", "url": "deployment"}
     ).mock(return_value=httpx.Response(204))
-    save_route = respx.post(BASE + "/appliance/saveChanges").mock(
-        return_value=httpx.Response(200, json={})
-    )
+    save_route = _keyed_save()
 
     res = Deployment()
     ctx = _ctx(settings)
@@ -198,7 +224,7 @@ def test_rollback_writes_normalized_snapshot_and_notes_reboot_required(settings)
     write_route = respx.post(
         BASE + "/appliance/rest", params={"nePk": "3.NE", "url": "deployment"}
     ).mock(return_value=httpx.Response(204))
-    respx.post(BASE + "/appliance/saveChanges").mock(return_value=httpx.Response(200, json={}))
+    _keyed_save()
 
     result = Deployment().rollback(_ctx(settings), REF, RAW)
     assert result.ok, result.message
