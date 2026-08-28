@@ -78,11 +78,14 @@ Coverage today: **119 of 1833 endpoints curated, 5 generated, 1709 raw-only**
 reports in `pyecsdwan/reports/`, deliberately outside `resources/` — they have
 no normalize/diff/apply/rollback contract and no reversibility class, and
 modeling them as resources would imply guarantees they cannot honor.
-`show run` (fabric config by section, #55), `show run appliance <name>` (the
-appliance's own CLI running-config through a deny-by-default read-only
-allowlist, #56), `show version` (Orchestrator + per-appliance active/backup/
-next-boot partitions with skew detection, #57), `show flows summary` (#58) and
-`show flow <ip>` (fabric-wide, deduped, #59). All bounded by a shared
+the fabric config breakdown by section (#55), an appliance's own CLI
+running-config through a deny-by-default read-only allowlist (#56),
+Orchestrator + per-appliance active/backup/next-boot partitions with skew
+detection (#57), the flow-count matrix (#58) and a fabric-wide deduped
+address search (#59). All five were respelled by #74's grammar migration —
+`show configuration fabric`, `show configuration appliance <name> --format
+native`, `show fabric version`, `show fabric flows summary`, `show fabric
+flow <ip>` — and the old spellings are gone, not aliased. All bounded by a shared
 concurrency-capped, failure-isolating fan-out: one unreachable appliance is a
 marked row, never a lost report.
 
@@ -130,17 +133,46 @@ not an error, a confident wrong answer. They now live in
 declaration rather than a side effect of what happens to be tracked by git.
 `make smoke` runs the same wheel check locally.
 
-**CLI information architecture, design phase (epic #70).** The `show` root
-means four different things — operational state, normalized configuration,
-staged candidate, native vendor text — and the command does not say which.
-Three design artifacts, no code: a ratifiable project constitution and
-brownfield Spec Kit workflow (#75, `.specify/`), a primary-source design corpus
-resolving nine dimensions into decisions across Junos, Cisco NSO, gNMI, IOS,
-NVUE, kubectl and EdgeConnect's own constraints (#73,
-`docs/design-corpus/cli/`), and the versioned grammar itself (#71,
-`specs/001-cli-command-taxonomy/`). **Implementation is gated**: the epic
-states no migration begins until the grammar and acceptance table are approved,
-and two decisions are escalated to the owner rather than defaulted.
+**CLI information architecture (epic #70).** The `show` root meant four
+different things — operational state, normalized configuration, staged
+candidate, native vendor text — and the command did not say which. Designed
+first: a ratified constitution and brownfield Spec Kit workflow (#75,
+`.specify/`), a primary-source design corpus resolving nine dimensions across
+Junos, Cisco NSO, gNMI, IOS, NVUE, kubectl and EdgeConnect's own constraints
+(#73, `docs/design-corpus/cli/`), and the versioned grammar (#71,
+`specs/001-cli-command-taxonomy/`). Then implemented against it:
+
+*One grammar, three intents.* `show <cli-state>`, `show <scope> <domain>` and
+`show configuration [running|candidate] ...` — no token sequence resolves to
+two, which makes Principle I structural rather than documented. Nonterminals
+list their continuations and exit 0 (#74). The datastore token is optional and
+means `running`; `candidate` is never implicit, so the only unnamed datastore
+is the live one.
+
+*One resolution path.* `registry.scoped_instances()` is the single
+implementation every surface uses to discover instances (#76), user-facing
+nouns replace registry keys on both surfaces with the keys withdrawn entirely
+(#77), and instance names complete (#49). `tests/test_grammar_parity.py` runs
+each worked example through both parsers and requires the same answer, because
+nothing structural keeps a shell function and a Typer registry in step.
+
+*Operational state, honestly.* `show appliance <name> bgp summary|neighbors`
+from one `/bgp/state` call; `routes` reports `unsupported` because no BGP
+route-table endpoint exists in either baseline, and stays listed rather than
+hidden (#72). A peer configured but absent from state is shown as exactly
+that, never inferred established.
+
+*Terminal states are distinguishable.* All eleven outcomes of `grammar.md` §5
+with their exit codes, classified at both dispatch boundaries — `denied` is
+not `unreachable`, `unsupported` is not `error`, `empty` is not `not_found`
+(#78). The table is asserted against the spec by parsing it, so the two cannot
+drift. `show commands` renders the whole surface offline, generated from the
+parser's own tables and round-tripped through the dispatcher.
+
+Outstanding: whether the shipped `--json` boolean becomes the grammar's
+`--format {yaml,json,native}`. It is a flag break across a dozen commands and
+the migration table covers command forms rather than flags, so it is an owner
+decision rather than an implementation gap.
 
 `make check` gate: ruff + mypy `--strict` + tests, all green — now enforced by
 CI on every push and pull request, not only locally.
@@ -167,8 +199,8 @@ So *anything and everything* is reachable now via Tier 0; curated plugins
 | **Tier-1 spec pipeline** (#6) ✅ | `tools/spec_sync.py`, model/binding/stub codegen, `show coverage`, promotion gating | #25–#29 |
 | **Fleet lifecycle** (#7) | discovery/approval, decommission cascade, preconfig, backup/restore, upgrades, licensing — IRREVERSIBLE class | in-epic checklist |
 | **Fabric ops & observability** (#8) | `drift`, declarative bulk apply, JSON Schema, dashboard-parity views | #54 (✅ shipped) + in-epic checklist |
-| **Production hardening** (#9) | concurrency, MCP trust boundary, CI/packaging, async-job fail-closed, evidence ladder, retry policy | #62–#68 (#62, #63, #65 ✅ shipped) |
-| **CLI information architecture** (#70) | intent-separated command taxonomy, spec-driven design; constitution + design corpus + grammar | #71–#78 (#73, #75 ✅ drafted; #71 ✅ spec, awaiting approval) |
+| **Production hardening** (#9) | concurrency, MCP trust boundary, CI/packaging, async-job fail-closed, evidence ladder, retry policy | #62–#68 (#62, #63, #65 ✅ shipped; #64, #66, #67, #68 open) |
+| **CLI information architecture** (#70) ✅ | intent-separated command taxonomy, spec-driven design; constitution + design corpus + grammar, then the migration itself | #49, #71–#78 (all shipped; one flag decision open) |
 | **(v2) RBAC broker** (#10) | direct-to-appliance access, gated — explicitly out of v1 scope | in-epic checklist |
 
 The near-term epics (#3, #4, #5, #6) are sharded into child sub-issues; #5 and
@@ -199,7 +231,7 @@ sharded into issues when their phase starts.
 | Common settings (SNMP/logging/mgmt-services/banners/timezone) | ✅ shipped (#38; appliance-scope. DNS proxy/cache, `logging/remote`, NTP deferred) |
 | Appliance lifecycle (discovery/upgrade/backup/preconfig) | ⚙️ Epic #7 |
 | Fabric drift / declarative apply / dashboards | ⚙️ Epic #8 |
-| Operational reporting (`show run` / `version` / `flows`) | ✅ shipped (#54: #55–#59). `show flow <ip>`'s server-side matching rests on `ipEitherFlag`, whose spec description contradicts its name — unverified live |
+| Operational reporting (`show configuration fabric` / `show fabric version` / `flows`) | ✅ shipped (#54: #55–#59), respelled by #74. `show fabric flow <ip>`'s server-side matching rests on `ipEitherFlag`, whose spec description contradicts its name — unverified live |
 | Any endpoint not yet curated | 🟢 reachable today via Tier-0 `ec-cli api` |
 
 Legend: ✅ done · 🔷 Phase 2 · 🔶 Phase 3 · ⚙️ operational epic · 🟢 Tier-0 now.
