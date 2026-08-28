@@ -33,7 +33,7 @@ from typer.core import TyperGroup
 from pyecsdwan import config, locking, runtime, specs, txn
 from pyecsdwan import registry as registry_mod
 from pyecsdwan.candidate import CandidateCorruptError, CandidateStore
-from pyecsdwan.cli import fanout, outcomes, render
+from pyecsdwan.cli import fanout, outcomes, reference, render
 from pyecsdwan.cli.outcomes import Outcome
 from pyecsdwan.client import OrchApiError
 from pyecsdwan.contract import Ctx, Ref, Resource, Reversibility, Scope, Tier
@@ -624,6 +624,43 @@ def show_appliances(ctx: typer.Context) -> None:
         values += [str(row.get(key) or "") for key in extra]
         table.add_row(*values)
     console.print(table)
+
+
+@show_app.command("commands")
+def show_commands(
+    intent: Annotated[
+        str | None,
+        typer.Option("--intent", help="Restrict to operational | configuration | cli-state."),
+    ] = None,
+    unsupported: Annotated[
+        bool, typer.Option("--unsupported", help="Only the commands that cannot be answered.")
+    ] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+) -> None:
+    """Every command, with its intent, scope, mutability and support status.
+
+    Offline: reads the plugin registry and the vendored baselines, never the
+    Orchestrator. Deciding whether this tool can do a thing should not require
+    credentials for a fabric.
+    """
+    registry = _registry_only()
+    rows = reference.build(registry)
+    if intent is not None:
+        valid = {reference.OPERATIONAL, reference.CONFIGURATION, reference.CLI_STATE}
+        if intent not in valid:
+            _fail(f"unknown intent {intent!r}; valid: {', '.join(sorted(valid))}")
+        rows = [r for r in rows if r.intent == intent]
+    if unsupported:
+        rows = [r for r in rows if r.support.startswith("unsupported")]
+    if as_json:
+        console.print_json(json.dumps([r.as_json() for r in rows]))
+        return
+    if not rows:
+        # An empty filter result is an answer, and a different one from "there
+        # are no commands" — say which filter emptied it (Principle II).
+        console.print("(no commands match that filter)")
+        return
+    render.render_command_reference(console, rows)
 
 
 @show_app.command("journal")

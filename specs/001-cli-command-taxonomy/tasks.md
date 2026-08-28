@@ -11,7 +11,7 @@ unlinked task has not been started.
 | ~~T1~~ | ~~Owner approves the grammar and the acceptance table~~ | T0 | **Done** — approved 2026-08-28; epic #70's migration gate open | #70 |
 | ~~T2~~ | ~~CLI name/alias contract on `Resource`~~ | T1 | **Done** — `cli_name`/`cli_aliases`, per-scope index, reserved words and collisions refused at registration | #77 |
 | T3 | User-facing nouns throughout parsing, completion, help, usage, errors, docs | T2 | **Partly done** — both surfaces resolve nouns through `Registry.resolve_cli` and print them in errors; `main.py` subcommand *help text* still to do | #77 |
-| T4 | Offline command reference view (domain, scope, instances, mutability, support status) | T2 | Runs with no Orchestrator connection | #77 |
+| T4 | Offline command reference view (domain, scope, instances, mutability, support status) | T2 | **Done** — `show commands` on both surfaces, generated from the parser's own tables and round-tripped through the dispatcher; runs with no Orchestrator and no credentials | #77 |
 | T6 | Bounded timeout on every appliance read; every terminal path returns to the prompt | T5 | **Partly done** — every terminal path returns to the prompt with a classified exit code; the per-read timeout budget is the client's existing connect/read timeouts, not yet a per-command `--timeout` on the new views | #78 |
 | T7 | Audit remaining appliance-scoped resources for the same silent path | T6 | Every kind exercised; findings filed | #78 |
 | T8 | Parser: new grammar, scope nouns, nonterminal listing | T1, T3 | **Done** — both surfaces: `show configuration` subtree, `fabric`/`appliance` scope nouns, nonterminals listing next tokens at exit 0, correspondence tested | #74 |
@@ -24,6 +24,13 @@ unlinked task has not been started.
 | ~~T12~~ | ~~Removal boundary decided (Q3)~~ | — | **Withdrawn** — no aliases to remove; nothing has shipped | — |
 
 ## Sequencing notes
+
+* **T4 says "instances" and the view says "address".** An offline reference
+  cannot know how many instances of a kind exist on a fabric, and one that
+  answered anyway would be guessing — Principle V. The column reports how a
+  kind is *addressed*, derived from `Resource.deletable`, whose own contract
+  ties it to singleton tables with no absent state. Recorded as a deviation
+  rather than silently reinterpreted.
 
 * **T0 and T1 are a gate, not a formality.** Epic #70 states no migration
   begins until the governing decisions and grammar acceptance table are
