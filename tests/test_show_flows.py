@@ -239,7 +239,7 @@ def test_a_cell_bounded_by_max_flows_says_so(world: dict[str, Any]) -> None:
 
 
 def test_summary_json_emits_the_matrix(world: dict[str, Any]) -> None:
-    result = _cli(world, "show", "flows", "summary", "--json")
+    result = _cli(world, "show", "fabric", "flows", "summary", "--json")
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["overlays"][-1] == flows_report.PASSTHROUGH
@@ -252,14 +252,14 @@ def test_summary_json_emits_the_matrix(world: dict[str, Any]) -> None:
 
 
 def test_summary_table_renders_names_counts_and_totals(world: dict[str, Any]) -> None:
-    result = _cli(world, "show", "flows", "summary")
+    result = _cli(world, "show", "fabric", "flows", "summary")
     assert result.exit_code == 0, result.output
     for expected in ("HUB1-EC", "RealTime", "CriticalApps", "Passthrough", "total"):
         assert expected in result.output
 
 
 def test_summary_table_flags_a_bounded_run(world: dict[str, Any]) -> None:
-    result = _cli(world, "show", "flows", "summary", "--max-flows", "2")
+    result = _cli(world, "show", "fabric", "flows", "summary", "--max-flows", "2")
     assert result.exit_code == 0, result.output
     assert "--max-flows 2" in result.output
     assert "ceiling, not a total" in result.output
@@ -398,14 +398,14 @@ def test_a_malformed_address_is_rejected_before_any_request(
 
 
 def test_no_matches_is_a_sentence_not_an_empty_table(world: dict[str, Any]) -> None:
-    result = _cli(world, "show", "flow", "192.0.2.9")
+    result = _cli(world, "show", "fabric", "flow", "192.0.2.9")
     assert result.exit_code == 0, result.output
     assert "no flows found for 192.0.2.9" in result.output
     assert "appliance" not in result.output.lower().split("no flows found")[0]
 
 
 def test_flow_json_emits_the_rows_with_both_appliances(world: dict[str, Any]) -> None:
-    result = _cli(world, "show", "flow", "10.1.1.5", "--json")
+    result = _cli(world, "show", "fabric", "flow", "10.1.1.5", "--json")
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["match_count"] == 1
@@ -422,7 +422,7 @@ def test_flow_json_emits_the_rows_with_both_appliances(world: dict[str, Any]) ->
 
 
 def test_flow_table_attributes_both_appliances(world: dict[str, Any]) -> None:
-    result = _cli(world, "show", "flow", "10.1.1.5")
+    result = _cli(world, "show", "fabric", "flow", "10.1.1.5")
     assert result.exit_code == 0, result.output
     assert "HUB1-EC" in result.output
     assert "BR1-EC" in result.output
@@ -437,7 +437,7 @@ def test_flow_search_reports_a_max_flows_ceiling(world: dict[str, Any]) -> None:
     # Both appliances that answered returned exactly the cap they were given,
     # so neither can claim its answer was complete.
     assert set(search.bounded_appliances) == {"BR1-EC", "HUB1-EC"}
-    result = _cli(world, "show", "flow", "10.1.1.0/24", "--max-flows", "1")
+    result = _cli(world, "show", "fabric", "flow", "10.1.1.0/24", "--max-flows", "1")
     assert "ceiling, not a total" in result.output
 
 

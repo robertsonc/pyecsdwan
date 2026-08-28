@@ -421,7 +421,7 @@ def _invoke(settings: config.Settings, args: list[str], monkeypatch: Any) -> Any
 def test_cli_show_version_renders_the_report(
     settings_for_mock: config.Settings, monkeypatch: Any
 ) -> None:
-    result = _invoke(settings_for_mock, ["show", "version"], monkeypatch)
+    result = _invoke(settings_for_mock, ["show", "fabric", "version"], monkeypatch)
     assert result.exit_code == 0, result.output
     assert "Orchestrator 9.4.2.40100" in result.output
     assert "BR2-EC" in result.output
@@ -433,7 +433,7 @@ def test_cli_json_emits_full_per_partition_data(
 ) -> None:
     """`--json` is not the rendered summary: every partition, with every field
     the appliance reported, has to be in there."""
-    result = _invoke(settings_for_mock, ["show", "version", "--json"], monkeypatch)
+    result = _invoke(settings_for_mock, ["show", "fabric", "version", "--json"], monkeypatch)
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
 
@@ -474,11 +474,13 @@ def test_cli_json_emits_full_per_partition_data(
 def test_cli_no_cache_is_reported_and_succeeds(
     settings_for_mock: config.Settings, monkeypatch: Any
 ) -> None:
-    result = _invoke(settings_for_mock, ["show", "version", "--no-cache"], monkeypatch)
+    result = _invoke(settings_for_mock, ["show", "fabric", "version", "--no-cache"], monkeypatch)
     assert result.exit_code == 0, result.output
     assert "--no-cache" in result.output
 
-    as_json = _invoke(settings_for_mock, ["show", "version", "--no-cache", "--json"], monkeypatch)
+    as_json = _invoke(
+        settings_for_mock, ["show", "fabric", "version", "--no-cache", "--json"], monkeypatch
+    )
     assert as_json.exit_code == 0, as_json.output
     assert json.loads(as_json.output)["cached"] is False
 
@@ -495,7 +497,7 @@ def test_show_version_has_no_transactional_side_effects(
     assert candidate.ordered_items() == []
     assert journal.list_txns() == []
 
-    result = _invoke(settings_for_mock, ["show", "version"], monkeypatch)
+    result = _invoke(settings_for_mock, ["show", "fabric", "version"], monkeypatch)
     assert result.exit_code == 0, result.output
 
     assert CandidateStore(settings_for_mock.host).ordered_items() == []

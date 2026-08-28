@@ -370,11 +370,11 @@ def test_broadcast_needs_at_least_one_appliance() -> None:
 
 
 def _cli(fabric: dict[str, Any], *args: str) -> Any:
-    return runner.invoke(cli_main.app, ["--mock", fabric["port"], "show", "run", *args])
+    return runner.invoke(cli_main.app, ["--mock", fabric["port"], "show", "configuration", *args])
 
 
 def test_cli_prints_the_appliances_running_config(fabric: dict[str, Any]) -> None:
-    result = _cli(fabric, "appliance", "BR1-EC")
+    result = _cli(fabric, "appliance", "BR1-EC", "--format", "native")
     assert result.exit_code == 0, result.output
     assert "# BR1-EC running-config" in result.output
     assert "hostname BR1-EC" in result.output
@@ -383,7 +383,7 @@ def test_cli_prints_the_appliances_running_config(fabric: dict[str, Any]) -> Non
 def test_cli_json_wraps_the_text_with_the_appliance_it_came_from(
     fabric: dict[str, Any],
 ) -> None:
-    result = _cli(fabric, "appliance", "BR1-EC", "--json")
+    result = _cli(fabric, "appliance", "BR1-EC", "--json", "--format", "native")
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["command"] == "show running-config"
@@ -395,7 +395,7 @@ def test_cli_json_wraps_the_text_with_the_appliance_it_came_from(
 
 
 def test_cli_json_attributes_each_appliance_to_its_own_text(fabric: dict[str, Any]) -> None:
-    result = _cli(fabric, "appliance", "BR1-EC", "BR2-EC", "--json")
+    result = _cli(fabric, "appliance", "BR1-EC", "BR2-EC", "--json", "--format", "native")
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     by_name = {a["appliance"]: a["text"] for a in payload["appliances"]}
@@ -407,7 +407,7 @@ def test_cli_json_attributes_each_appliance_to_its_own_text(fabric: dict[str, An
 def test_cli_unknown_appliance_is_a_clean_error_not_a_traceback(
     fabric: dict[str, Any],
 ) -> None:
-    result = _cli(fabric, "appliance", "BR1-ECX")
+    result = _cli(fabric, "appliance", "BR1-ECX", "--format", "native")
     assert result.exit_code != 0
     combined = result.output + (str(result.exception) if result.exception else "")
     assert "unknown appliance" in combined
@@ -415,7 +415,7 @@ def test_cli_unknown_appliance_is_a_clean_error_not_a_traceback(
 
 
 def test_cli_partial_failure_is_reported_and_exits_nonzero(fabric: dict[str, Any]) -> None:
-    result = _cli(fabric, "appliance", "BR1-EC", "BR1-ECX", "--json")
+    result = _cli(fabric, "appliance", "BR1-EC", "BR1-ECX", "--json", "--format", "native")
     assert result.exit_code == 2, result.output
     payload = json.loads(result.stdout)
     assert [a["appliance"] for a in payload["appliances"]] == ["BR1-EC"]
@@ -424,7 +424,9 @@ def test_cli_partial_failure_is_reported_and_exits_nonzero(fabric: dict[str, Any
 
 def test_cli_broadcast_goes_through_broadcastcli(fabric: dict[str, Any]) -> None:
     mstate: MockState = fabric["state"]
-    result = _cli(fabric, "appliance", "BR1-EC", "BR2-EC", "--broadcast", "--json")
+    result = _cli(
+        fabric, "appliance", "BR1-EC", "BR2-EC", "--broadcast", "--json", "--format", "native"
+    )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["mode"] == "broadcast"
@@ -435,7 +437,7 @@ def test_cli_broadcast_goes_through_broadcastcli(fabric: dict[str, Any]) -> None
 
 def test_cli_broadcast_failure_exits_nonzero(fabric: dict[str, Any]) -> None:
     fabric["state"].fail_next_action = True
-    result = _cli(fabric, "appliance", "BR1-EC", "--broadcast")
+    result = _cli(fabric, "appliance", "BR1-EC", "--broadcast", "--format", "native")
     assert result.exit_code == 2, result.output
 
 
@@ -452,7 +454,7 @@ def test_cli_broadcast_timeout_exits_nonzero(
     monkeypatch.setattr(
         cli_main.applianceconfig, "broadcast_running_config", lambda *a, **k: timed_out
     )
-    result = _cli(fabric, "appliance", "BR1-EC", "--broadcast")
+    result = _cli(fabric, "appliance", "BR1-EC", "--broadcast", "--format", "native")
     assert result.exit_code == 2, result.output
     assert "TIMEOUT" in result.output
 
@@ -466,7 +468,7 @@ def test_cli_show_run_alone_is_the_fabric_report(fabric: dict[str, Any]) -> None
     Was a "Missing command" assertion until #55 filled the callback in — the
     seam existed precisely so this test would have to be changed on purpose.
     """
-    result = _cli(fabric)
+    result = _cli(fabric, "fabric")
     assert result.exit_code == 0, result.output
     # The fabric report, not this file's per-appliance running-config.
     assert "overlays" in result.output

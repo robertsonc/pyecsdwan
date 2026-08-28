@@ -560,11 +560,11 @@ def test_the_rendered_report_names_every_section(world: dict[str, Any]) -> None:
 
 
 def _cli(world: dict[str, Any], *args: str) -> Any:
-    return runner.invoke(cli_main.app, ["--mock", world["port"], "show", "run", *args])
+    return runner.invoke(cli_main.app, ["--mock", world["port"], "show", "configuration", *args])
 
 
 def test_cli_show_run_renders_the_fabric_report(world: dict[str, Any]) -> None:
-    result = _cli(world)
+    result = _cli(world, "fabric")
     assert result.exit_code == 0, result.output
     assert "overlays (1)" in result.output
     assert "CorpFabric" in result.output
@@ -572,14 +572,14 @@ def test_cli_show_run_renders_the_fabric_report(world: dict[str, Any]) -> None:
 
 
 def test_cli_show_run_json(world: dict[str, Any]) -> None:
-    result = _cli(world, "--json")
+    result = _cli(world, "fabric", "--json")
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert set(payload["sections"]) == set(fabric.SECTIONS)
 
 
 def test_cli_section_scopes_the_report(world: dict[str, Any]) -> None:
-    result = _cli(world, "--section", "overlays")
+    result = _cli(world, "fabric", "overlays")
     assert result.exit_code == 0, result.output
     assert "overlays (1)" in result.output
     assert "deployment" not in result.output
@@ -588,7 +588,7 @@ def test_cli_section_scopes_the_report(world: dict[str, Any]) -> None:
 def test_cli_unknown_section_errors_cleanly_and_lists_the_valid_ones(
     world: dict[str, Any],
 ) -> None:
-    result = _cli(world, "--section", "overlay")
+    result = _cli(world, "fabric", "overlay")
     assert result.exit_code == 2
     assert "unknown section 'overlay'" in result.output
     for name in fabric.SECTIONS:
@@ -598,7 +598,7 @@ def test_cli_unknown_section_errors_cleanly_and_lists_the_valid_ones(
 def test_cli_show_run_appliance_still_reads_one_appliance(world: dict[str, Any]) -> None:
     """The #55/#56 split: the group callback renders the fabric report only
     when no subcommand was given."""
-    result = _cli(world, "appliance", "BR1-EC")
+    result = _cli(world, "appliance", "BR1-EC", "--format", "native")
     assert result.exit_code == 0, result.output
     assert "# BR1-EC running-config" in result.output
     assert "overlays" not in result.output
@@ -720,7 +720,7 @@ def test_show_run_leaves_no_candidate_journal_or_transaction(
     world: dict[str, Any], shell_state: ShellState
 ) -> None:
     _shell(shell_state, "show configuration fabric")
-    result = _cli(world)
+    result = _cli(world, "fabric")
     assert result.exit_code == 0, result.output
 
     assert journal.list_txns() == []

@@ -38,7 +38,12 @@ rather than in the constitution's exception register for that reason: this is
 | `show appliance <name> <kind> [<instance>]` | **split by intent** — `show appliance <name> <domain> ...` for state, `show configuration appliance <name> <kind>` for config |
 | `show <kind> [<instance>]` *(orch-scope)* | `show configuration <kind> [<instance>]` |
 | `show appliance <name> appliance/<kind>` | `show appliance <name> <kind>` — the key is no longer accepted (rule 3, shipped) |
-| `ec-cli set\|delete\|load\|plugin promote appliance/<kind>` | same commands with `<kind>` — the scriptable CLI resolves nouns too (rule 6, shipped) |
+| `ec-cli set\|delete\|load\|plugin promote appliance/<kind>` | same commands with `<kind>` — the scriptable CLI resolves nouns too (rule 4, shipped) |
+| `ec-cli show run [--section <s>]` | `ec-cli show configuration fabric [<section>]` — positional, matching the shell |
+| `ec-cli show run appliance <name>...` | `ec-cli show configuration appliance <name>... --format native` |
+| `ec-cli show version` | `ec-cli show fabric version` |
+| `ec-cli show flows summary` / `show flow <ip>` | `ec-cli show fabric flows summary` / `show fabric flow <ip>` |
+| `ec-cli show candidate` | `ec-cli show configuration candidate` |
 | `show flows summary` | `show fabric flows summary` |
 | `show flow <ip>` | `show fabric flow <ip>` |
 
@@ -85,6 +90,15 @@ ought to work.
 6. **Documentation carries before/after examples anyway** (#74 asks for them).
    Not for compatibility — for anyone reading an older sitrep or issue and
    wondering why the command in it no longer exists.
+7. **The correspondence between surfaces is itself tested.**
+   `tests/test_grammar_parity.py` runs each row of `grammar.md` §7 through both
+   parsers and requires the same answer, because nothing structural keeps them
+   in step: the tree lives in `shell._show_operational` and in Typer's command
+   registry. It earned its place immediately — on its first run it caught that
+   `show configuration running <anything>` worked in the shell and not in the
+   scriptable CLI. A form removed from one surface and left on the other is
+   worse than leaving it on both: a script keeps working while the prompt says
+   it does not exist.
 
 ## If this turns out to be wrong
 

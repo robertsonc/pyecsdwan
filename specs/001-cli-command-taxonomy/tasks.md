@@ -15,10 +15,10 @@ unlinked task has not been started.
 | T5 | Outcome classifier + renderer for the eleven outcomes, human and JSON | — | One test per outcome, both modes; `{}`/`None`/`""`/204/`[]` each intentional | #78 |
 | T6 | Bounded timeout on every appliance read; every terminal path returns to the prompt | T5 | `show appliance S1-ecv-01 banners` always produces a visible result | #78 |
 | T7 | Audit remaining appliance-scoped resources for the same silent path | T6 | Every kind exercised; findings filed | #78 |
-| T8 | Parser: new grammar, scope nouns, nonterminal listing | T1, T3 | **Shell done** — `show configuration` subtree, `fabric`/`appliance` scope nouns, `Nonterminal` listing next tokens at exit 0; scriptable CLI still to do | #74 |
-| T9 | **Remove** the old forms (no aliases — Q3), including #77's legacy `appliance/<kind>` acceptance | T8 | **Shell done** — parametrized absence test per row; the registry-key acceptance is withdrawn on both surfaces | #74 |
+| T8 | Parser: new grammar, scope nouns, nonterminal listing | T1, T3 | **Done** — both surfaces: `show configuration` subtree, `fabric`/`appliance` scope nouns, nonterminals listing next tokens at exit 0, correspondence tested | #74 |
+| T9 | **Remove** the old forms (no aliases — Q3), including #77's legacy `appliance/<kind>` acceptance | T8 | **Done** — parametrized absence test per row on both surfaces; the registry-key acceptance is withdrawn | #74 |
 | T10 | BGP operational views — **spec** in `specs/002-appliance-operational-views/` | T1 | Source-verified; `routes` reported unsupported (no endpoint exists) | #72 |
-| T11 | Golden UX tests derived from `grammar.md` §7 | T8, T10 | Every row of the worked-examples table is a test | #74 |
+| T11 | Golden UX tests derived from `grammar.md` §7 | T8, T10 | **Partly done** — `tests/test_grammar_parity.py` covers every configuration row on both surfaces; the operational rows wait on T10 | #74 |
 | ~~T12~~ | ~~Removal boundary decided (Q3)~~ | — | **Withdrawn** — no aliases to remove; nothing has shipped | — |
 
 ## Sequencing notes
@@ -32,12 +32,13 @@ unlinked task has not been started.
   outstanding. This is the one part of the epic worth doing out of order.
 * **T2–T4 (#77) must land before T8**, or the parser change would have to be
   made twice — once against registry keys and again against aliases.
-* **T8 landed shell-first, and that was not the plan's ordering.** The tree is
-  one function in `shell.py` and a set of Typer subcommands in `main.py`; doing
-  the shell first meant the grammar could be exercised end to end (the whole
-  `#78` terminal-state suite runs against it) before the second surface was
-  written to match. The risk this takes on is Principle IV drift while the two
-  are out of step, so the scriptable half is the next task, not a later one.
+* **T8 landed shell-first, and the drift it risked was real.** The tree is one
+  function in `shell.py` and a set of Typer subcommands in `main.py`, so the
+  shell went first and the grammar was exercised end to end before the second
+  surface was written to match. That gap is exactly what `test_grammar_parity`
+  was written to close, and on its first run it found a form the shell accepted
+  and the scriptable CLI did not. Shell-first is a reasonable order; shipping
+  it without the correspondence test would not have been.
 
 * **T10 (#72) comes *before* T8/T9 (#74), not after.** This table originally
   had it last, on the reasoning that BGP proves the taxonomy on a real domain.
