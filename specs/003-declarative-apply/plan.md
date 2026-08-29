@@ -1,7 +1,7 @@
 # Implementation plan: declarative apply from a desired-state directory
 
 **Feature:** `003-declarative-apply` · **Spec:** `./spec.md` · **Date:** 2026-08-29
-**Status:** blocked pending owner ratification and the safety gates named in `spec.md`
+**Status:** design ratified 2026-08-29 — implementation blocked pending the safety gates named in `spec.md`
 
 ## Approach
 
