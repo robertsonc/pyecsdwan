@@ -37,7 +37,7 @@ from typing import Any
 
 from pyecsdwan import config
 from pyecsdwan import watchdog as _watchdog
-from pyecsdwan.candidate import CandidateItem, CandidateStore, materialize_desired
+from pyecsdwan.candidate import CandidateItem, IntentSource, materialize_desired
 from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
@@ -144,8 +144,15 @@ class CommitReport:
     jobs: list[JobOutcome] = dataclasses.field(default_factory=list)
 
 
-def build_plan(ctx: Ctx, registry: Registry, candidate: CandidateStore) -> Plan:
-    """Fetch + normalize + diff every candidate item; detect ownership."""
+def build_plan(ctx: Ctx, registry: Registry, candidate: IntentSource) -> Plan:
+    """Fetch + normalize + diff every staged item; detect ownership.
+
+    ``candidate`` is any :class:`~pyecsdwan.candidate.IntentSource`: the
+    candidate store, or a desired-state directory (epic #8). The plan, its
+    guards and the commit that follows are identical either way — only where
+    the intent came from differs, which is the whole reason declarative apply
+    needs no second transaction engine.
+    """
     warnings: list[str] = []
     refs = [item.ref for item in candidate.ordered_items()]
     deletes = {i.ref_key for i in candidate.ordered_items() if i.mode == "delete"}
@@ -268,6 +275,51 @@ def commit(
         )
 
 
+#: Transaction states that own the fabric until they resolve. A new commit
+#: during either would be reverted out from under the operator: an
+#: APPLIED_UNCONFIRMED window ends by restoring a snapshot taken *before* the
+#: new commit, and a REVERTING transaction is mid-restore.
+BLOCKING_STATES = frozenset({TxnState.APPLIED_UNCONFIRMED, TxnState.REVERTING})
+
+
+def _guard_no_pending_confirm(
+    settings: config.Settings, journal_root: Path | None
+) -> None:
+    """Refuse a new transaction while one still owns the fabric (#100).
+
+    This check used to live in the ``commit`` CLI command only, which made it
+    a property of one entry point rather than of the engine. ``apply --from``
+    called ``txn.commit`` directly and so did not have it, and neither would
+    any library caller: a declarative apply during an active confirm window
+    was accepted, wrote to the fabric, and was then silently erased when the
+    first window expired and its watchdog restored a snapshot taken before the
+    second write ever happened. No error, no journal entry saying why — the
+    change is simply gone.
+
+    Inside the commit lock and before ``TxnJournal.create``, so nothing is
+    journaled and no API call is made for a transaction that cannot proceed.
+
+    Deliberately not applied to ``revert_txn_dir`` / ``rollback_history_txn``:
+    recovery is precisely what an operator needs *during* one of these states,
+    and neither goes through ``commit()``.
+    """
+    from pyecsdwan.journal import list_txns
+
+    blocking = [
+        t
+        for t in list_txns(journal_root)
+        if t.meta.orch_host == settings.host and t.meta.state in BLOCKING_STATES
+    ]
+    if not blocking:
+        return
+    first = blocking[0]
+    raise CommitError(
+        f"transaction {first.meta.txn_id} is {first.meta.state} on {settings.host}; "
+        f"refusing to start another that it would revert away. Run 'ec-cli confirm' "
+        f"or 'ec-cli rollback --pending' first."
+    )
+
+
 def _commit_locked(
     ctx: Ctx,
     changed: list[PlanItem],
@@ -277,6 +329,7 @@ def _commit_locked(
     rebase: bool,
     override_template: bool,
 ) -> CommitReport:
+    _guard_no_pending_confirm(settings, journal_root)
     journal = TxnJournal.create(
         settings.host, [i.ref for i in changed], root=journal_root
     )
@@ -408,7 +461,31 @@ def _commit_locked(
             failure = f"{item.ref}: {result.message or 'apply failed'}"
             failed_item = item
             break
-        if not item.resource.verify(ctx, item.ref, item.desired):
+        try:
+            verified = item.resource.verify(ctx, item.ref, item.desired)
+        except Exception as exc:  # noqa: BLE001 - verify runs *after* a write landed; escaping here strands the fabric
+            # #103. `apply` was wrapped and `verify` was not, so a read timeout
+            # or an odd response while confirming the write propagated out of
+            # commit() entirely: the caller got a raw exception, the fabric
+            # kept the change, and the transaction sat in APPLYING with no
+            # revert and no terminal state. An unverifiable write is a failed
+            # one — the whole point of verify is that we do not get to assume.
+            #
+            # No `verified = False` here: `failure` and the `break` below carry
+            # the outcome, and the mutation sweep proved the assignment was
+            # never read — flipping it to True changed nothing.
+            journal.append(
+                "VERIFY_FAILED",
+                ref=item.ref.key(),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            failure = (
+                f"{item.ref}: post-apply verify raised {type(exc).__name__}: {exc}; "
+                f"the write cannot be confirmed"
+            )
+            failed_item = item
+            break
+        if not verified:
             failure = f"{item.ref}: post-apply verify found drift from desired state"
             failed_item = item
             journal.append("VERIFY_FAILED", ref=item.ref.key())
@@ -521,11 +598,32 @@ def _guard(
             f"mixing them in downgrades the whole transaction's guarantees. "
             f"Use --allow-untransactional to accept best-effort snapshots."
         )
-    if confirm_minutes is not None and not settings.api_key:
-        raise CommitError(
-            "commit confirm requires API-key authentication: the background "
-            "watchdog cannot replay an interactive login session."
-        )
+    _guard_confirm_auth(settings, confirm_minutes)
+
+
+def _guard_confirm_auth(settings: config.Settings, confirm_minutes: float | None) -> None:
+    """A confirm window needs a credential the detached watchdog can replay.
+
+    Extracted from the guard chain so it can be tested directly: the message
+    it produces is the one an operator reads at the moment their commit is
+    refused, and it is worth more than a line inside a forty-line function.
+    """
+    if confirm_minutes is None or settings.api_key:
+        return
+    # Name the keyring failure when there was one. Without it this message
+    # tells an operator who *did* store a key that they have no key, and they
+    # go looking in the wrong place — re-storing it into the keyring that is
+    # not opening.
+    because = (
+        f" The keyring was unreadable, so a stored key could not be used: "
+        f"{settings.keyring_error}."
+        if settings.keyring_error
+        else ""
+    )
+    raise CommitError(
+        "commit confirm requires API-key authentication: the background "
+        "watchdog cannot replay an interactive login session." + because
+    )
 
 
 def _revert_items(
@@ -535,7 +633,22 @@ def _revert_items(
     snapshots = journal.snapshots()
     revert_failures: list[str] = []
     for item in items:
-        snap = snapshots.get(item.ref.key())
+        if item.ref.key() not in snapshots:
+            # Not the same as a snapshot recorded as absent (#110). Both used
+            # to arrive here as None, and `rollback(ctx, ref, None)` means
+            # "this did not exist before, remove it" — so a snapshot the
+            # journal lost would make the revert *delete* a resource that was
+            # there all along. Refuse loudly instead; the item stays modified
+            # and the report says so.
+            journal.append("REVERT_START", ref=item.ref.key())
+            detail = (
+                "no pre-change snapshot recorded in the journal, so there is "
+                "nothing to restore from; left as-is rather than deleted"
+            )
+            journal.append("REVERT_RESULT", ref=item.ref.key(), ok=False, message=detail)
+            revert_failures.append(f"{item.ref}: {detail}")
+            continue
+        snap = snapshots[item.ref.key()]
         journal.append("REVERT_START", ref=item.ref.key())
         try:
             result = item.resource.rollback(ctx, item.ref, snap)

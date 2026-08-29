@@ -1,5 +1,6 @@
 """Unit tests for pyecsdwan.journal: crash-safe transaction journal."""
 
+import json
 import os
 
 import pytest
@@ -171,3 +172,109 @@ def test_prune_history_audit_burst_never_evicts_rollback_point(state_home, seque
     # The lone rollback point survives a flood of audit records.
     assert confirmed.dir.exists()
     assert confirmed.meta.txn_id in {t.meta.txn_id for t in list_txns()}
+
+
+# -- torn tails and corrupt history (#110) -----------------------------------
+
+
+def _tear(journal, fragment=b'{"ts": "2026-01-01", "event": "APPLY_ST'):
+    """Simulate a crash mid-append: bytes with no terminating newline."""
+    with open(journal.dir / "events.jsonl", "ab") as fh:
+        fh.write(fragment)
+
+
+def test_an_append_after_a_torn_tail_keeps_the_new_event(state_home):
+    """#110. `append` wrote `line + "\\n"`, so a file not ending in a newline
+    meant the next record was concatenated onto the fragment and the whole
+    line became unparseable — destroying the fragment *and* the new event,
+    silently, because the reader skipped malformed lines."""
+    txn = _create()
+    _tear(txn)
+
+    txn.append("APPLY_RESULT", ref="interface-labels:global", ok=True)
+
+    events = [e["event"] for e in txn.events()]
+    assert "APPLY_RESULT" in events
+
+
+def test_a_lost_snapshot_is_what_made_that_serious(state_home):
+    """The consequence, stated where it bites: the record after a tear is
+    usually the pre-change snapshot, and without it a revert has nothing to
+    restore from while `applied_refs` still says the resource was changed."""
+    txn = _create()
+    _tear(txn)
+    txn.record_snapshot(REFS[0], {"before": "the only copy"})
+
+    assert REFS[0].key() in txn.snapshots()
+
+
+def test_the_repair_is_recorded_not_silent(state_home):
+    """A journal that quietly edits itself is not an audit log. The discarded
+    bytes are a digest and a length rather than quoted text — a fragment can
+    be part of a snapshot body, which is why this file is 0600."""
+    txn = _create()
+    _tear(txn)
+    txn.append("APPLY_START", ref="interface-labels:global")
+
+    repair = next(e for e in txn.events() if e["event"] == "JOURNAL_REPAIRED")
+    assert repair["action"] == "discarded"
+    assert repair["bytes"] > 0
+    assert len(repair["sha256"]) == 64
+    assert "APPLY_ST" not in json.dumps(repair)
+
+
+def test_a_complete_record_missing_only_its_newline_is_kept(state_home):
+    """The case that makes truncation unsafe as a blanket rule.
+
+    If the record bytes landed and only the newline did not, the record is
+    whole — discarding it would be exactly the data loss this repair exists to
+    prevent. So the tail is *parsed* rather than assumed partial, and a valid
+    one is terminated instead of thrown away.
+    """
+    txn = _create()
+    _tear(txn, b'{"ts": "2026-01-01", "event": "SNAPSHOT", "ref": "x", "exists": false}')
+
+    txn.append("APPLY_START", ref="x")
+
+    events = [e["event"] for e in txn.events()]
+    assert "SNAPSHOT" in events, "a complete record was discarded as if partial"
+    repair = next(e for e in txn.events() if e["event"] == "JOURNAL_REPAIRED")
+    assert repair["action"] == "terminated"
+
+
+def test_a_well_formed_log_is_left_alone(state_home):
+    """Guards the guard: a repair that fired every time would append a
+    JOURNAL_REPAIRED to every transaction and make the audit trail noise."""
+    txn = _create()
+    txn.append("APPLY_START", ref="interface-labels:global")
+    txn.append("VERIFIED", ref="interface-labels:global")
+
+    assert not [e for e in txn.events() if e["event"] == "JOURNAL_REPAIRED"]
+
+
+def test_recovery_refuses_a_history_with_a_hole_in_it(state_home):
+    """A malformed *interior* line cannot be a torn tail — the tail repair
+    runs before every append — so it is corruption. Rollback computed from a
+    history with a hole is worse than a refused one."""
+    txn = _create()
+    txn.record_snapshot(REFS[0], {"before": 1})
+    path = txn.dir / "events.jsonl"
+    lines = path.read_text().splitlines()
+    lines.insert(1, "{not json at all")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(journal_mod.JournalCorrupt):
+        txn.snapshots()
+    with pytest.raises(journal_mod.JournalCorrupt):
+        txn.applied_refs()
+
+
+def test_display_stays_lenient_so_a_corrupt_journal_is_still_visible(state_home):
+    """The other half of that decision. `show journal` refusing to render a
+    corrupt journal would hide the very transaction an operator is trying to
+    find, which is the opposite of failing closed."""
+    txn = _create()
+    path = txn.dir / "events.jsonl"
+    path.write_text(path.read_text() + "{not json at all\n", encoding="utf-8")
+
+    assert [e["event"] for e in txn.events()] == ["TXN_BEGIN"]

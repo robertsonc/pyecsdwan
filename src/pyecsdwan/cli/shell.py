@@ -498,7 +498,17 @@ def _show_operational(args: list[str], state: ShellState) -> None:
     elif head == "journal":
         from pyecsdwan.cli.render import render_journal_table
 
-        render_journal_table(state.console, journal.list_txns())
+        if args[1:]:
+            # The audit export lives in the scriptable CLI: NDJSON belongs in a
+            # pipe, and this shell is not one. Said rather than ignored, so the
+            # same words do not quietly mean two things on two surfaces.
+            raise ValueError(
+                "usage: show journal "
+                "(audit export: `ec-cli show journal --events`)"
+            )
+        render_journal_table(
+            state.console, journal.list_txns(), journal.unreadable_txn_dirs()
+        )
     elif head == "locks":
         from pyecsdwan.cli.main import render_locks_table
 

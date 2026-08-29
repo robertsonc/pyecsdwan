@@ -8,6 +8,8 @@ and never touch the network or the journal themselves.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -88,8 +90,17 @@ def render_report(console: Console, report: txn.CommitReport) -> None:
         console.print(Text(f"transaction: {report.txn_id} [{report.state}]", style="dim"))
 
 
-def render_journal_table(console: Console, txns: list[TxnJournal]) -> None:
-    """Tabular transaction listing (``show journal`` / ``show pending``)."""
+def render_journal_table(
+    console: Console, txns: list[TxnJournal], unreadable: Sequence[str]
+) -> None:
+    """Tabular transaction listing (``show journal`` / ``show pending``).
+
+    ``unreadable`` is :func:`pyecsdwan.journal.unreadable_txn_dirs` — journal
+    directories too corrupt to open, which ``list_txns`` drops. It is a
+    required argument rather than an optional one on purpose: a caller that
+    forgot it would render a table that looks complete while a stuck
+    transaction sits invisible on disk, which is the failure this reports.
+    """
     table = Table(title=f"transactions ({len(txns)})")
     table.add_column("txn id", no_wrap=True)
     table.add_column("state")
@@ -106,6 +117,14 @@ def render_journal_table(console: Console, txns: list[TxnJournal]) -> None:
             meta.confirm_deadline or "-",
         )
     console.print(table)
+    if unreadable:
+        console.print(
+            Text(
+                f"warning: {len(unreadable)} journal director(ies) could not be read "
+                f"and are missing from this table: {', '.join(unreadable)}",
+                style="yellow",
+            )
+        )
 
 
 def tier0_banner(console: Console) -> None:
@@ -313,12 +332,18 @@ def render_drift(console: Console, report: drift_report.Report) -> None:
     )
     for note in report.notes:
         console.print(Text(note, style="dim"))
+    for gap in report.gaps:
+        # Named individually rather than counted. A gap is a piece of the
+        # fabric this run never looked at, and "3 gaps" does not tell an
+        # operator which kind to go and check by hand.
+        console.print(Text(f"not compared — {gap.scope} {gap.name}: {gap.reason}", style="yellow"))
     if not report.complete:
         # Said outright, not left to be inferred from a count: the whole
         # difference between this and a report that lies is this line.
+        missed = len(report.inconclusive) + len(report.gaps)
         console.print(
             Text(
-                f"incomplete: {len(report.inconclusive)} instance(s) could not be compared, "
+                f"incomplete: {missed} instance(s)/scope(s) could not be compared, "
                 f"so \"no drift\" is not a claim this run can make",
                 style="bold red",
             )

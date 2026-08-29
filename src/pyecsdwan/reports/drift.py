@@ -23,7 +23,8 @@ also found drift, because "no drift" from a report that skipped half the
 appliances is a claim it has not earned. Both are non-zero, so a CI job fails
 either way; the code says which problem to look at first.
 
-Where "desired" comes from is one narrow interface, :class:`IntentSource`.
+Where "desired" comes from is one narrow interface,
+:class:`pyecsdwan.candidate.IntentSource`.
 Two things implement it: the candidate store (what the operator typed since
 the last commit) and :class:`pyecsdwan.desired.Declared` (a directory of YAML
 in git, which is what a CI drift check actually wants). Both materialize
@@ -38,11 +39,11 @@ from __future__ import annotations
 import dataclasses
 import enum
 from collections.abc import Sequence
-from typing import Any, Protocol
+from typing import Any
 
 import structlog
 
-from pyecsdwan.candidate import CandidateItem, CandidateStore
+from pyecsdwan.candidate import IntentSource
 from pyecsdwan.contract import Ctx, NotCurated, Ref, Resource, Tier
 from pyecsdwan.jobs import UNSAVED_FIELD
 from pyecsdwan.registry import Registry
@@ -115,11 +116,41 @@ class Row:
 
 
 @dataclasses.dataclass(frozen=True)
+class Gap:
+    """Something this run did not compare, at a coarser grain than one row.
+
+    A :class:`Row` says "I looked at this instance and here is what I found".
+    A gap says "I never got to look", and the two need different shapes
+    because a gap has no instance to name: when ``list_refs`` fails, the whole
+    point is that we do not know which instances exist.
+
+    Gaps were originally free-text notes, which is how #102's bug happened:
+    ``exit_code`` reads rows, notes were prose, and an entire unreadable kind
+    exited 0 while the module's own docstring promised the opposite.
+    """
+
+    #: ``kind`` — a kind whose instances could not be listed.
+    #: ``declared`` — intent naming an instance the enumeration never produced,
+    #: so nothing compared it.
+    scope: str
+    #: CLI noun for ``kind`` gaps, ref key for ``declared`` ones.
+    name: str
+    reason: str
+
+    def as_json(self) -> dict[str, str]:
+        return {"scope": self.scope, "name": self.name, "reason": self.reason}
+
+
+@dataclasses.dataclass(frozen=True)
 class Report:
     rows: tuple[Row, ...] = ()
-    #: Things that shaped the report without being a row of it — an inventory
-    #: that would not enumerate, appliances with unsaved changes.
+    #: Things that shaped the report without being a row of it — today only
+    #: appliances holding unsaved changes. Prose, and deliberately outside the
+    #: exit code; anything that makes the run *incomplete* is a :class:`Gap`.
     notes: tuple[str, ...] = ()
+    #: What this run could not compare. Part of completeness, so part of the
+    #: exit code.
+    gaps: tuple[Gap, ...] = ()
 
     def of(self, status: Status) -> tuple[Row, ...]:
         return tuple(r for r in self.rows if r.status is status)
@@ -136,8 +167,14 @@ class Report:
     def complete(self) -> bool:
         """Every instance was actually compared. A "no drift" answer is only
         worth anything when this is true, which is why the exit code checks it
-        before it checks for drift."""
-        return not self.inconclusive
+        before it checks for drift.
+
+        Gaps count, and that they did not is #102: a kind whose ``list_refs``
+        raised produced a note and no rows, so ``inconclusive`` was empty, the
+        report called itself complete, and a CI gate went green over a kind
+        nobody could read.
+        """
+        return not self.inconclusive and not self.gaps
 
     @property
     def counts(self) -> dict[str, int]:
@@ -155,6 +192,7 @@ class Report:
             "exit_code": self.exit_code,
             "counts": self.counts,
             "notes": list(self.notes),
+            "gaps": [g.as_json() for g in self.gaps],
             "rows": [r.as_json() for r in self.rows],
         }
 
@@ -183,38 +221,56 @@ def _instances(ctx: Ctx, registry: Registry, kind: str) -> tuple[list[Ref], str]
         return [], reason
 
 
-class IntentSource(Protocol):
-    """Where "what this instance should be" comes from.
+def _undeclarable(
+    intent: IntentSource, refs: Sequence[Ref], wanted: Sequence[str]
+) -> list[Gap]:
+    """Declared instances the live enumeration never produced.
 
-    The seam, and the only thing this module knows about intent. Two
-    implementations today: the candidate store (what the operator typed) and
-    :class:`pyecsdwan.desired.Declared` (a directory of YAML in git). Both
-    materialize through the *same*
-    :func:`~pyecsdwan.candidate.materialize_desired`, so `drift` can never
-    report something `commit` would not do.
+    This report compares live instances against intent, so its universe is
+    whatever ``list_refs`` returns. Intent naming something outside that
+    universe was simply dropped — and #102 is what that costs: declare a new
+    instance in a desired-state directory, run the CI drift check, and it
+    reports clean, because the thing you declared does not exist yet and so
+    was never enumerated to be compared. ``apply --from`` plans it as a change.
+    Drift said clean; apply would write. Same intent, two answers.
+
+    Reported as gaps rather than as rows, deliberately. A row would have to
+    claim a *status*, and whether a declared-but-absent instance is an "add",
+    a drift, or an error is the declarative-semantics question #101 is open to
+    settle — it depends on whether files are authoritative or additive, which
+    nobody has ratified. What needs no ratification is that the run is not
+    complete: something was declared and nothing compared it, so this must not
+    exit 0. Fail closed now, classify once the contract exists.
     """
-
-    def item_for(self, ref: Ref) -> CandidateItem | None: ...
-
-    def desired_for(self, item: CandidateItem, current: Any) -> Any: ...
-
-
-@dataclasses.dataclass(frozen=True)
-class CandidateIntent:
-    """The candidate store as an :class:`IntentSource`.
-
-    An adapter rather than a method on ``CandidateStore``: the store is
-    transaction machinery with a file lock, and it should not grow an interface
-    that exists for a read-only report.
-    """
-
-    store: CandidateStore
-
-    def item_for(self, ref: Ref) -> CandidateItem | None:
-        return self.store.items.get(ref.key())
-
-    def desired_for(self, item: CandidateItem, current: Any) -> Any:
-        return self.store.desired_for(item, current)
+    covered = {ref.key() for ref in refs}
+    scope = set(wanted)
+    out: list[Gap] = []
+    for item in intent.ordered_items():
+        if item.ref_key in covered:
+            continue
+        try:
+            ref = Ref.from_key(item.ref_key)
+        except ValueError:
+            # A key this module cannot parse is still intent it did not
+            # compare, so it is still a gap — just an unnamed one.
+            out.append(Gap(scope="declared", name=item.ref_key, reason="unparseable ref key"))
+            continue
+        if ref.kind not in scope:
+            # Filtered out by --kind. Not a gap: the operator narrowed the
+            # question, and answering a narrower question completely is not
+            # incompleteness.
+            continue
+        out.append(
+            Gap(
+                scope="declared",
+                name=item.ref_key,
+                reason=(
+                    "declared, but no such instance was enumerated on the fabric, "
+                    "so nothing compared it"
+                ),
+            )
+        )
+    return out
 
 
 # -- one row -----------------------------------------------------------------
@@ -329,20 +385,33 @@ def collect(
 ) -> Report:
     """Compare every enumerable instance against declared intent.
 
-    ``intent`` is the candidate store (:class:`CandidateIntent`) or a
-    desired-state directory (:class:`pyecsdwan.desired.Declared`). The report
-    is identical either way — only where "should be" comes from differs.
+    ``intent`` is the candidate store or a desired-state directory
+    (:class:`pyecsdwan.desired.Declared`) — anything implementing
+    :class:`~pyecsdwan.candidate.IntentSource`. The report is identical either
+    way; only where "should be" comes from differs.
     """
     wanted = list(kinds) if kinds is not None else _enumerable(registry)
     refs: list[Ref] = []
     notes: list[str] = []
+    gaps: list[Gap] = []
 
     for kind in wanted:
         found, reason = _instances(ctx, registry, kind)
         if reason:
-            notes.append(f"{registry.cli_name(kind)}: instances could not be listed ({reason})")
+            # A gap, not a note: this run cannot say anything about the kind,
+            # and a report that exits 0 having skipped one is worse than no
+            # report (#102).
+            gaps.append(
+                Gap(
+                    scope="kind",
+                    name=registry.cli_name(kind),
+                    reason=f"instances could not be listed ({reason})",
+                )
+            )
             continue
         refs.extend(found)
+
+    gaps.extend(_undeclarable(intent, refs, wanted))
 
     outcomes = fan_out(
         refs,
@@ -371,4 +440,6 @@ def collect(
     if unsaved:
         notes.append(unsaved)
     rows.sort(key=lambda r: (r.noun, r.appliance, r.name))
-    return Report(rows=tuple(rows), notes=tuple(notes))
+    return Report(rows=tuple(rows), notes=tuple(notes), gaps=tuple(sorted(
+        gaps, key=lambda g: (g.scope, g.name)
+    )))

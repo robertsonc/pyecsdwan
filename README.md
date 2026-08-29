@@ -51,7 +51,24 @@ export ECSDWAN_API_KEY=<api key>        # or store it in the OS keyring
 ./ec-cli show appliances
 ```
 
-Credentials are never taken on argv. TLS verification is on by default
+The keyring is looked up under service `pyecsdwan`, username = the
+Orchestrator host, and is read only when `ECSDWAN_API_KEY` is unset. There is
+no `ec-cli` command to write it yet — use the `keyring` tool, which is where
+rotation happens too:
+
+```bash
+keyring set pyecsdwan orchestrator.example.com     # store or rotate
+keyring del pyecsdwan orchestrator.example.com     # revoke locally
+```
+
+A keyring that is installed but will not open (locked session, no D-Bus) is
+reported as such rather than treated as "no key stored" — those are different
+answers, and being told the second when the first is true sends you to
+re-store a key that was already there.
+
+Credentials are never taken on argv, never written to the journal, and never
+printed: `Settings` redacts its own key in `repr`, and API responses are
+scrubbed before they are raised or journaled. TLS verification is on by default
 (`--insecure` exists, and nags). `commit confirm` requires API-key auth — a
 background watchdog cannot replay an interactive login.
 
@@ -136,7 +153,15 @@ desired/
       bgp/config.yaml
 ```
 
-Then `ec-cli drift --from desired/`. The directories are the same user-facing
+Then `ec-cli drift --from desired/` to see what differs, and
+`ec-cli apply --from desired/` to commit it as one transaction —
+`--dry-run` writes nothing and exits 1 if it would change anything, which is
+the CI gate. Apply is the same planner, guards and journal as `commit`; only
+the intent comes from git. It refuses if you have staged work in the candidate,
+because one transaction carrying both intents would commit changes the
+directory never declared.
+
+The directories are the same user-facing
 nouns the commands take — never registry kinds, which is not cosmetic: the kind
 behind a per-appliance banner is `appliance/banners`, and a path separator in a
 directory name would silently become two levels. Each file *is* that instance's
@@ -189,7 +214,32 @@ journal and reports exactly what state the fabric is in. Orphaned unconfirmed
 transactions (CLI or host died) are detected on every start; recover with
 `rollback --pending`.
 
-State lives under `~/.pyecsdwan/` (journal doubles as the audit log).
+State lives under `~/.pyecsdwan/` (journal doubles as the audit log), and the
+journal comes back out as one:
+
+```bash
+ec-cli show journal                     # transactions, newest first
+ec-cli show journal --json              # the same, machine-readable
+ec-cli show journal --events            # every event as NDJSON -> a SIEM
+```
+
+Add `--txn <id>` to any of those to select one transaction; an id that is not
+in the journal is an error rather than an empty export, because a pipeline
+reading zero lines would record that nothing happened.
+
+`--events` is one self-contained record per line — stamped with its transaction
+and Orchestrator, oldest first, so a line still means something after a log
+shipper has torn it out of its file. Snapshot bodies are **redacted by
+default**: the journal is `0600` precisely because a snapshot holds a whole
+appliance object, and exporting is distribution. What survives redaction is a
+SHA-256 of the canonical body and its size, so an auditor can still prove two
+exports describe the same state — or that a restore matched what was captured —
+without ever seeing the config. `--include-snapshots` opts in.
+
+A journal directory too corrupt to open is named rather than skipped, on every
+one of these surfaces (and on stderr for `--events`, where a warning in the
+stream would break the consumer). An audit trail that quietly described a
+smaller history than the one on disk would be worse than none.
 
 ## Development
 

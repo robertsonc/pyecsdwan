@@ -71,7 +71,7 @@ def world(state_home: Any, mock_server: tuple[str, MockState]) -> dict[str, Any]
 
 def _collect(world: dict[str, Any], **kw: Any) -> drift.Report:
     return drift.collect(
-        world["ctx"], default_registry, drift.CandidateIntent(world["candidate"]), **kw
+        world["ctx"], default_registry, world["candidate"], **kw
     )
 
 
@@ -156,7 +156,7 @@ def test_a_tier_1_kind_is_never_fetched(world: dict[str, Any]) -> None:
     registry = Registry()
     registry.register(Stub())
     report = drift.collect(
-        world["ctx"], registry, drift.CandidateIntent(world["candidate"]), kinds=["stubbed"]
+        world["ctx"], registry, world["candidate"], kinds=["stubbed"]
     )
 
     assert not fetched, "a Tier-1 stub was fetched despite having no canonical form"
@@ -182,7 +182,7 @@ def test_an_unreadable_instance_is_a_row_not_a_silence(world: dict[str, Any]) ->
     registry = Registry()
     registry.register(Broken())
     report = drift.collect(
-        world["ctx"], registry, drift.CandidateIntent(world["candidate"]), kinds=["broken"]
+        world["ctx"], registry, world["candidate"], kinds=["broken"]
     )
 
     assert len(report.rows) == 1
@@ -190,12 +190,7 @@ def test_an_unreadable_instance_is_a_row_not_a_silence(world: dict[str, Any]) ->
     assert "503" in report.rows[0].detail
 
 
-def test_a_kind_whose_instances_cannot_be_listed_becomes_a_note(
-    world: dict[str, Any],
-) -> None:
-    """Enumeration failing is not the same as having no instances, and the
-    report must not quietly report the second."""
-
+def _unlistable_registry() -> Registry:
     class Unlistable(Resource):
         kind = "unlistable"
         scope = Scope.ORCHESTRATOR
@@ -206,12 +201,121 @@ def test_a_kind_whose_instances_cannot_be_listed_becomes_a_note(
 
     registry = Registry()
     registry.register(Unlistable())
+    return registry
+
+
+def test_a_kind_whose_instances_cannot_be_listed_cannot_exit_zero(
+    world: dict[str, Any],
+) -> None:
+    """Issue #102, and the sharpest lesson in this file.
+
+    The previous version of this test asserted the failure was *recorded* — no
+    rows, and a note naming the 403 — and stopped there. Both assertions
+    passed, and the report still exited 0, because `exit_code` reads rows and
+    notes were prose. A CI drift gate went green over a kind nobody could
+    read, while this module's own docstring promised "incompleteness outranks
+    drift".
+
+    Recording a fact and acting on it are different things, and a test that
+    only checks the recording will not notice. So this asserts the exit code —
+    the thing a pipeline actually consumes — and the note-to-gap move is what
+    makes it true.
+    """
     report = drift.collect(
-        world["ctx"], registry, drift.CandidateIntent(world["candidate"]), kinds=["unlistable"]
+        world["ctx"], _unlistable_registry(), world["candidate"], kinds=["unlistable"]
     )
 
-    assert not report.rows
-    assert any("could not be listed" in n and "403" in n for n in report.notes)
+    assert report.exit_code == drift.EXIT_PARTIAL
+    assert not report.complete
+    assert not report.rows, "no instance was listed, so there is nothing to row"
+    gap = next(g for g in report.gaps if g.scope == "kind")
+    assert gap.name == "unlistable"
+    assert "403" in gap.reason
+
+
+def test_the_failed_kind_is_named_not_just_counted(world: dict[str, Any]) -> None:
+    """An operator told "1 scope could not be compared" has to go and find
+    which one. The gap carries the noun so they do not have to."""
+    report = drift.collect(
+        world["ctx"], _unlistable_registry(), world["candidate"], kinds=["unlistable"]
+    )
+    assert "unlistable" in json.dumps(report.as_json())
+
+
+# -- intent the enumeration never reached (#102) ------------------------------
+
+
+def _declaring(tmp_path: Any, rel: str, body: str) -> Any:
+    from pyecsdwan import desired
+
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    return desired.load(default_registry, tmp_path)
+
+
+def test_a_declared_instance_the_fabric_lacks_is_not_silence(
+    world: dict[str, Any], tmp_path: Any
+) -> None:
+    """Issue #102, and it falsified this PR's own headline claim.
+
+    `drift` enumerates *live* refs and compares each against intent, so intent
+    naming something that does not exist yet was simply dropped. That is the
+    first thing anyone does with GitOps — declare a new object and check the
+    diff — and the answer was "clean, exit 0". Meanwhile `apply --from` plans
+    the very same directory as a five-path change.
+
+    The shared `IntentSource` guaranteed both sides compute desired state the
+    same way. It never guaranteed they consider the same *set of refs*, and I
+    claimed the stronger property because the test that "proved" it compared
+    plans for a ref that happened to exist in both.
+    """
+    # `list_refs` for this kind yields one "global" per appliance, so a
+    # differently-named instance is declared-but-not-on-the-fabric.
+    declared = _declaring(
+        tmp_path, "appliances/BR1-EC/banners/not-on-this-fabric.yaml",
+        "issue: declared but absent\n",
+    )
+
+    report = drift.collect(world["ctx"], default_registry, declared, kinds=[KIND])
+
+    assert report.exit_code != drift.EXIT_OK
+    assert not report.complete
+    gap = next(g for g in report.gaps if g.scope == "declared")
+    assert "not-on-this-fabric" in gap.name
+
+
+def test_a_declared_instance_the_fabric_has_is_compared_not_gapped(
+    world: dict[str, Any], tmp_path: Any
+) -> None:
+    """Guards the guard. A gap raised for *every* declared ref would satisfy
+    the test above and make the command permanently incomplete — which is the
+    same as useless, just louder."""
+    declared = _declaring(
+        tmp_path, "appliances/BR1-EC/banners/global.yaml", "issue: declared\n"
+    )
+
+    report = drift.collect(world["ctx"], default_registry, declared, kinds=[KIND])
+
+    assert not [g for g in report.gaps if g.scope == "declared"]
+    assert report.rows
+
+
+def test_kind_filtering_does_not_manufacture_gaps(
+    world: dict[str, Any], tmp_path: Any
+) -> None:
+    """`--kind` narrows the question. Answering a narrower question completely
+    is not incompleteness, and reporting it as such would make the filter
+    unusable with any real desired-state directory."""
+    declared = _declaring(
+        tmp_path, "appliances/BR1-EC/banners/not-on-this-fabric.yaml",
+        "issue: declared but absent\n",
+    )
+
+    report = drift.collect(world["ctx"], default_registry, declared, kinds=["bio"])
+
+    assert not report.gaps
+    assert report.exit_code == drift.EXIT_OK
 
 
 # -- the exit code -----------------------------------------------------------
@@ -248,6 +352,27 @@ def test_incompleteness_outranks_drift(blind: drift.Status) -> None:
     assert report.exit_code == drift.EXIT_PARTIAL
     assert report.drifted  # ... and the drift is still in the report
     assert not report.complete
+
+
+def test_a_gap_alone_makes_a_run_incomplete() -> None:
+    """Stated on the type, not only through `collect`: `Report` is what the
+    CLI, the renderer and the JSON all read, so completeness has to be a
+    property of the report rather than of the code path that built it."""
+    report = drift.Report(
+        rows=(drift.Row(noun="k", kind="k", name="a", appliance="", status=drift.Status.IN_SYNC),),
+        gaps=(drift.Gap(scope="kind", name="k", reason="403"),),
+    )
+    assert not report.complete
+    assert report.exit_code == drift.EXIT_PARTIAL
+
+
+def test_a_gap_outranks_drift_too() -> None:
+    report = drift.Report(
+        rows=(drift.Row(noun="k", kind="k", name="a", appliance="", status=drift.Status.DRIFT),),
+        gaps=(drift.Gap(scope="declared", name="k:x", reason="never compared"),),
+    )
+    assert report.exit_code == drift.EXIT_PARTIAL
+    assert report.drifted
 
 
 def test_completeness_is_about_comparison_not_success() -> None:

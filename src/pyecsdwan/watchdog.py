@@ -18,10 +18,15 @@ Credentials: the watchdog re-reads ``ECSDWAN_*`` environment variables
 session-login auth cannot be replayed by a background process, which is why
 the transaction engine refuses ``commit confirm`` without an API key.
 
-An optional systemd user-timer backend is documented in
+An optional systemd transient-*service* backend is documented in
 ``docs/watchdog-backends.md`` but is NOT the default: on SSH-only accounts it
-requires ``loginctl enable-linger`` or the user manager (and the timer with
+requires ``loginctl enable-linger``, or the user manager (and the service with
 it) dies with the last SSH session.
+
+Note it is a service, not a timer. The orphan scan asks "is a process driving
+this transaction?" by probing the pid in ``watchdog.pid``, so a backend that
+only *schedules* the watchdog leaves no pid for the whole confirm window and
+makes every armed transaction look orphaned. See that doc's "Why not a timer".
 
 Run directly (used by the arming code, and by tests with ``--foreground``)::
 

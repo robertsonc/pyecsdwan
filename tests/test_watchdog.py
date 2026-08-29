@@ -15,7 +15,7 @@ import pytest
 
 from pyecsdwan import config, txn, watchdog
 from pyecsdwan.contract import Ref
-from pyecsdwan.journal import TxnJournal, TxnState
+from pyecsdwan.journal import TxnJournal, TxnState, orphaned_txns
 
 
 def _make_unconfirmed_txn(deadline_offset_s: float) -> TxnJournal:
@@ -27,6 +27,80 @@ def _make_unconfirmed_txn(deadline_offset_s: float) -> TxnJournal:
     )
     journal.set_state(TxnState.APPLIED_UNCONFIRMED)
     return journal
+
+
+# -- what any alternative backend has to satisfy ------------------------------
+
+
+def test_an_armed_txn_with_no_live_process_is_reported_orphaned(state_home: Any) -> None:
+    """The contract every watchdog backend must meet, stated as a test.
+
+    `orphaned_txns` decides "is anyone driving this transaction?" by probing
+    the pid in `watchdog.pid` for liveness. So a backend must run a *process*
+    for the whole confirm window — not merely schedule one.
+
+    `docs/watchdog-backends.md` used to propose `systemd-run --user
+    --on-active=<minutes>`, a transient *timer*, while also promising the
+    pid-file contract could stay identical "so the orphan scan still works".
+    Those two cannot both hold: a timer runs nothing until it fires, so during
+    the window there is no pid, and this assertion fires for every armed
+    transaction — the startup scan would tell the operator that a perfectly
+    healthy commit-confirm needs `rollback --pending`.
+
+    That is why the doc now proposes a transient *service* running
+    `--foreground`. This test is here so the next person to reach for a timer
+    finds out from the suite rather than from a fabric.
+    """
+    journal = _make_unconfirmed_txn(deadline_offset_s=600)
+    assert not journal.watchdog_alive(), "no backend started a process"
+
+    orphans = orphaned_txns()
+
+    assert [t.meta.txn_id for t in orphans] == [journal.meta.txn_id]
+
+
+def test_a_live_process_is_what_clears_it(state_home: Any) -> None:
+    """Guards the guard. If `orphaned_txns` reported everything unconfirmed,
+    the test above would pass while saying nothing about liveness at all."""
+    journal = _make_unconfirmed_txn(deadline_offset_s=600)
+    journal.write_watchdog_pid(os.getpid())  # this test process stands in
+
+    assert journal.watchdog_alive()
+    assert orphaned_txns() == []
+
+
+def test_a_stale_pid_file_is_not_proof_of_a_watchdog(state_home: Any) -> None:
+    """`docs/watchdog-backends.md` lists "watchdog killed manually" as covered
+    by "the same orphan scan (pid liveness probe)". Nothing tested the probe:
+    the tests above never reach it, because a transaction with *no* pid file
+    fails earlier, on the read. The mutation sweep found it — `pid_alive`
+    hard-wired to True left them all green.
+
+    If that ever regresses, a killed watchdog looks alive forever and its
+    transaction is never offered for recovery: the fabric keeps an unconfirmed
+    change nobody is watching, which is the one state commit-confirm exists to
+    make impossible.
+    """
+    journal = _make_unconfirmed_txn(deadline_offset_s=600)
+    dead = subprocess.Popen([sys.executable, "-c", ""])
+    dead.wait()
+    journal.write_watchdog_pid(dead.pid)
+
+    assert not journal.watchdog_alive()
+    assert [t.meta.txn_id for t in orphaned_txns()] == [journal.meta.txn_id]
+
+
+def test_a_recycled_pid_is_not_proof_either(state_home: Any) -> None:
+    """The other half, and the reason the pid file carries a start-time token:
+    after a reboot or pid wraparound some unrelated process can hold the number
+    the watchdog used to have. A bare liveness check would call that alive."""
+    journal = _make_unconfirmed_txn(deadline_offset_s=600)
+    # This process is genuinely alive — only the start token is wrong, which is
+    # exactly what a recycled pid looks like.
+    journal.watchdog_pid_file.write_text(f"{os.getpid()} 0", encoding="utf-8")
+
+    assert not journal.watchdog_alive()
+    assert [t.meta.txn_id for t in orphaned_txns()] == [journal.meta.txn_id]
 
 
 def test_foreground_watch_exits_on_marker(state_home: Any) -> None:

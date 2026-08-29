@@ -36,7 +36,7 @@ import re
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from pyecsdwan import config
 from pyecsdwan.contract import Ref
@@ -85,6 +85,30 @@ def prune_path(state: dict[str, Any], path: list[str]) -> None:
         node = node[seg]
     if isinstance(node, dict):
         node.pop(path[-1], None)
+
+
+class IntentSource(Protocol):
+    """Where "what this instance should be" comes from.
+
+    Two things implement it: :class:`CandidateStore` (what the operator typed
+    since the last commit) and :class:`pyecsdwan.desired.Declared` (a directory
+    of YAML in git). ``txn.build_plan`` and ``reports.drift`` both consume it,
+    so a declared change and a staged one are planned, diffed, guarded and
+    committed by exactly the same code — the only difference is where the
+    intent came from.
+
+    That sameness is the point. Two paths that materialized desired state
+    differently would let `drift` report something `apply` would not do.
+    """
+
+    def ordered_items(self) -> list[CandidateItem]:
+        """Every staged/declared item. Dependency ordering is the registry's
+        job, so the order here only has to be deterministic."""
+        ...
+
+    def item_for(self, ref: Ref) -> CandidateItem | None: ...
+
+    def desired_for(self, item: CandidateItem, current_canonical: Any) -> Any: ...
 
 
 @dataclasses.dataclass
@@ -196,6 +220,14 @@ class CandidateStore:
 
     def ordered_items(self) -> list[CandidateItem]:
         return list(self.items.values())
+
+    def item_for(self, ref: Ref) -> CandidateItem | None:
+        """Lookup half of :class:`IntentSource`.
+
+        Deliberately not `_item()`, which *creates* on miss — a report asking
+        "is anything staged for this?" must not stage something by asking.
+        """
+        return self.items.get(ref.key())
 
     def desired_for(self, item: CandidateItem, current_canonical: Any) -> Any:
         """Materialize the desired canonical-input state for one item."""
