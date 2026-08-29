@@ -278,3 +278,75 @@ def test_display_stays_lenient_so_a_corrupt_journal_is_still_visible(state_home)
     path.write_text(path.read_text() + "{not json at all\n", encoding="utf-8")
 
     assert [e["event"] for e in txn.events()] == ["TXN_BEGIN"]
+
+
+# -- the repair's own boundaries ---------------------------------------------
+#
+# `_repair_tail` branches on: no file, empty file, already terminated, a tail
+# that is the *whole* file, a tail that is not valid UTF-8. The tests above
+# cover the two interesting middles; these cover the edges, because #110's
+# fourth criterion asks for every append boundary and shipping the branches
+# untested is how the original bug got in.
+
+
+def test_repair_on_a_journal_with_no_event_log(state_home):
+    """`TxnJournal.open` on a directory whose events.jsonl never got created —
+    the crash happened between mkdir and the first append."""
+    txn = _create()
+    (txn.dir / "events.jsonl").unlink()
+
+    txn.append("APPLY_START", ref="x")
+
+    assert [e["event"] for e in txn.events()] == ["APPLY_START"]
+
+
+def test_repair_on_an_empty_event_log(state_home):
+    """Zero bytes is well-formed, not torn. Truncating or terminating it would
+    write a JOURNAL_REPAIRED into a log that had nothing wrong with it."""
+    txn = _create()
+    (txn.dir / "events.jsonl").write_bytes(b"")
+
+    txn.append("APPLY_START", ref="x")
+
+    assert [e["event"] for e in txn.events()] == ["APPLY_START"]
+
+
+def test_a_file_that_is_nothing_but_a_fragment(state_home):
+    """The `cut == 0` branch: the crash landed before any record completed, so
+    there is no preceding newline to cut back to and the whole file goes."""
+    txn = _create()
+    (txn.dir / "events.jsonl").write_bytes(b'{"ts": "2026-01-01", "eve')
+
+    txn.append("APPLY_START", ref="x")
+
+    events = [e["event"] for e in txn.events()]
+    assert events == ["JOURNAL_REPAIRED", "APPLY_START"]
+
+
+def test_a_tail_of_invalid_utf8_is_discarded_not_crashed(state_home):
+    """A partial write can cut a multi-byte character in half. Decoding it
+    raises something other than JSONDecodeError, and an append that died here
+    would leave the journal permanently unwritable — the failure mode being
+    fixed, with an extra step."""
+    txn = _create()
+    with open(txn.dir / "events.jsonl", "ab") as fh:
+        fh.write(b'{"ts": "2026-01-01", "event": "\xe2\x82')  # truncated euro sign
+
+    txn.append("APPLY_START", ref="x")
+
+    events = [e["event"] for e in txn.events()]
+    assert "APPLY_START" in events
+    repair = next(e for e in txn.events() if e["event"] == "JOURNAL_REPAIRED")
+    assert repair["action"] == "discarded"
+
+
+def test_repair_is_idempotent_across_consecutive_appends(state_home):
+    """Once repaired, the log is well-formed, so the next append must not
+    repair again — a JOURNAL_REPAIRED per event would drown the audit trail."""
+    txn = _create()
+    _tear(txn)
+    txn.append("APPLY_START", ref="x")
+    txn.append("VERIFIED", ref="x")
+
+    repairs = [e for e in txn.events() if e["event"] == "JOURNAL_REPAIRED"]
+    assert len(repairs) == 1
