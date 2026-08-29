@@ -127,12 +127,26 @@ def render_bgp_summary(console: Console, state: BgpState) -> None:
     table = Table(show_header=False, box=None)
     table.add_column("field", style="dim")
     table.add_column("value")
+    # Peers are counted from the neighbours the response actually listed, not
+    # from the summary block's own tally (#87). A live appliance sent neither
+    # `num_peers` nor `num_peers_active`, so this row read "None active of
+    # None" — a Python repr in operator output — directly above a table of two
+    # established sessions parsed from the same response. What we can verify is
+    # the rows; the summary's claim is shown too, and only when it disagrees.
+    peers = f"{state.observed_established} established of {state.observed_peers} observed"
+    if state.summary_peer_counts_missing:
+        peers += "  (the summary block reported no counts)"
+    elif state.summary_peer_counts_disagree:
+        peers += (
+            f"  (the summary block says {summary.num_peers_active} active "
+            f"of {summary.num_peers} — same response, disagreeing)"
+        )
     rows: list[tuple[str, object]] = [
-        ("state", f"{summary.state_name} ({summary.bgp_state})"),
+        ("state", summary.state_label),
         ("local ASN", summary.local_asn),
         ("router id", summary.rtr_id),
         ("local ip", summary.local_ip),
-        ("peers", f"{summary.num_peers_active} active of {summary.num_peers}"),
+        ("peers", peers),
         ("routes received", summary.num_bgp_rtes_rcvd),
         ("  from eBGP", summary.num_ebgp_rtes),
         ("  from iBGP", summary.num_ibgp_rtes),

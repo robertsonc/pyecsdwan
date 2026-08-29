@@ -63,18 +63,37 @@ BGP_STATE_PATH = "/bgp/state"
 #: below. Configuration, deliberately kept separate from the state above.
 BGP_CONFIG_NEIGHBOR = "bgp/config/neighbor"
 
-#: `summary.bgp_state`, documented inline in the schema. 0 and 1 are both
-#: ordinary answers; see the module docstring.
+#: `summary.bgp_state`, transcribed from the vendored schema's own enumeration.
+#:
+#: **These were wrong until #87, and wrong in the worst possible direction.**
+#: The first version used the standard BGP *peer* finite-state-machine names —
+#: idle / connect / opensent / openconfirm / established — which are what
+#: "BGP state" means almost everywhere else. This field is not that. The
+#: appliance schema describes it as "Overall state of the routerd & bgp
+#: processes" and enumerates:
+#:
+#:     0 = Not Enabled, 1 = Down, 2 = Mgmt Stub Initializing,
+#:     3 = Mgmt Stub Active, 4 = RTM Initializing, 5 = RTM Active,
+#:     6 = RM Initializing, 7 = RM Active, 8 = NM Initializing,
+#:     9 = Active, 10 = Unknown
+#:
+#: So an appliance reporting 6 was being told it was **"established"** when the
+#: appliance meant "RM Initializing" — a confident wrong answer about whether
+#: BGP is up, which is the one thing this view exists to answer. Codes 2
+#: through 8 were all misreported; only 0, 1, 9 and 10 happened to line up.
+#:
+#: The names are the schema's, lower-cased and nothing else. Do not "improve"
+#: them into peer-state vocabulary: the resemblance is the trap.
 BGP_STATE_NAMES: dict[int, str] = {
     0: "not enabled",
     1: "down",
-    2: "idle",
-    3: "connect",
-    4: "opensent",
-    5: "openconfirm",
-    6: "established",
-    7: "shutdown",
-    8: "clearing",
+    2: "mgmt stub initializing",
+    3: "mgmt stub active",
+    4: "rtm initializing",
+    5: "rtm active",
+    6: "rm initializing",
+    7: "rm active",
+    8: "nm initializing",
     9: "active",
     10: "unknown",
 }
@@ -143,6 +162,24 @@ class BgpSummary:
         return BGP_STATE_NAMES.get(self.bgp_state, f"code {self.bgp_state}")
 
     @property
+    def state_label(self) -> str:
+        """The state as an operator should read it, composed in one place.
+
+        Rendering used to be ``f"{state_name} ({bgp_state})"``, which prints
+        "code 11 (11)" for a code the schema does not list — the number twice
+        and no hint that the tool did not recognise it. A live appliance
+        reported exactly that (#87): the vendored 7.2.0 enumeration stops at
+        10, so 11 is a state this baseline has never heard of. Saying so is
+        the answer; guessing the nearest name would not be.
+        """
+        if self.bgp_state is None:
+            return "unknown (the summary block reported no state)"
+        name = BGP_STATE_NAMES.get(self.bgp_state)
+        if name is None:
+            return f"unrecognised code {self.bgp_state} — not in the 7.2.0 schema"
+        return f"{name} ({self.bgp_state})"
+
+    @property
     def enabled(self) -> bool:
         """`bgp_state == 0` means BGP is not turned on here — an answer."""
         return self.bgp_state != 0
@@ -164,6 +201,57 @@ class BgpState:
     neighbor_count: int | None
     #: True when the response was served from the Orchestrator's cache.
     cached: bool
+
+    @property
+    def observed_peers(self) -> int:
+        """Peers the state response actually reported.
+
+        Configured-only rows are excluded — they came from the config read, not
+        from the appliance's live view, and counting them here would restate
+        configuration as observation.
+        """
+        return sum(1 for n in self.neighbors if not n.configured_only)
+
+    @property
+    def observed_established(self) -> int:
+        """Peers the appliance itself calls established.
+
+        Read off ``peer_state_str`` — the appliance's own word — rather than
+        inferred from a numeric code we would have to map, which is precisely
+        the mapping that #87 found to be wrong.
+        """
+        return sum(
+            1
+            for n in self.neighbors
+            if not n.configured_only and n.peer_state_str.strip().lower() == "established"
+        )
+
+    @property
+    def summary_peer_counts_missing(self) -> bool:
+        """The summary block carried neither peer count.
+
+        A live appliance did exactly this (#87) and the report rendered "peers
+        None active of None" beside a neighbours table listing two established
+        sessions — a Python ``None`` leaking into operator output, next to a
+        contradiction of it.
+        """
+        return self.summary.num_peers is None and self.summary.num_peers_active is None
+
+    @property
+    def summary_peer_counts_disagree(self) -> bool:
+        """The summary's own counts contradict the peers it listed.
+
+        Not an error to resolve by picking a side: both numbers came from the
+        same response, and the report shows both rather than choosing which one
+        the operator should have been told.
+        """
+        if self.summary_peer_counts_missing:
+            return False
+        claimed_total = self.summary.num_peers
+        claimed_active = self.summary.num_peers_active
+        if claimed_total is not None and claimed_total != self.observed_peers:
+            return True
+        return claimed_active is not None and claimed_active != self.observed_established
 
     @property
     def rows_match_count(self) -> bool:
