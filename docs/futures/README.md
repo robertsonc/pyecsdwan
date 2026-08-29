@@ -330,17 +330,19 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   version-aware
   sort before 9.10 ships. Found while building #51; not fixed here because
   `specs.py` was owned by parallel work.
-- **`loopback.reclaim_deleted_ips()` builds a path that does not exist.** It
-  calls `DELETE /loopbackOrch/pool/reclaim/{id}` when given a `loopback_id`,
-  but neither vendored baseline has that path — the Orchestrator spec's
-  `DELETE /loopbackOrch/pool/reclaim` takes `id` as a **required query
-  parameter** ("Reclaim all deleted ip addresses or Reclaim deleted ip address
-  by id"). Both call forms are therefore wrong: the by-id one 404s, and the
-  "all" one omits a parameter the spec marks required. Found by #28's
-  declared-endpoints-exist-in-spec check; the function is a maintenance
-  helper no `apply()` path reaches, so it was left alone rather than fixed
-  in a coverage change. `Resource.endpoints` for `loopback-orch` declares only
-  the real `DELETE /loopbackOrch/pool/reclaim`.
+- **Bulk loopback reclaim is documented but unexposed, and "reclaim all" is
+  unresolved.** Fixing #60 settled the by-id call (`id` is a query parameter;
+  `/reclaim/{id}` is not a route) but not the other half of the vendor's own
+  summary, "Reclaim all deleted ip addresses **or** Reclaim deleted ip address
+  by id" — that operation's only parameter is `id`, marked required, so one
+  half of the sentence has no route behind it in anything vendored here.
+  `reclaim_deleted_ips()` therefore requires an id and the all-mode is not
+  offered. Two questions for whoever has a fabric: does an id-less
+  `DELETE /loopbackOrch/pool/reclaim` reclaim everything or 400, and are
+  `DELETE /loopbackOrch/pool/reclaimBySeg?segId=` and
+  `.../reclaimBySegRegSubnet?seg=&reg=&subnet=` (both unambiguous, neither
+  exposed) the intended bulk surface? See
+  `resources/loopback.RECLAIM_ALL_HAS_NO_KNOWN_ROUTE`.
 - **`appliance POST /virtualif/loopback` exists but `appliance/loopback` still
   refuses to write.** The module says "no documented endpoint" for the write
   path and `apply()` raises; the appliance baseline does list POST (and

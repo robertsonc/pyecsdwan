@@ -1899,8 +1899,12 @@ class MockState:
     loopback_orch: dict[str, Any] = field(default_factory=_seed_loopback_orch)
     #: Pool allocation detail ({segmentId: {segment, subnet, totalAddr,
     #: addrAllocated, addrDeleted}}) — mutated only by the reclaim
-    #: endpoints' addrDeleted bookkeeping, never by POST /loopbackOrch.
+    #: endpoint's addrDeleted bookkeeping, never by POST /loopbackOrch.
     loopback_orch_pool: dict[str, Any] = field(default_factory=_seed_loopback_orch_pool)
+    #: Ids passed to DELETE /loopbackOrch/pool/reclaim, in order. The pool
+    #: counter alone cannot show *which* id was sent, which is how the path-vs-
+    #: query bug (#60) went unobserved here.
+    loopback_reclaimed_ids: list[int] = field(default_factory=list)
     # -- internal subnets (#37) --
     #: Fabric-wide internal-subnet table, replaced wholesale by
     #: POST /gms/internalSubnets2.
@@ -2841,21 +2845,29 @@ def create_app(state: MockState | None = None) -> FastAPI:
     async def get_loopback_orch_pool() -> Any:
         return mock.loopback_orch_pool
 
-    @api.delete("/loopbackOrch/pool/reclaim/{loopback_id}")
-    async def reclaim_one_loopback_ip(loopback_id: int) -> Response:
+    # One route, `id` as a required query parameter — which is all the vendored
+    # sources describe (#60). This mock used to serve two: a
+    # `/reclaim/{loopback_id}` path form that exists in neither the 7.2.0
+    # baseline nor the vendor's 9.3-9.6 collections, and an argument-less
+    # "reclaim all". The resource called both, so the suite confirmed a request
+    # a real Orchestrator would 404 rather than catching it.
+    #
+    # Neither is modeled now. The path form is not a route; the all-mode is the
+    # unresolved half of the vendor's own summary (see
+    # `resources/loopback.RECLAIM_ALL_HAS_NO_KNOWN_ROUTE`) and inventing a
+    # behavior for it here is exactly how the last invented route survived. A
+    # missing `id` is rejected, per the baseline's `required: true`.
+    @api.delete("/loopbackOrch/pool/reclaim")
+    # `id` shadows the builtin on purpose: FastAPI binds the query key from
+    # the parameter name, and the wire name is `id`.
+    async def reclaim_loopback_ip(id: int) -> Response:
+        mock.loopback_reclaimed_ids.append(id)
         # Mock bookkeeping only: decrements segment "0"'s addrDeleted count
         # (no per-id deleted-ip history is modeled here) so the route is
         # observably real rather than a no-op 204.
         pool = mock.loopback_orch_pool.get("0")
         if isinstance(pool, dict) and pool.get("addrDeleted", 0) > 0:
             pool["addrDeleted"] -= 1
-        return Response(status_code=204)
-
-    @api.delete("/loopbackOrch/pool/reclaim")
-    async def reclaim_all_loopback_ips() -> Response:
-        for pool in mock.loopback_orch_pool.values():
-            if isinstance(pool, dict):
-                pool["addrDeleted"] = 0
         return Response(status_code=204)
 
     # -- end loopback (#18) ---------------------------------------------------

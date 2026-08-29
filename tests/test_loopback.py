@@ -435,14 +435,126 @@ def test_orch_pool_detail_view(world: dict[str, Any]) -> None:
     }
 
 
-def test_orch_reclaim_all_and_single(world: dict[str, Any]) -> None:
+def test_orch_reclaim_sends_the_id_as_a_query_parameter(world: dict[str, Any]) -> None:
+    """#60. This used to build ``/loopbackOrch/pool/reclaim/42`` — a route in
+    no vendored source — and the mock served it, so this file passed against a
+    request a real Orchestrator would 404.
+
+    Asserted on the id the server *received*, not only on the pool counter:
+    the counter moved either way, which is precisely why the bug survived here.
+    """
     from pyecsdwan.resources.loopback import pool_detail, reclaim_deleted_ips
 
     ctx, state = world["ctx"], world["state"]
     state.loopback_orch_pool["0"]["addrDeleted"] = 3
 
-    reclaim_deleted_ips(ctx, loopback_id=42)
+    reclaim_deleted_ips(ctx, 42)
+
+    assert state.loopback_reclaimed_ids == [42]
     assert pool_detail(ctx)["0"]["addrDeleted"] == 2
 
-    reclaim_deleted_ips(ctx)
-    assert pool_detail(ctx)["0"]["addrDeleted"] == 0
+
+def test_the_invented_reclaim_path_is_gone_from_the_mock(world: dict[str, Any]) -> None:
+    """Guards the guard above. A mock still answering ``/reclaim/42`` would let
+    the old code pass exactly as it did before, so the fix is only worth as
+    much as the fixture no longer agreeing with it."""
+    from pyecsdwan.client import OrchApiError
+
+    with pytest.raises(OrchApiError) as caught:
+        world["client"].delete("/loopbackOrch/pool/reclaim/42")
+    assert caught.value.status_code == 404
+
+
+def test_the_mock_does_not_invent_an_all_mode(world: dict[str, Any]) -> None:
+    """The other half of the fixture's fail-closed stance. Refusing an id-less
+    DELETE is what stops the all-mode being re-added later on the strength of
+    "the mock accepts it" — the same reasoning that made ``/reclaim/{id}`` look
+    verified for as long as it did."""
+    from pyecsdwan.client import OrchApiError
+
+    with pytest.raises(OrchApiError):
+        world["client"].delete("/loopbackOrch/pool/reclaim")
+    assert world["state"].loopback_reclaimed_ids == []
+
+
+def test_reclaim_all_is_not_reachable_by_accident() -> None:
+    """The all-mode is the unresolved half of the vendor's summary and the more
+    dangerous half. It is not that it was forgotten: ``loopback_id`` carries no
+    default, so "reclaim every deleted address fabric-wide" cannot be reached
+    by leaving an argument off."""
+    import inspect
+
+    from pyecsdwan.resources.loopback import reclaim_deleted_ips
+
+    param = inspect.signature(reclaim_deleted_ips).parameters["loopback_id"]
+    assert param.default is inspect.Parameter.empty
+
+
+# -- the claim above, re-derived from the vendored sources --------------------
+
+
+def test_the_baseline_puts_the_reclaim_id_in_the_query_string() -> None:
+    """Re-derived rather than asserted, the way tests/test_retry.py re-derives
+    its classification from ``_specs/``. A constant recording what the vendor
+    says is worth what the check that it still says it is worth."""
+    from pyecsdwan import specs
+
+    endpoint = specs.find_endpoint("orchestrator", "DELETE", "/loopbackOrch/pool/reclaim")
+    assert endpoint is not None
+    assert endpoint.path_param_names == ()
+    query = {p["name"]: p for p in endpoint.parameters("query")}
+    assert set(query) == {"id"}
+    assert query["id"].get("required") is True
+
+
+def test_no_vendored_source_has_a_reclaim_by_path_segment() -> None:
+    """The whole bug in one assertion: there is no ``/reclaim/{id}`` anywhere.
+
+    Swept across both baselines rather than looked up, so a spec refresh that
+    introduced the path form would surface here instead of silently making the
+    module's provenance note stale.
+    """
+    from pyecsdwan import specs
+
+    reclaim = [e for e in specs.iter_endpoints() if "reclaim" in e.path.lower()]
+    assert reclaim, "expected the reclaim endpoints in the vendored baselines"
+    for endpoint in reclaim:
+        assert endpoint.path_param_names == (), endpoint.path
+        assert endpoint.parameters("query"), endpoint.path
+
+
+def test_the_vendor_collections_agree_with_the_baseline() -> None:
+    """The second, independent source: the 9.3-9.6 Postman collections keep the
+    vendor's raw path, query string included. Two sources eight releases apart
+    saying the same thing is what makes this a fix rather than a coin toss."""
+    from pyecsdwan import specs
+
+    example = specs.payload_example("orchestrator", "DELETE", "/loopbackOrch/pool/reclaim")
+    assert example is not None
+    assert str(example["path"]).startswith("/loopbackOrch/pool/reclaim?id=")
+
+
+def test_the_all_mode_tension_is_recorded_not_resolved() -> None:
+    """#60 could have been closed by quietly dropping the all-mode. The reason
+    it is gone has to survive in the repository, or the next reader restores it
+    from the same summary the SDK did."""
+    import inspect
+
+    from pyecsdwan import specs
+    from pyecsdwan.resources import loopback
+
+    endpoint = specs.find_endpoint("orchestrator", "DELETE", "/loopbackOrch/pool/reclaim")
+    assert endpoint is not None
+    # The contradiction itself: one operation, summary promising both modes,
+    # parameter table offering only the by-id one.
+    assert "all deleted ip addresses" in endpoint.summary.lower()
+    assert loopback.RECLAIM_ALL_HAS_NO_KNOWN_ROUTE
+    assert loopback.RECLAIM_ID_IS_A_QUERY_PARAM
+    source = inspect.getsource(loopback)
+    # Where a caller who wanted the all-mode should be sent, and why the
+    # defaulted argument was the hazard rather than an oversight.
+    # Matched with their query strings: plain "reclaimBySeg" is a substring of
+    # "reclaimBySegRegSubnet", so naming only one would satisfy a looser check
+    # — which the mutation sweep for this test duly reported as MISSED.
+    for note in ("reclaimBySeg?segId=", "reclaimBySegRegSubnet?seg=", "Principle VI"):
+        assert note in source, note

@@ -45,9 +45,12 @@ fabric's ``loopbackOrch`` came back empty):
   {"mgmtIP": bool, "label": "<labelId>", "zone": <zoneId>}}}}``.
 * ``GET /loopbackOrch/pool`` — pool allocation detail, read-only (exposed
   below as :func:`pool_detail`, never part of the diffable state).
-* ``DELETE /loopbackOrch/pool/reclaim[/{id}]`` — reclaim deleted IPs back
-  into the pool, an explicit maintenance action, not configuration (exposed
-  below as :func:`reclaim_deleted_ips`).
+* ``DELETE /loopbackOrch/pool/reclaim?id=<id>`` — reclaim one deleted IP
+  back into the pool, an explicit maintenance action, not configuration
+  (exposed below as :func:`reclaim_deleted_ips`). The id is a **query**
+  parameter; there is no ``/reclaim/{id}`` route, though this module both
+  documented and built one until #60 — see
+  :data:`RECLAIM_ID_IS_A_QUERY_PARAM`.
 * ``POST /loopbackOrch`` — **full-structure replace**. The vendored SDK's
   own docstring warns: "This overwrites all loopback Orchestration, must
   use get_loopback_orchestration to get existing ... and then use
@@ -114,6 +117,52 @@ log = structlog.get_logger("pyecsdwan.resources.loopback")
 _LOOPBACK_ORCH_PATH = "/loopbackOrch"
 _LOOPBACK_ORCH_POOL_PATH = "/loopbackOrch/pool"
 _LOOPBACK_ORCH_RECLAIM_PATH = "/loopbackOrch/pool/reclaim"
+
+#: The reclaim id rides in the **query string**, not in the path (#60).
+#:
+#: Two independent vendored sources agree, and neither has a ``/reclaim/{id}``
+#: route at all:
+#:
+#: * ``_specs/orchestrator-openapi-7.2.0.json`` — one operation,
+#:   ``DELETE /loopbackOrch/pool/reclaim``, one parameter ``id``, ``in: query``,
+#:   ``required: true``.
+#: * ``_specs/payload-examples-9.6.json`` — the vendor's own 9.3-9.6 Postman
+#:   collections give the raw path as ``/loopbackOrch/pool/reclaim?id=<n>``.
+#:
+#: What this module built instead was ``/loopbackOrch/pool/reclaim/{id}``,
+#: taken from the vendored SDK (``pyedgeconnect/orch/_loopback_orch.py``),
+#: which is inference rather than capture — see
+#: :data:`RECLAIM_ALL_HAS_NO_KNOWN_ROUTE`. The bundled mock served that
+#: invented path too, so the test suite confirmed the bug instead of catching
+#: it; ``tests/test_loopback.py`` now re-derives this from ``_specs/``.
+RECLAIM_ID_IS_A_QUERY_PARAM = True
+
+#: Whether "reclaim *all* deleted IPs" can be invoked is **unresolved**, so
+#: this module does not offer it (#60).
+#:
+#: The vendor contradicts itself inside a single operation. Its summary — the
+#: same string in the 7.2.0 baseline and in the 9.6 collections — reads
+#: "Reclaim all deleted ip addresses **or** Reclaim deleted ip address by id",
+#: while the only parameter that operation takes is ``id``, marked required,
+#: and every vendor example carries it. One half of that sentence has no route
+#: behind it in anything vendored here.
+#:
+#: The SDK appears to have read the same sentence and split it into two
+#: functions — a no-argument ``reclaim_delete_loopback_orchestration_ips()``
+#: and a ``reclaim_single_deleted_loopback_orchestration_ip(id)`` posting to
+#: ``/reclaim/{id}``. Since the ``{id}`` half is demonstrably not a route, that
+#: pair reads as one ambiguous summary split in two, not as observation, which
+#: is why it does not settle the other half either.
+#:
+#: So the by-id mode is taken and the all mode is left alone. It is also the
+#: more dangerous of the two: an argument-less call that reclaims every deleted
+#: address fabric-wide is the operator surprise Principle VI prohibits, and a
+#: defaulted ``loopback_id=None`` made "reclaim all" the *easiest* thing to
+#: type. Bulk reclaim the vendor does document unambiguously —
+#: ``DELETE /loopbackOrch/pool/reclaimBySeg?segId=<n>`` and
+#: ``.../reclaimBySegRegSubnet?seg=&reg=&subnet=`` — is where a caller who
+#: wants it should be sent by whoever has a fabric to verify it against.
+RECLAIM_ALL_HAS_NO_KNOWN_ROUTE = True
 
 
 def _mapping_or_raise(value: Any, what: str) -> dict[str, Any]:
@@ -364,17 +413,15 @@ def pool_detail(ctx: Ctx) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def reclaim_deleted_ips(ctx: Ctx, loopback_id: int | None = None) -> None:
-    """Reclaim deleted loopback IP(s) back into the pool.
+def reclaim_deleted_ips(ctx: Ctx, loopback_id: int) -> None:
+    """Reclaim one deleted loopback IP back into the pool.
 
-    ``DELETE /loopbackOrch/pool/reclaim`` (all) or
-    ``DELETE /loopbackOrch/pool/reclaim/{id}`` (one, when ``loopback_id`` is
-    given). An explicit maintenance action, not configuration — never part
-    of the diffable state, so it is never invoked from ``apply()``.
+    ``DELETE /loopbackOrch/pool/reclaim?id=<loopback_id>``. An explicit
+    maintenance action, not configuration — never part of the diffable state,
+    so it is never invoked from ``apply()``.
+
+    ``loopback_id`` has no default because the wire marks it required and the
+    vendor's "reclaim all" mode has no route anyone here can point at:
+    :data:`RECLAIM_ID_IS_A_QUERY_PARAM`, :data:`RECLAIM_ALL_HAS_NO_KNOWN_ROUTE`.
     """
-    path = (
-        _LOOPBACK_ORCH_RECLAIM_PATH
-        if loopback_id is None
-        else f"{_LOOPBACK_ORCH_RECLAIM_PATH}/{loopback_id}"
-    )
-    ctx.client.delete(path)
+    ctx.client.delete(_LOOPBACK_ORCH_RECLAIM_PATH, params={"id": loopback_id})
