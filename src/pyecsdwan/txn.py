@@ -609,7 +609,22 @@ def _revert_items(
     snapshots = journal.snapshots()
     revert_failures: list[str] = []
     for item in items:
-        snap = snapshots.get(item.ref.key())
+        if item.ref.key() not in snapshots:
+            # Not the same as a snapshot recorded as absent (#110). Both used
+            # to arrive here as None, and `rollback(ctx, ref, None)` means
+            # "this did not exist before, remove it" — so a snapshot the
+            # journal lost would make the revert *delete* a resource that was
+            # there all along. Refuse loudly instead; the item stays modified
+            # and the report says so.
+            journal.append("REVERT_START", ref=item.ref.key())
+            detail = (
+                "no pre-change snapshot recorded in the journal, so there is "
+                "nothing to restore from; left as-is rather than deleted"
+            )
+            journal.append("REVERT_RESULT", ref=item.ref.key(), ok=False, message=detail)
+            revert_failures.append(f"{item.ref}: {detail}")
+            continue
+        snap = snapshots[item.ref.key()]
         journal.append("REVERT_START", ref=item.ref.key())
         try:
             result = item.resource.rollback(ctx, item.ref, snap)

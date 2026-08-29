@@ -333,6 +333,44 @@ def test_another_host_does_not_block_this_one(
     assert result.exit_code == 0, result.output
 
 
+# -- a lost snapshot must not become a delete (#110) --------------------------
+
+
+def test_a_ref_with_no_recorded_snapshot_is_refused_not_deleted(
+    world: dict[str, Any],
+) -> None:
+    """`rollback(ctx, ref, None)` means "this did not exist before, remove it".
+
+    `snapshots()` returns a dict, so "no snapshot recorded" and "recorded as
+    absent" are genuinely different — but `_revert_items` read it with
+    `.get()`, which collapses them to None. A snapshot the journal lost (#110's
+    torn tail was one way) therefore told the revert to *delete* a resource
+    that had been there all along: the failure mode is not an incomplete
+    rollback but a destructive one.
+
+    Now the missing case is refused and reported, and the item is left in its
+    modified state rather than removed — the safe direction, because a change
+    an operator can see and undo beats a deletion they cannot.
+    """
+    from pyecsdwan.journal import TxnJournal
+
+    journal = TxnJournal.create(world["settings"].host, [REF])
+    # APPLY_START without the SNAPSHOT that should precede it.
+    journal.append("APPLY_START", ref=REF.key())
+    before = dict(_live_banners(world))
+
+    staged = CandidateStore(world["settings"].host)
+    staged.set_desired(REF, {"issue": "x"})
+    plan = txn.build_plan(world["ctx"], default_registry, staged)
+    report = txn.CommitReport(ok=False, txn_id=journal.meta.txn_id)
+
+    txn._revert_items(world["ctx"], journal, plan.items, report)
+
+    assert report.state == "REVERT_FAILED"
+    assert any("nothing to restore from" in m for m in report.messages)
+    assert _live_banners(world) == before, "deleted a resource it could not restore"
+
+
 # -- the guards are still on the path ----------------------------------------
 
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as _dt
+import hashlib
 import json
 import os
 import secrets
@@ -30,6 +31,12 @@ from typing import Any
 
 from pyecsdwan import config
 from pyecsdwan.contract import RawState, Ref
+
+
+class JournalCorrupt(Exception):
+    """The event log holds a record that is neither valid JSON nor explicable
+    as a torn tail. Recovery must refuse rather than proceed on a history it
+    knows is incomplete (#110)."""
 
 
 class TxnState:
@@ -144,8 +151,7 @@ class TxnJournal:
 
     # -- event log -----------------------------------------------------------
 
-    def append(self, event: str, **fields: Any) -> None:
-        record = {"ts": utcnow(), "event": event, **fields}
+    def _write_line(self, record: dict[str, Any]) -> None:
         line = json.dumps(record, sort_keys=True, default=str)
         # 0o600 on first creation; snapshots can embed sensitive server config.
         fd = os.open(self._events_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -154,22 +160,92 @@ class TxnJournal:
             fh.flush()
             os.fsync(fh.fileno())
 
-    def events(self) -> list[dict[str, Any]]:
+    def _repair_tail(self) -> dict[str, Any] | None:
+        """Terminate or discard an unterminated final record (#110).
+
+        Every complete record ends with a newline, written in the same call as
+        the record itself, so a file not ending in one means the last append
+        did not finish. Without this, the *next* append concatenated onto that
+        fragment and produced a single unparseable line — destroying both the
+        fragment and the new event, silently. A SNAPSHOT lost that way leaves
+        a transaction whose ``applied_refs`` says a resource was changed and
+        whose ``snapshots`` cannot say what it looked like.
+
+        Two cases, distinguished by parsing rather than assumed:
+
+        * the tail is valid JSON — the record landed and only its newline did
+          not. Terminate it; discarding a complete record would be the very
+          data loss this exists to stop.
+        * the tail is not valid JSON — it is provably partial. Truncate it.
+
+        Returns what was done, for the audit event the caller writes, or None
+        when the log was already well-formed. The discarded bytes are recorded
+        as a digest and a length rather than quoted: a fragment can be part of
+        a snapshot body, and this file is 0600 for that reason.
+        """
+        try:
+            data = self._events_path.read_bytes()
+        except FileNotFoundError:
+            return None
+        if not data or data.endswith(b"\n"):
+            return None
+        cut = data.rfind(b"\n") + 1  # 0 when the whole file is one unterminated line
+        tail = data[cut:]
+        try:
+            json.loads(tail.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            action = "discarded"
+        else:
+            action = "terminated"
+        with open(self._events_path, "r+b") as fh:
+            if action == "discarded":
+                fh.truncate(cut)
+            else:
+                fh.seek(0, os.SEEK_END)
+                fh.write(b"\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        return {
+            "action": action,
+            "bytes": len(tail),
+            "sha256": hashlib.sha256(tail).hexdigest(),
+        }
+
+    def append(self, event: str, **fields: Any) -> None:
+        repair = self._repair_tail()
+        if repair is not None:
+            # Written before the event that prompted it, so the log reads in
+            # the order things happened rather than blaming the wrong record.
+            self._write_line({"ts": utcnow(), "event": "JOURNAL_REPAIRED", **repair})
+        self._write_line({"ts": utcnow(), "event": event, **fields})
+
+    def events(self, strict: bool = False) -> list[dict[str, Any]]:
+        """Every parsed record.
+
+        ``strict`` is for the recovery path. A malformed line is no longer
+        explicable as a torn tail — :meth:`_repair_tail` handles that case
+        before any append — so it is corruption, and a rollback computed from
+        a history with a hole in it is worse than a refused one (#110). Display
+        paths stay lenient: a corrupt journal must still be *visible*, and
+        `show journal` refusing to render is not an improvement.
+        """
         if not self._events_path.exists():
             return []
         out: list[dict[str, Any]] = []
         with open(self._events_path, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
+            for number, raw in enumerate(fh, start=1):
+                line = raw.strip()
                 if not line:
                     continue
                 try:
                     out.append(json.loads(line))
-                except json.JSONDecodeError:
-                    # One torn record (crash mid-append, or a recovery append
-                    # concatenated onto a torn tail) must not hide the records
-                    # that follow it — skip and keep reading, so the recovery
-                    # audit trail stays visible.
+                except json.JSONDecodeError as exc:
+                    if strict:
+                        raise JournalCorrupt(
+                            f"{self._events_path}: line {number} is not valid JSON "
+                            f"({exc}); the transaction history has a hole in it and "
+                            f"recovery from it would be incomplete"
+                        ) from exc
                     continue
         return out
 
@@ -193,17 +269,24 @@ class TxnJournal:
         self.append("SNAPSHOT", ref=ref.key(), exists=raw is not None, raw=raw)
 
     def snapshots(self) -> dict[str, RawState]:
-        """Pre-change raw state per ref key, from the event log."""
+        """Pre-change raw state per ref key, from the event log.
+
+        Strict: this is what a revert restores from, and a missing key here is
+        read by the caller as "the resource did not exist before", which would
+        make it *delete* something the journal simply lost.
+        """
         snaps: dict[str, RawState] = {}
-        for ev in self.events():
+        for ev in self.events(strict=True):
             if ev.get("event") == "SNAPSHOT":
                 snaps[ev["ref"]] = ev.get("raw") if ev.get("exists") else None
         return snaps
 
     def applied_refs(self) -> list[str]:
-        """Ref keys whose apply started (APPLY_START), in order."""
+        """Ref keys whose apply started (APPLY_START), in order. Strict, for
+        the same reason as :meth:`snapshots`: a short list here means a change
+        that landed on the fabric is never offered for revert."""
         out: list[str] = []
-        for ev in self.events():
+        for ev in self.events(strict=True):
             if ev.get("event") == "APPLY_START":
                 out.append(ev["ref"])
         return out
