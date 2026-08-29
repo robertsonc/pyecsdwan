@@ -461,7 +461,31 @@ def _commit_locked(
             failure = f"{item.ref}: {result.message or 'apply failed'}"
             failed_item = item
             break
-        if not item.resource.verify(ctx, item.ref, item.desired):
+        try:
+            verified = item.resource.verify(ctx, item.ref, item.desired)
+        except Exception as exc:  # noqa: BLE001 - verify runs *after* a write landed; escaping here strands the fabric
+            # #103. `apply` was wrapped and `verify` was not, so a read timeout
+            # or an odd response while confirming the write propagated out of
+            # commit() entirely: the caller got a raw exception, the fabric
+            # kept the change, and the transaction sat in APPLYING with no
+            # revert and no terminal state. An unverifiable write is a failed
+            # one — the whole point of verify is that we do not get to assume.
+            #
+            # No `verified = False` here: `failure` and the `break` below carry
+            # the outcome, and the mutation sweep proved the assignment was
+            # never read — flipping it to True changed nothing.
+            journal.append(
+                "VERIFY_FAILED",
+                ref=item.ref.key(),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            failure = (
+                f"{item.ref}: post-apply verify raised {type(exc).__name__}: {exc}; "
+                f"the write cannot be confirmed"
+            )
+            failed_item = item
+            break
+        if not verified:
             failure = f"{item.ref}: post-apply verify found drift from desired state"
             failed_item = item
             journal.append("VERIFY_FAILED", ref=item.ref.key())

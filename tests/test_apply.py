@@ -333,6 +333,86 @@ def test_another_host_does_not_block_this_one(
     assert result.exit_code == 0, result.output
 
 
+# -- an unverifiable write is a failed one (#103) -----------------------------
+
+
+def test_a_raising_verify_reverts_instead_of_escaping(
+    world: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#103. `apply` was inside the try; `verify` on the next line was not.
+
+    A read timeout or an odd response while *confirming* a write therefore
+    propagated straight out of `commit()`: the caller got a raw exception, the
+    fabric kept the change, and the transaction sat in APPLYING with no revert
+    and no terminal state — the one shape commit-confirm exists to make
+    impossible. Reproduced before fixing.
+
+    Verify runs after a write has landed, which is exactly why it must not be
+    the unguarded step: an unverifiable write is a failed one, because not
+    getting to assume is the entire point of verifying.
+    """
+    before = dict(_live_banners(world))
+    resource = default_registry.get(KIND)
+    monkeypatch.setattr(
+        type(resource),
+        "verify",
+        lambda self, ctx, ref, desired: (_ for _ in ()).throw(
+            TimeoutError("read timed out confirming the write")
+        ),
+    )
+    staged = CandidateStore(world["settings"].host)
+    staged.set_desired(REF, {"issue": "written, then verify blew up"})
+    plan = txn.build_plan(world["ctx"], default_registry, staged)
+
+    report = txn.commit(world["ctx"], default_registry, plan, world["settings"])
+
+    assert not report.ok
+    assert report.state in ("REVERTED", "REVERT_FAILED"), report.state
+    assert _live_banners(world) == before, "left the fabric modified"
+
+
+def test_the_verify_failure_journals_its_typed_cause(
+    world: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"Verify failed" and "verify could not run" are different incidents, and
+    an operator reading the journal afterwards needs to tell them apart."""
+    from pyecsdwan.journal import list_txns
+
+    resource = default_registry.get(KIND)
+    monkeypatch.setattr(
+        type(resource),
+        "verify",
+        lambda self, ctx, ref, desired: (_ for _ in ()).throw(TimeoutError("read timed out")),
+    )
+    staged = CandidateStore(world["settings"].host)
+    staged.set_desired(REF, {"issue": "x"})
+    plan = txn.build_plan(world["ctx"], default_registry, staged)
+
+    txn.commit(world["ctx"], default_registry, plan, world["settings"])
+
+    events = list_txns()[0].events()
+    failed = next(e for e in events if e["event"] == "VERIFY_FAILED")
+    assert "TimeoutError" in failed["error"]
+
+
+def test_a_verify_that_returns_false_still_reverts(
+    world: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guards the guard: the pre-existing path must keep working, and a fix
+    that swallowed every verify result would satisfy the tests above."""
+    before = dict(_live_banners(world))
+    resource = default_registry.get(KIND)
+    monkeypatch.setattr(type(resource), "verify", lambda self, ctx, ref, desired: False)
+    staged = CandidateStore(world["settings"].host)
+    staged.set_desired(REF, {"issue": "verify says no"})
+    plan = txn.build_plan(world["ctx"], default_registry, staged)
+
+    report = txn.commit(world["ctx"], default_registry, plan, world["settings"])
+
+    assert not report.ok
+    assert _live_banners(world) == before
+
+
 # -- a lost snapshot must not become a delete (#110) --------------------------
 
 
