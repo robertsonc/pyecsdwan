@@ -70,7 +70,9 @@ def world(state_home: Any, mock_server: tuple[str, MockState]) -> dict[str, Any]
 
 
 def _collect(world: dict[str, Any], **kw: Any) -> drift.Report:
-    return drift.collect(world["ctx"], default_registry, world["candidate"], **kw)
+    return drift.collect(
+        world["ctx"], default_registry, drift.CandidateIntent(world["candidate"]), **kw
+    )
 
 
 # -- the statuses ------------------------------------------------------------
@@ -153,7 +155,9 @@ def test_a_tier_1_kind_is_never_fetched(world: dict[str, Any]) -> None:
 
     registry = Registry()
     registry.register(Stub())
-    report = drift.collect(world["ctx"], registry, world["candidate"], kinds=["stubbed"])
+    report = drift.collect(
+        world["ctx"], registry, drift.CandidateIntent(world["candidate"]), kinds=["stubbed"]
+    )
 
     assert not fetched, "a Tier-1 stub was fetched despite having no canonical form"
     assert report.rows[0].status is drift.Status.UNSUPPORTED
@@ -177,7 +181,9 @@ def test_an_unreadable_instance_is_a_row_not_a_silence(world: dict[str, Any]) ->
 
     registry = Registry()
     registry.register(Broken())
-    report = drift.collect(world["ctx"], registry, world["candidate"], kinds=["broken"])
+    report = drift.collect(
+        world["ctx"], registry, drift.CandidateIntent(world["candidate"]), kinds=["broken"]
+    )
 
     assert len(report.rows) == 1
     assert report.rows[0].status is drift.Status.UNREADABLE
@@ -200,7 +206,9 @@ def test_a_kind_whose_instances_cannot_be_listed_becomes_a_note(
 
     registry = Registry()
     registry.register(Unlistable())
-    report = drift.collect(world["ctx"], registry, world["candidate"], kinds=["unlistable"])
+    report = drift.collect(
+        world["ctx"], registry, drift.CandidateIntent(world["candidate"]), kinds=["unlistable"]
+    )
 
     assert not report.rows
     assert any("could not be listed" in n and "403" in n for n in report.notes)

@@ -30,7 +30,7 @@ from rich.table import Table
 from rich.text import Text
 from typer.core import TyperGroup
 
-from pyecsdwan import config, evidence, locking, runtime, specs, txn
+from pyecsdwan import config, desired, evidence, locking, runtime, specs, txn
 from pyecsdwan import registry as registry_mod
 from pyecsdwan import retry as retry_mod
 from pyecsdwan.candidate import CandidateCorruptError, CandidateStore
@@ -472,6 +472,13 @@ app.command("compare", help="Alias for 'diff'.")(diff_)
 @app.command("drift")
 def drift_(
     ctx: typer.Context,
+    from_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--from",
+            help="Desired-state directory to compare against, instead of the candidate.",
+        ),
+    ] = None,
     kind: Annotated[
         list[str] | None,
         typer.Option("--kind", help="Limit to these kinds (repeatable). Default: every kind."),
@@ -494,6 +501,10 @@ def drift_(
     mention: instances nobody has declared, instances that could not be read,
     and kinds no curated resource can compare.
 
+    `--from <dir>` compares against a desired-state directory in git rather
+    than the local candidate, which is what a CI drift check wants: the same
+    answer on every run, from a declaration someone reviewed.
+
     Exit 0 clean, 1 drift found, 8 the run was incomplete — and 8 outranks 1,
     because "no drift" from a report that skipped part of the fabric is a claim
     it has not earned.
@@ -503,11 +514,27 @@ def drift_(
     # Every kind, every instance: the heaviest read this CLI has. `list_refs`
     # for most appliance-scope kinds is itself a per-appliance call, so the
     # estimate counts the curated kinds rather than pretending it is one.
+    intent: drift.IntentSource
+    if from_dir is not None:
+        try:
+            declared = desired.load(registry, from_dir)
+        except desired.DesiredError as exc:
+            # Fatal, never a warning: a partially-read declaration would report
+            # the rest of the fabric as `undeclared` and look like a smaller
+            # fabric rather than a broken input.
+            _fail(str(exc))
+        console.print(
+            Text(f"declared: {len(declared)} instance(s) from {from_dir}", style="dim")
+        )
+        intent = declared
+    else:
+        intent = drift.CandidateIntent(CandidateStore(settings.host))
+
     _gate_fanout(rt_ctx, assume_yes, calls_each=_drift_calls_each(registry, kind))
     report = drift.collect(
         rt_ctx,
         registry,
-        CandidateStore(settings.host),
+        intent,
         kinds=kind or None,
         concurrency=max_concurrency,
         timeout=timeout,

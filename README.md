@@ -121,6 +121,28 @@ ec-cli show appliance BR1-EC bgp neighbors --json      # live protocol state
 ec-cli show fabric version                             # live, every appliance
 ```
 
+`drift` compares against the local candidate by default. For a CI check, point
+it at a desired-state directory in git instead — reviewed, versioned, the same
+answer on every run:
+
+```text
+desired/
+  fabric/
+    interface-labels/global.yaml          # fabric/<noun>/<instance>.yaml
+    bio/CorpFabric.yaml
+  appliances/
+    BR1-EC/
+      banners/global.yaml                 # appliances/<name>/<noun>/<instance>.yaml
+      bgp/config.yaml
+```
+
+Then `ec-cli drift --from desired/`. The directories are the same user-facing
+nouns the commands take — never registry kinds, which is not cosmetic: the kind
+behind a per-appliance banner is `appliance/banners`, and a path separator in a
+directory name would silently become two levels. Each file *is* that instance's
+desired state, so a value the appliance holds that no file declares is drift.
+It reads and never writes; declarative apply is separate work.
+
 ## Tier-1 spec pipeline (`tools/`)
 
 ```bash
