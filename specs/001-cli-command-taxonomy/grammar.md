@@ -1,6 +1,8 @@
 # Command grammar
 
-**Feature:** `001-cli-command-taxonomy` · **Version:** 0.3.0 · **Status:** draft
+**Feature:** `001-cli-command-taxonomy` · **Version:** 0.4.0 · **Status:** draft
+**Changed in 0.4.0:** Decision 9 — `orchestrator` is the noun for selecting
+which Orchestrator a command addresses (#121), and is reserved as a kind alias.
 **Changed in 0.2.0:** Q1 and Q2 answered by the owner — the datastore token is
 optional and defaults to `running`; fan-out confirms then warns; `--stale-ok`
 is opt-in.
@@ -84,12 +86,20 @@ these are **reserved and may not be used as a kind alias**:
 
 ```
 running · candidate · appliance · fabric · configuration
+orchestrator · orchestrators
 ```
 
 No kind collides with them today (42 bare names checked). The alias validator
 (#77, R6) enforces it going forward, alongside per-scope uniqueness — this
 constraint did not exist while the token was mandatory, because the token
 position was then unambiguous.
+
+The second line is Decision 9's, reserved ahead of the feature that uses it
+(#121). §2 puts CLI-state reads under bare `show`, which makes `show
+orchestrators` the consistent way to list the registry — and that is the same
+`show <token>` position the first line exists to protect. Reserved now because
+a kind claiming the name would have to be renamed later, and renaming an
+operator-facing noun costs more than reserving one that is still free.
 
 ### Configuration mode
 
@@ -120,6 +130,27 @@ left under bare `show` because the subject is the tool itself, not the fabric.
 | `appliance <name>` | one appliance, via the Orchestrator proxy | `single` |
 | `fabric` | every appliance, bounded fan-out | `fanout` |
 | *(none)* | the Orchestrator itself | `single` |
+
+### Selecting an Orchestrator is not a scope (Decision 9)
+
+Scope answers *what within this Orchestrator a command is about*. Which
+Orchestrator it is addressed to is a different axis entirely, and every scope
+above already presumes one. So the selector is **not** a fourth row in this
+table: it is `orchestrator`, and it appears outside the scope position.
+
+That distinction is the whole reason the noun is not `fabric`. `fabric` here
+means *every appliance, fanned out* — a subject inside one Orchestrator — so
+spelling the selector `--fabric` would put two unrelated senses of one word in
+adjacent positions of the same command:
+
+```
+ec-cli --fabric prod show fabric version     # which target? and which subject?
+```
+
+`orchestrator` is the word this table already uses for the bare row's subject,
+and carrying it over keeps one word to one meaning.
+
+Reserved now, built under #121; the command shape is Q5 in `spec.md`.
 
 ## 4. Domains and kinds
 

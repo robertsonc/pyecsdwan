@@ -313,16 +313,25 @@ registry maps name to origin. It must *reference* credentials, never hold them:
 the keyring is already keyed per origin (#63), and "credentials never live in
 argv or in files" is the existing rule, not a new one.
 
-**The noun is already taken.** `fabric` is a ratified scope noun in
-`specs/001-cli-command-taxonomy/grammar.md` — "every appliance, bounded
-fan-out" — sitting beside `appliance <name>` and the bare no-scope form, which
-means *the Orchestrator itself*. `show fabric version` asks every appliance; it
-does not name a fabric. Spelling the new selector `--fabric` would give one
-word two meanings one space apart (`ec-cli --fabric prod show fabric version`),
-which is the operator surprise Principle VI exists to prevent. The precise noun
-for the new concept is the one the grammar already uses for that subject:
-`orchestrator`. Whichever wins, it is a grammar change and belongs in a spec
-amendment under #75's workflow, not in a flag someone adds.
+**The noun is `orchestrator` (Decision 9).** `fabric` was the obvious word and
+is already taken: `specs/001-cli-command-taxonomy/grammar.md` ratifies it as a
+scope noun meaning "every appliance, bounded fan-out", beside `appliance
+<name>` and the bare no-scope form that means *the Orchestrator itself*. `show
+fabric version` asks every appliance; it does not name a fabric. Spelling the
+selector `--fabric` would give one word two meanings one space apart
+(`ec-cli --fabric prod show fabric version`), which is the operator surprise
+Principle VI exists to prevent. `orchestrator` is the word the grammar already
+uses for that subject. Settled as a spec amendment under #75's workflow rather
+than as a flag someone added — grammar 0.4.0 — which also reserves
+`orchestrator` and `orchestrators` as kind aliases, because a kind claiming
+either would have to be renamed once the selector ships.
+
+Selecting an Orchestrator is deliberately **not** a fourth scope row: scope
+says what within a target a command is about, and every existing scope already
+presumes one target. The selector chooses the target, so it sits outside the
+scope position. The command shape that carries it is still open (spec 001 Q5):
+§2 puts CLI-state reads under bare `show`, which makes `show orchestrators` the
+consistent listing, but where the registry's mutations live is undecided.
 
 **Ambient selection is the failure mode.** The registry is the easy half. The
 dangerous half is a *sticky* selection: `kubectl config use-context` and
