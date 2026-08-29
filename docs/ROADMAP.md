@@ -270,12 +270,77 @@ from the registry so it cannot drift again.
 | **Production hardening** (#9) | concurrency, MCP trust boundary, CI/packaging, async-job fail-closed, evidence ladder, retry policy | #62–#68 (#62–#67 ✅ shipped; #68 open) |
 | **CLI information architecture** (#70) ✅ | intent-separated command taxonomy, spec-driven design; constitution + design corpus + grammar, then the migration itself | #49, #71–#78 (all shipped; one flag decision open) |
 | **(v2) RBAC broker** (#10) | direct-to-appliance access, gated — explicitly out of v1 scope | in-epic checklist |
+| **(future) More than one Orchestrator** (#121) | named-target registry, a top-level selection noun, per-target fan-out with no cross-target atomicity — see the section below | in-epic checklist |
 
 The near-term epics (#3, #4, #5, #6) are sharded into child sub-issues; #5 and
 #6 are complete. #8's first tranche shipped as #54 (operational `show`
 commands, sub-issues #55–#59); the rest of #8 stays an in-epic checklist.
 the operational/v2 epics (#7–#10) carry their breakdown as checklists and get
 sharded into issues when their phase starts.
+
+## Planned — operating across more than one Orchestrator (#121)
+
+Unstarted. It is on this page because #63 changed what it would cost, and
+because the shape of the command surface has to be decided before any of it is
+built.
+
+**What #63 already settled.** Every piece of persisted state is keyed by a
+canonical origin — candidate store, advisory locks, journals and rollback
+history, resolver cache, keyring entry — and a candidate or a snapshot carries
+the origin it was staged against and is refused against any other. Two
+Orchestrators already cannot share state, and a snapshot from one cannot be
+restored into another. So this is no longer a data-model problem. What is
+missing is a way to *name* a target and a way to *choose* one.
+
+**A name.** A target is identified today only by its URL, from
+`ECSDWAN_ORCH_URL`. Operators need short names — `prod-emea`, `lab` — so a
+registry maps name to origin. It must *reference* credentials, never hold them:
+the keyring is already keyed per origin (#63), and "credentials never live in
+argv or in files" is the existing rule, not a new one.
+
+**The noun is already taken.** `fabric` is a ratified scope noun in
+`specs/001-cli-command-taxonomy/grammar.md` — "every appliance, bounded
+fan-out" — sitting beside `appliance <name>` and the bare no-scope form, which
+means *the Orchestrator itself*. `show fabric version` asks every appliance; it
+does not name a fabric. Spelling the new selector `--fabric` would give one
+word two meanings one space apart (`ec-cli --fabric prod show fabric version`),
+which is the operator surprise Principle VI exists to prevent. The precise noun
+for the new concept is the one the grammar already uses for that subject:
+`orchestrator`. Whichever wins, it is a grammar change and belongs in a spec
+amendment under #75's workflow, not in a flag someone adds.
+
+**Ambient selection is the failure mode.** The registry is the easy half. The
+dangerous half is a *sticky* selection: `kubectl config use-context` and
+`AWS_PROFILE` are the canonical demonstrations, where a persisted current
+target means a command typed in one terminal acts on whatever was last selected
+in another, and the operator's model and the tool's disagree at precisely the
+moment a write goes out. Junos has no analogue, because a Junos session *is*
+the device — the design corpus (#73) has no precedent to copy here, which is
+itself the finding. So: the shell may carry a **session-scoped** selection,
+because it shows it — the banner already prints the origin and the prompt can
+carry the name, and a selection you can see is not ambient. The scriptable CLI
+must **not infer one for anything that writes**: `commit`, `apply` and
+`rollback` with no explicit target refuse rather than pick. Failing closed
+costs one flag; guessing costs a change on the wrong fabric. No global mutable
+"current target" file shared by every terminal on the host.
+
+**Fan-out across targets.** The capability worth having is `drift` across every
+target, and one declaration applied to several. Three constraints, in the order
+they bite. There is **no cross-target atomicity and there will not be**: each
+target's commit is its own transaction with its own journal and confirm window,
+so partial success across targets is the *normal* outcome and the report has to
+make per-target state legible rather than collapse it into one exit code —
+promising two-phase commit across independent Orchestrators would be a claim
+the API cannot support. Fan-out is **explicit or it does not happen**, never
+inferred from a selection; Decision 7's cost-class treatment of appliance
+fan-out (confirm, then warn) is the precedent. And the confirm window is **per
+target and runs on wall-clock**, so arming ten from one command means ten
+independent watchdogs — stated before the first write, not discovered at the
+first revert.
+
+**Ordering.** After spec 003's T8 (per-resource safe materialization), because
+multi-target apply is only meaningful once single-target apply writes at all;
+alongside #106, which owns the credential half.
 
 ## Parity map (Orchestrator UI area → code status)
 
