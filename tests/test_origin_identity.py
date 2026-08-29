@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import time
 from pathlib import Path
 
@@ -117,8 +118,11 @@ def test_every_allowlist_entry_carries_a_reason():
         ("http://orch.example.com", "https://orch.example.com"),
         # Different ports, which the display host dropped entirely.
         ("https://orch.example.com:8443", "https://orch.example.com:9443"),
-        # The lossy filename sanitizer mapped both of these to `orch_443`.
-        ("https://orch:443/a", "https://orch_443/a"),
+        # The file-name sanitizer maps both of these to `https___orch_8443_a`.
+        # A *non-default* port, deliberately: 443 is normalized away before the
+        # sanitizer ever sees it, so that pair never exercised the collision —
+        # the mutation sweep is what showed the case was decorative.
+        ("https://orch:8443/a", "https://orch_8443/a"),
     ],
 )
 def test_distinct_targets_get_distinct_identities(a, b):
@@ -140,6 +144,28 @@ def test_distinct_targets_get_distinct_identities(a, b):
 )
 def test_one_target_spelled_differently_is_one_identity(a, b):
     assert config.canonical_origin(a) == config.canonical_origin(b)
+
+
+def test_the_digest_is_what_keeps_a_sanitized_name_unique():
+    """Named separately from the parametrized pair above, because it is the
+    digest specifically that does the work: the readable halves are equal, and
+    a slug that were only the readable half would put two Orchestrators'
+    staging, locks and caches in one file."""
+    a = config.canonical_origin("https://orch:8443/a")
+    b = config.canonical_origin("https://orch_8443/a")
+    readable = re.compile(r"[^A-Za-z0-9._-]")
+    assert readable.sub("_", a)[-48:] == readable.sub("_", b)[-48:]
+    assert config.origin_slug(a) != config.origin_slug(b)
+
+
+def test_two_origins_alike_in_their_last_48_characters_still_differ():
+    """The readable half is truncated, so long origins that share a tail are
+    distinguished by the digest alone."""
+    tail = "x" * 60
+    a = config.canonical_origin(f"https://a.example.com/{tail}")
+    b = config.canonical_origin(f"https://b.example.com/{tail}")
+    assert config.origin_slug(a)[:-17] == config.origin_slug(b)[:-17]
+    assert config.origin_slug(a) != config.origin_slug(b)
 
 
 def test_an_empty_authority_is_refused():
