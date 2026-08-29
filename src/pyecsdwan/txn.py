@@ -528,11 +528,32 @@ def _guard(
             f"mixing them in downgrades the whole transaction's guarantees. "
             f"Use --allow-untransactional to accept best-effort snapshots."
         )
-    if confirm_minutes is not None and not settings.api_key:
-        raise CommitError(
-            "commit confirm requires API-key authentication: the background "
-            "watchdog cannot replay an interactive login session."
-        )
+    _guard_confirm_auth(settings, confirm_minutes)
+
+
+def _guard_confirm_auth(settings: config.Settings, confirm_minutes: float | None) -> None:
+    """A confirm window needs a credential the detached watchdog can replay.
+
+    Extracted from the guard chain so it can be tested directly: the message
+    it produces is the one an operator reads at the moment their commit is
+    refused, and it is worth more than a line inside a forty-line function.
+    """
+    if confirm_minutes is None or settings.api_key:
+        return
+    # Name the keyring failure when there was one. Without it this message
+    # tells an operator who *did* store a key that they have no key, and they
+    # go looking in the wrong place — re-storing it into the keyring that is
+    # not opening.
+    because = (
+        f" The keyring was unreadable, so a stored key could not be used: "
+        f"{settings.keyring_error}."
+        if settings.keyring_error
+        else ""
+    )
+    raise CommitError(
+        "commit confirm requires API-key authentication: the background "
+        "watchdog cannot replay an interactive login session." + because
+    )
 
 
 def _revert_items(

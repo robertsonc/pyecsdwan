@@ -51,7 +51,24 @@ export ECSDWAN_API_KEY=<api key>        # or store it in the OS keyring
 ./ec-cli show appliances
 ```
 
-Credentials are never taken on argv. TLS verification is on by default
+The keyring is looked up under service `pyecsdwan`, username = the
+Orchestrator host, and is read only when `ECSDWAN_API_KEY` is unset. There is
+no `ec-cli` command to write it yet — use the `keyring` tool, which is where
+rotation happens too:
+
+```bash
+keyring set pyecsdwan orchestrator.example.com     # store or rotate
+keyring del pyecsdwan orchestrator.example.com     # revoke locally
+```
+
+A keyring that is installed but will not open (locked session, no D-Bus) is
+reported as such rather than treated as "no key stored" — those are different
+answers, and being told the second when the first is true sends you to
+re-store a key that was already there.
+
+Credentials are never taken on argv, never written to the journal, and never
+printed: `Settings` redacts its own key in `repr`, and API responses are
+scrubbed before they are raised or journaled. TLS verification is on by default
 (`--insecure` exists, and nags). `commit confirm` requires API-key auth — a
 background watchdog cannot replay an interactive login.
 
