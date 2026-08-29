@@ -72,10 +72,23 @@ def world(state_home: Any, mock_server: tuple[str, MockState]) -> dict[str, Any]
     }
 
 
+def _envelope(body: str, state: str = "present") -> str:
+    """Wrap a bare spec body in the ratified declaration envelope (T7).
+
+    The tests read better naming only the values they care about, and the
+    envelope is fixed boilerplate that would otherwise be repeated in every
+    fixture. Malformed bodies stay malformed once indented, which is what the
+    invalid-input tests rely on.
+    """
+    lines = body.strip("\n").splitlines()
+    spec = "".join(f"  {line}\n" for line in lines) if lines else "  {}\n"
+    return f"apiVersion: {desired.API_VERSION}\nstate: {state}\nspec:\n{spec}"
+
+
 def _write(root: Path, rel: str, body: str) -> Path:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    path.write_text(_envelope(body), encoding="utf-8")
     return path
 
 
@@ -226,6 +239,69 @@ def test_the_named_escape_hatches_are_real_commands() -> None:
     names = {c.name or c.callback.__name__ for c in cli_main.app.registered_commands}
     assert "commit" in names
     assert "discard" in names
+
+
+# -- invalid input costs no connection (R2) -----------------------------------
+
+
+def test_an_empty_directory_never_builds_a_client(
+    world: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2/D6. A mistyped `--from` path should cost nothing: no credentials, no
+    resolver call, no round trip to an Orchestrator to be told the directory
+    was wrong. Asserted by making bootstrap explode — if the command reaches
+    it, this fails with the wrong error.
+    """
+    from pyecsdwan import runtime
+
+    monkeypatch.setattr(
+        runtime, "bootstrap",
+        lambda **kw: pytest.fail("a client was constructed for an invalid directory"),
+    )
+
+    result = _cli(world, "apply", "--from", str(tmp_path))
+
+    assert result.exit_code != 0
+    assert "no declarations" in result.output
+
+
+def test_a_malformed_directory_never_builds_a_client(
+    world: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guards the guard's other half: the check must fire on invalid content,
+    not only on emptiness."""
+    from pyecsdwan import runtime
+
+    _write(tmp_path, DECLARED, "issue: fine\n")
+    (tmp_path / "appliances" / "BR2-EC" / "banners").mkdir(parents=True)
+    (tmp_path / "appliances" / "BR2-EC" / "banners" / "global.yaml").write_text(
+        "issue: [\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        runtime, "bootstrap",
+        lambda **kw: pytest.fail("a client was constructed for an invalid directory"),
+    )
+
+    result = _cli(world, "apply", "--from", str(tmp_path))
+
+    assert result.exit_code != 0
+
+
+def test_drift_from_a_bad_directory_never_builds_a_client(
+    world: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`drift --from` is the CI entry point, so it is the one most likely to be
+    pointed at a path that does not exist yet."""
+    from pyecsdwan import runtime
+
+    monkeypatch.setattr(
+        runtime, "bootstrap",
+        lambda **kw: pytest.fail("a client was constructed for an invalid directory"),
+    )
+
+    result = _cli(world, "drift", "--from", str(tmp_path), "--yes")
+
+    assert result.exit_code != 0
 
 
 # -- one transaction owns the fabric at a time (#100) -------------------------

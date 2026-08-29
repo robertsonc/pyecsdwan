@@ -529,12 +529,15 @@ def apply_(
     change anything.
     """
     state = _state(ctx)
-    rt_ctx, registry, settings = _bootstrap(state)
-
+    # Read and validate the directory *before* a client exists (R2). Invalid
+    # or empty input is an offline error: it should cost no credentials, no
+    # resolver call, and no round trip to an Orchestrator to find out that a
+    # path was mistyped.
     try:
-        declared = desired.load(registry, from_dir)
+        declared = desired.load(_registry_only(), from_dir)
     except desired.DesiredError as exc:
         _fail(str(exc))
+    rt_ctx, registry, settings = _bootstrap(state)
 
     # Refuse to mix two sources of intent in one transaction. A non-empty
     # candidate is someone's in-progress work; folding it into a declarative
@@ -620,21 +623,29 @@ def drift_(
     it has not earned.
     """
     state = _state(ctx)
-    rt_ctx, registry, settings = _bootstrap(state)
-    # Every kind, every instance: the heaviest read this CLI has. `list_refs`
-    # for most appliance-scope kinds is itself a per-appliance call, so the
-    # estimate counts the curated kinds rather than pretending it is one.
-    intent: IntentSource
+    # Same ordering as `apply` (R2): the directory is validated offline, so a
+    # wrong path fails before any credential or connection is needed.
+    declared: desired.Declared | None = None
     if from_dir is not None:
         try:
-            declared = desired.load(registry, from_dir)
+            declared = desired.load(_registry_only(), from_dir)
         except desired.DesiredError as exc:
             # Fatal, never a warning: a partially-read declaration would report
             # the rest of the fabric as `undeclared` and look like a smaller
             # fabric rather than a broken input.
             _fail(str(exc))
+    rt_ctx, registry, settings = _bootstrap(state)
+    # Every kind, every instance: the heaviest read this CLI has. `list_refs`
+    # for most appliance-scope kinds is itself a per-appliance call, so the
+    # estimate counts the curated kinds rather than pretending it is one.
+    intent: IntentSource
+    if declared is not None:
         console.print(
-            Text(f"declared: {len(declared)} instance(s) from {from_dir}", style="dim")
+            Text(
+                f"declared: {len(declared)} instance(s) from {from_dir} "
+                f"({declared.digest[:12]})",
+                style="dim",
+            )
         )
         intent = declared
     else:

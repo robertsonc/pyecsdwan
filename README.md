@@ -161,12 +161,41 @@ the intent comes from git. It refuses if you have staged work in the candidate,
 because one transaction carrying both intents would commit changes the
 directory never declared.
 
+Each file carries an explicit, versioned envelope:
+
+```yaml
+apiVersion: pyecsdwan/v1
+state: present          # `absent` is the only way to request deletion
+spec:
+  issue: PROPERTY OF ACME
+```
+
+Both fields are required and neither is inferred. A version this build does
+not know fails closed *without rewriting the file*, and `state` is explicit
+because **deleting a file never deletes its object** — a directory is a
+partial, additive statement about the fabric, so absence carries no authority.
+(`state: absent` parses today but is refused: no resource yet has the verified
+deletion and rollback evidence it requires.)
+
+A document may restate its own `kind`/`name`/`appliance`. Where the document
+and the path disagree the load fails rather than picking a winner — silently
+preferring the path would apply a file whose contents say `BR1-EC` to
+`BR2-EC`.
+
+Loading is all-or-nothing and offline. One unreadable file, unknown noun,
+duplicate reference or symlink out of the tree invalidates the whole set, and
+*every* problem is reported in one run rather than one per round trip. An
+empty directory is invalid too: it looks exactly like a mistyped path or a
+failed checkout, and the cost of guessing "change nothing" is an apply that
+reports success having done nothing. None of this needs credentials — a wrong
+path fails before a client is built.
+
 The directories are the same user-facing
 nouns the commands take — never registry kinds, which is not cosmetic: the kind
 behind a per-appliance banner is `appliance/banners`, and a path separator in a
-directory name would silently become two levels. Each file *is* that instance's
-desired state, so a value the appliance holds that no file declares is drift.
-It reads and never writes; declarative apply is separate work.
+directory name would silently become two levels.
+
+The semantics above are the ratified `specs/003-declarative-apply` (1.0.0).
 
 ## Tier-1 spec pipeline (`tools/`)
 

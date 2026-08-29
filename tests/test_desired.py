@@ -67,10 +67,23 @@ def world(state_home: Any, mock_server: tuple[str, MockState]) -> dict[str, Any]
     }
 
 
+def _envelope(body: str, state: str = "present") -> str:
+    """Wrap a bare spec body in the ratified declaration envelope (T7).
+
+    The tests read better naming only the values they care about, and the
+    envelope is fixed boilerplate that would otherwise be repeated in every
+    fixture. Malformed bodies stay malformed once indented, which is what the
+    invalid-input tests rely on.
+    """
+    lines = body.strip("\n").splitlines()
+    spec = "".join(f"  {line}\n" for line in lines) if lines else "  {}\n"
+    return f"apiVersion: {desired.API_VERSION}\nstate: {state}\nspec:\n{spec}"
+
+
 def _write(root: Path, rel: str, body: str) -> Path:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    path.write_text(_envelope(body), encoding="utf-8")
     return path
 
 
@@ -126,11 +139,28 @@ def test_non_yaml_files_are_ignored(tmp_path: Path) -> None:
     assert len(desired.load(default_registry, tmp_path)) == 1
 
 
-def test_declaring_nothing_is_not_an_error(tmp_path: Path) -> None:
-    """An empty declaration is a legitimate starting point — every instance
-    then reports `undeclared`, which is the honest answer and exactly what a
-    team adopting this incrementally should see."""
-    assert len(desired.load(default_registry, tmp_path)) == 0
+def test_an_empty_declaration_set_is_invalid(tmp_path: Path) -> None:
+    """D6, and it reverses what this test used to assert.
+
+    An empty directory read as "declare nothing" is indistinguishable from a
+    mistyped path, a failed checkout, or a template that rendered nothing —
+    and the cost of guessing wrong is an apply that reports success having
+    done nothing at all. The ratified spec makes it invalid, with no
+    `--allow-empty` escape hatch in v1.
+    """
+    with pytest.raises(desired.DesiredError) as caught:
+        desired.load(default_registry, tmp_path)
+
+    assert "no declarations" in str(caught.value)
+
+
+def test_a_directory_of_non_yaml_is_also_empty(tmp_path: Path) -> None:
+    """The realistic version of D6: the checkout succeeded, but nothing in it
+    is a declaration. Same answer, for the same reason."""
+    (tmp_path / "README.md").write_text("not a declaration", encoding="utf-8")
+
+    with pytest.raises(desired.DesiredError):
+        desired.load(default_registry, tmp_path)
 
 
 # -- malformed input is fatal, never partial ---------------------------------
@@ -140,7 +170,6 @@ def test_declaring_nothing_is_not_an_error(tmp_path: Path) -> None:
     "rel,body,expect",
     [
         ("appliances/BR1-EC/banners/global.yaml", "login: [\n", "invalid YAML"),
-        ("appliances/BR1-EC/banners/global.yaml", "", "is empty"),
         ("appliances/BR1-EC/banners/global.yaml", "- a\n- b\n", "must be a mapping"),
         ("appliances/BR1-EC/nonsense/global.yaml", "a: 1\n", "nonsense"),
         ("elsewhere/banners/global.yaml", "a: 1\n", "top-level directory"),
@@ -152,7 +181,7 @@ def test_declaring_nothing_is_not_an_error(tmp_path: Path) -> None:
         ("appliances/BR1-EC/banners/extra/global.yaml", "a: 1\n", "<appliance>/<noun>/"),
     ],
     ids=[
-        "bad-yaml", "empty", "not-a-mapping", "unknown-noun", "wrong-root",
+        "bad-yaml", "not-a-mapping", "unknown-noun", "wrong-root",
         "too-shallow", "fabric-too-deep", "appliance-too-deep",
     ],
 )
@@ -361,3 +390,245 @@ def test_the_same_directory_always_builds_the_same_order(tmp_path: Path) -> None
     second = [i.ref_key for i in desired.load(default_registry, tmp_path).ordered_items()]
     assert first == second
     assert len(first) == 3
+
+
+# -- the versioned envelope (T7, spec 003 ratified 1.0.0) --------------------
+
+
+def _raw(root: Path, rel: str, text: str) -> Path:
+    """Write a declaration file verbatim, envelope and all."""
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+BANNERS = "appliances/BR1-EC/banners/global.yaml"
+
+
+def test_the_envelope_is_required_and_says_how_to_add_it(tmp_path: Path) -> None:
+    """A bare mapping was the pre-T7 format. It is refused rather than assumed
+    to be v1: the whole point of an explicit version is that a future format
+    can be told apart from this one instead of guessed at.
+
+    The assertion is on the *guidance*, not merely on a refusal. A missing
+    version is caught by the version comparison anyway — the separate branch
+    exists solely to say "add this line", which is the migration instruction
+    for every file written before this change. The mutation sweep found that
+    a laxer assertion could not tell the two apart, so the branch would have
+    been free to rot into `apiVersion None is not 'pyecsdwan/v1'`.
+    """
+    _raw(tmp_path, BANNERS, "issue: no envelope\n")
+
+    with pytest.raises(desired.DesiredError) as caught:
+        desired.load(default_registry, tmp_path)
+
+    assert f"Add `apiVersion: {desired.API_VERSION}`" in str(caught.value)
+
+
+def test_a_future_api_version_fails_closed_without_rewriting(tmp_path: Path) -> None:
+    """Same rule the candidate store follows (#108): a newer format is not
+    damaged, and the tool that wrote it must still be able to use it."""
+    path = _raw(
+        tmp_path, BANNERS, "apiVersion: pyecsdwan/v99\nstate: present\nspec:\n  issue: x\n"
+    )
+    before = path.read_bytes()
+
+    with pytest.raises(desired.DesiredError) as caught:
+        desired.load(default_registry, tmp_path)
+
+    assert "v99" in str(caught.value)
+    assert path.read_bytes() == before
+
+
+def test_state_is_required(tmp_path: Path) -> None:
+    """The lifecycle is explicit because absence never means deletion (D4).
+    Defaulting it would make `state` decorative on the one file where it is
+    load-bearing."""
+    _raw(tmp_path, BANNERS, f"apiVersion: {desired.API_VERSION}\nspec:\n  issue: x\n")
+
+    with pytest.raises(desired.DesiredError) as caught:
+        desired.load(default_registry, tmp_path)
+
+    assert "state must be one of" in str(caught.value)
+
+
+def test_absent_is_parsed_and_refused_for_now(tmp_path: Path) -> None:
+    """`absent` is the only v1 deletion mechanism (D4/R5) and is gated on
+    per-resource deletion and rollback evidence (D16, T11). Until a resource
+    has that, declaring a deletion the tool cannot prove it can undo is the
+    one thing this format must not accept — so it parses, and refuses."""
+    _raw(tmp_path, BANNERS, f"apiVersion: {desired.API_VERSION}\nstate: absent\n")
+
+    with pytest.raises(desired.DesiredError) as caught:
+        desired.load(default_registry, tmp_path)
+
+    assert "not supported yet" in str(caught.value)
+
+
+def test_absent_may_not_carry_a_spec(tmp_path: Path) -> None:
+    _raw(
+        tmp_path, BANNERS,
+        f"apiVersion: {desired.API_VERSION}\nstate: absent\nspec:\n  issue: x\n",
+    )
+
+    with pytest.raises(desired.DesiredError) as caught:
+        desired.load(default_registry, tmp_path)
+
+    assert "must not carry a spec" in str(caught.value)
+
+
+def test_present_requires_a_spec(tmp_path: Path) -> None:
+    """`spec: {}` declares an empty object; a missing spec is a file that
+    forgot to say anything, and the two must not be the same."""
+    _raw(tmp_path, BANNERS, f"apiVersion: {desired.API_VERSION}\nstate: present\n")
+
+    with pytest.raises(desired.DesiredError) as caught:
+        desired.load(default_registry, tmp_path)
+
+    assert "requires a `spec`" in str(caught.value)
+
+
+def test_an_empty_spec_is_a_valid_declaration(tmp_path: Path) -> None:
+    """Guards the guard for the rule above."""
+    _raw(tmp_path, BANNERS, f"apiVersion: {desired.API_VERSION}\nstate: present\nspec: {{}}\n")
+
+    declared = desired.load(default_registry, tmp_path)
+
+    assert len(declared) == 1
+
+
+def test_an_unknown_envelope_key_is_refused(tmp_path: Path) -> None:
+    """A typo'd `speec:` silently ignored would apply an empty object over a
+    live one. Refusing an unknown key costs a rename; ignoring it costs a
+    resource."""
+    _raw(
+        tmp_path, BANNERS,
+        f"apiVersion: {desired.API_VERSION}\nstate: present\nspeec:\n  issue: x\n",
+    )
+
+    with pytest.raises(desired.DesiredError) as caught:
+        desired.load(default_registry, tmp_path)
+
+    assert "unknown envelope key" in str(caught.value)
+
+
+# -- identity: the document is the authority ---------------------------------
+
+
+def test_a_document_may_restate_its_own_address(tmp_path: Path) -> None:
+    _raw(
+        tmp_path, BANNERS,
+        f"apiVersion: {desired.API_VERSION}\nstate: present\n"
+        f"kind: banners\nappliance: BR1-EC\nname: global\nspec:\n  issue: x\n",
+    )
+
+    declared = desired.load(default_registry, tmp_path)
+
+    assert list(declared.items) == [
+        Ref("appliance/banners", "global", appliance="BR1-EC").key()
+    ]
+
+
+@pytest.mark.parametrize(
+    "line,expect",
+    [
+        ("appliance: BR2-EC", "appliance"),
+        ("name: motd", "name"),
+        ("kind: bgp", "kind"),
+    ],
+)
+def test_a_document_disagreeing_with_its_path_is_invalid(
+    tmp_path: Path, line: str, expect: str
+) -> None:
+    """Neither one wins, because either winner is a trap: silently preferring
+    the path would apply a file whose contents say BR1-EC to BR2-EC, and
+    silently preferring the document would make the tree a lie."""
+    _raw(
+        tmp_path, BANNERS,
+        f"apiVersion: {desired.API_VERSION}\nstate: present\n{line}\nspec:\n  issue: x\n",
+    )
+
+    with pytest.raises(desired.DesiredError) as caught:
+        desired.load(default_registry, tmp_path)
+
+    assert expect in str(caught.value)
+    assert "refusing rather than choosing" in str(caught.value)
+
+
+# -- loading is all or nothing -----------------------------------------------
+
+
+def test_every_problem_is_reported_at_once(tmp_path: Path) -> None:
+    """A CI gate that surfaces one typo per run costs a round trip each time.
+    Fatal either way — this is about how much the operator learns per run."""
+    _raw(tmp_path, BANNERS, "issue: no envelope\n")
+    _raw(tmp_path, "appliances/BR2-EC/nonsense/global.yaml",
+         f"apiVersion: {desired.API_VERSION}\nstate: present\nspec: {{}}\n")
+
+    with pytest.raises(desired.DesiredError) as caught:
+        desired.load(default_registry, tmp_path)
+
+    message = str(caught.value)
+    assert "2 problem(s)" in message
+    assert "apiVersion" in message
+    assert "nonsense" in message
+
+
+def test_a_symlink_out_of_the_tree_is_refused(tmp_path: Path) -> None:
+    """`rglob` follows symlinks, so a link inside the tree can pull in another
+    checkout — or /etc — and have it read as declared intent. The declaration
+    set has to be exactly the reviewed directory."""
+    outside = tmp_path.parent / "outside-the-tree"
+    outside.mkdir(exist_ok=True)
+    (outside / "global.yaml").write_text(
+        f"apiVersion: {desired.API_VERSION}\nstate: present\nspec:\n  issue: smuggled\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "desired"
+    (root / "appliances" / "BR1-EC" / "banners").mkdir(parents=True)
+    _raw(root, "appliances/BR2-EC/banners/global.yaml",
+         f"apiVersion: {desired.API_VERSION}\nstate: present\nspec:\n  issue: real\n")
+    (root / "appliances" / "BR1-EC" / "banners" / "global.yaml").symlink_to(
+        outside / "global.yaml"
+    )
+
+    with pytest.raises(desired.DesiredError) as caught:
+        desired.load(default_registry, root)
+
+    assert "outside" in str(caught.value)
+
+
+# -- the declaration set has a stable identity -------------------------------
+
+
+def test_the_digest_is_stable_across_loads(tmp_path: Path) -> None:
+    _write(tmp_path, BANNERS, "issue: x\n")
+
+    first = desired.load(default_registry, tmp_path).digest
+    second = desired.load(default_registry, tmp_path).digest
+
+    assert first == second
+    assert len(first) == 64
+
+
+def test_the_digest_does_not_depend_on_where_the_checkout_lives(
+    tmp_path: Path
+) -> None:
+    """Two checkouts of the same reviewed declarations are the same desired
+    state. A digest that disagreed could not be used to say "this is the plan
+    that was approved"."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    _write(a, BANNERS, "issue: x\n")
+    _write(b, BANNERS, "issue: x\n")
+
+    assert desired.load(default_registry, a).digest == desired.load(default_registry, b).digest
+
+
+def test_a_changed_value_changes_the_digest(tmp_path: Path) -> None:
+    """Guards the guard: a constant digest would satisfy both tests above."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    _write(a, BANNERS, "issue: x\n")
+    _write(b, BANNERS, "issue: y\n")
+
+    assert desired.load(default_registry, a).digest != desired.load(default_registry, b).digest
