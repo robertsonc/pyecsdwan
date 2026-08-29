@@ -32,6 +32,20 @@ from typing import Any
 from pyecsdwan import config
 from pyecsdwan.contract import RawState, Ref
 
+#: On-disk schema version for ``meta.json``. A file claiming anything higher
+#: was written by a newer binary; this one refuses it rather than reading it
+#: through an older shape and rewriting it (#108).
+META_FORMAT = 1
+
+
+class JournalFormatError(Exception):
+    """A transaction's metadata was written by a binary this one cannot read.
+
+    Not corruption: the file is intact and the newer binary that wrote it can
+    still use it. Refusing keeps it that way — the danger is not failing to
+    read it, it is reading it wrongly and then writing it back.
+    """
+
 
 class JournalCorrupt(Exception):
     """The event log holds a record that is neither valid JSON nor explicable
@@ -102,15 +116,34 @@ class TxnMeta:
     confirm_deadline: str | None = None
     #: Ref keys included in the changeset, in apply order.
     items: list[str] = dataclasses.field(default_factory=list)
-    format: int = 1
+    format: int = META_FORMAT
+    #: Fields present on disk that this build does not model. Carried through
+    #: verbatim so a state transition written by this binary does not erase
+    #: metadata a newer one relies on — ``_write_meta`` rewrites the whole
+    #: file, so anything not held here is gone after the next STATE change.
+    extra: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
-        return dataclasses.asdict(self)
+        data = dataclasses.asdict(self)
+        extra = data.pop("extra", {})
+        # Known fields win: `extra` is unmodelled passengers, never an
+        # override for something this build is authoritative about.
+        return {**extra, **data}
 
     @staticmethod
     def from_json(data: dict[str, Any]) -> TxnMeta:
-        known = {f.name for f in dataclasses.fields(TxnMeta)}
-        return TxnMeta(**{k: v for k, v in data.items() if k in known})
+        fmt = data.get("format", META_FORMAT)
+        if not isinstance(fmt, int) or fmt > META_FORMAT:
+            raise JournalFormatError(
+                f"transaction metadata is format {fmt!r}, but this build reads at "
+                f"most {META_FORMAT}; refusing rather than rewriting it through an "
+                f"older shape"
+            )
+        known = {f.name for f in dataclasses.fields(TxnMeta)} - {"extra"}
+        return TxnMeta(
+            **{k: v for k, v in data.items() if k in known},
+            extra={k: v for k, v in data.items() if k not in known},
+        )
 
 
 class TxnJournal:
@@ -382,7 +415,7 @@ def list_txns(root: Path | None = None) -> list[TxnJournal]:
             continue
         try:
             out.append(TxnJournal.open(entry))
-        except (OSError, json.JSONDecodeError, TypeError):
+        except (OSError, json.JSONDecodeError, TypeError, JournalFormatError):
             # An unreadable journal (torn meta.json after a crash) is not
             # silently dropped from the world — it is surfaced so a stuck
             # transaction can't vanish from `show journal` / orphan recovery.
