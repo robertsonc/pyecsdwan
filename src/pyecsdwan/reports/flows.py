@@ -119,6 +119,24 @@ log = structlog.get_logger(__name__)
 #: The one real path. See the module docstring on the issue's wrong one.
 FLOWS_ENDPOINT = "/flow"
 
+#: **The wire flag means the opposite of its name (#94).** The vendored
+#: baseline documents ``ipEitherFlag`` as: "Enable directionality for IP. If
+#: true, ip1 will be treated as the source IP, and ip2 will be treated as the
+#: destination IP". So ``true`` is *directional* — ip1 matches the **source
+#: only** — and ``false`` is the either-end match the name suggests.
+#:
+#: This module sent ``true`` and meant "either end", so `show fabric flow <ip>`
+#: silently searched one direction: any host that mostly *receives* traffic
+#: answered "no flows found". `docs/futures/README.md` had flagged the
+#: name-versus-description contradiction as unverified; issue #94 is the live
+#: run that settled it — four healthy appliances, each reporting a non-zero
+#: flow census, returning zero matches for a real address.
+#:
+#: The bundled mock had encoded the same wrong belief, which is why every test
+#: agreed with the bug. It now implements the documented semantics, so the
+#: fixture can disagree with the code.
+IP_EITHER_FLAG_IS_DIRECTIONAL = True
+
 #: ``maxFlows`` is required, so there is no "everything" value — only a cap we
 #: choose. Large enough that a normal branch appliance is not truncated, small
 #: enough that a fleet-wide report stays a report.
@@ -357,13 +375,19 @@ class FlowFetch:
 
     ``reported_total`` is the response's own ``active.total_flows``; ``rows``
     is what came back. They differ when ``maxFlows`` truncated, which is
-    exactly what :attr:`bounded` exists to surface.
+    exactly what :attr:`bounded` exists to surface — but *only* for an
+    unfiltered read. See :attr:`filtered`.
     """
 
     target: Target
     rows: tuple[FlowRow, ...]
     active: Mapping[str, int]
     max_flows: int
+    #: Whether an address filter was sent. Load-bearing for :attr:`bounded`:
+    #: ``active.total_flows`` is the appliance's whole flow census and takes no
+    #: notice of ``ip1``, so comparing it against a *filtered* row count
+    #: compares two different populations.
+    filtered: bool = False
 
     @property
     def reported_total(self) -> int:
@@ -373,11 +397,21 @@ class FlowFetch:
     def bounded(self) -> bool:
         """True when ``maxFlows`` may have cut the answer short.
 
-        Two signals, either sufficient: the appliance's own census exceeds
-        what it returned, or it returned exactly the cap it was given (in
-        which case there is no way to know whether the next flow existed).
+        Hitting the cap is the signal that always applies: return exactly the
+        number asked for and there is no way to know whether the next flow
+        existed.
+
+        The census comparison applies **only to an unfiltered read** (#94).
+        On a filtered one it was always true and always misleading: a search
+        matching three flows on an appliance carrying nine hundred reported
+        itself truncated and told the operator to re-run with a higher
+        ``--max-flows``, which cannot change a server-side filtered result. The
+        issue that surfaced this shows it firing on four appliances at once for
+        a search that matched nothing at all.
         """
-        return len(self.rows) >= self.max_flows or self.reported_total > len(self.rows)
+        if len(self.rows) >= self.max_flows:
+            return True
+        return not self.filtered and self.reported_total > len(self.rows)
 
 
 def fetch_flows(
@@ -392,15 +426,21 @@ def fetch_flows(
     """One ``GET /flow`` against one appliance.
 
     ``nePk`` and ``maxFlows`` are always sent — both are required. When *ip*
-    is given it goes out as ``ip1``/``mask1`` with ``ipEitherFlag``, so the
-    **server** matches the address at either end of the flow. That is the
-    whole of #59: no client-side flow filtering happens anywhere in this
-    module.
+    is given it goes out as ``ip1``/``mask1``, so the **server** matches the
+    address. That is the whole of #59: no client-side flow filtering happens
+    anywhere in this module.
+
+    ``ip_either`` is *our* concept — "match the address at either end" — and
+    it is **not** what the wire flag of nearly that name means. See
+    :data:`IP_EITHER_FLAG_IS_DIRECTIONAL`.
     """
     params: dict[str, Any] = {"nePk": target.ne_pk, "maxFlows": max_flows}
     if ip:
         params["ip1"] = ip
-        params["ipEitherFlag"] = ip_either
+        # Inverted on purpose, and sent as an explicit string rather than a
+        # Python bool so the encoding is this module's decision and not a
+        # library's (same reasoning as `reports/versions.py`'s `cached`).
+        params["ipEitherFlag"] = "false" if ip_either else "true"
         if mask is not None:
             params["mask1"] = mask
     payload = ctx.client.get(FLOWS_ENDPOINT, params=params)
@@ -415,7 +455,9 @@ def fetch_flows(
     active: Mapping[str, int] = (
         {str(k): _int(v) for k, v in raw_active.items()} if isinstance(raw_active, Mapping) else {}
     )
-    return FlowFetch(target=target, rows=rows, active=active, max_flows=max_flows)
+    return FlowFetch(
+        target=target, rows=rows, active=active, max_flows=max_flows, filtered=bool(ip)
+    )
 
 
 def _fan_out_flows(

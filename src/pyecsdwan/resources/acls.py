@@ -105,6 +105,7 @@ from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
     Diff,
+    Ownership,
     RawState,
     Ref,
     Resource,
@@ -349,13 +350,13 @@ class Acls(Resource):
         }
         return {"acl": {name: acls[name] for name in sorted(acls)}}
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:
+    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
         ne_pk = self._ne_pk(ctx, ref)
         # Per-rule precision first: a rule the fabric itself flagged
         # gms_marked is server-owned regardless of what any template selects
         # (routes.py's pattern).
         if _has_gms_marked(self.fetch(ctx, ref)):
-            return "gms (gms_marked ACL rule present on this appliance)"
+            return Ownership.owned("gms (gms_marked ACL rule present on this appliance)")
         return ownership.owning_group(ctx, self.kind, ne_pk)
 
     # -- desired-state shaping -------------------------------------------------

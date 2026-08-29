@@ -29,7 +29,7 @@ import pyecsdwan.resources  # noqa: F401 - registers the built-in plugins
 from pyecsdwan import config, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.client import OrchClient
-from pyecsdwan.contract import Ctx, Ref, Reversibility, Tier
+from pyecsdwan.contract import Ctx, Owned, Ref, Reversibility, Tier
 from pyecsdwan.registry import default_registry
 from pyecsdwan.resources.policy_maps import (
     OptimizationMaps,
@@ -561,9 +561,9 @@ def test_e2e_managed_by_prefers_gms_marked(world: dict[str, Any]) -> None:
     # over the (here absent) template-section join.
     ctx = world["ctx"]
     ref = Ref(kind="appliance/route-map", name="global", appliance="HUB1-EC")
-    owner = RouteMaps().managed_by(ctx, ref)
-    assert owner is not None
-    assert "gms_marked" in owner
+    owns = RouteMaps().managed_by(ctx, ref)
+    assert owns.state is Owned.OWNED
+    assert "gms_marked" in owns.owner
 
 
 def test_e2e_managed_by_falls_back_to_template_join(world: dict[str, Any]) -> None:
@@ -573,17 +573,16 @@ def test_e2e_managed_by_falls_back_to_template_join(world: dict[str, Any]) -> No
     state.template_association["3.NE"] = ["QosStd"]
 
     ctx = world["ctx"]
-    assert (
-        QosMaps().managed_by(
-            ctx, Ref(kind="appliance/qos-map", name="global", appliance="BR1-EC")
-        )
-        == "template-group QosStd"
+    owns = QosMaps().managed_by(
+        ctx, Ref(kind="appliance/qos-map", name="global", appliance="BR1-EC")
     )
+    assert owns.state is Owned.OWNED
+    assert owns.owner == "template-group QosStd"
     assert (
-        QosMaps().managed_by(
-            ctx, Ref(kind="appliance/qos-map", name="global", appliance="BR2-EC")
-        )
-        is None
+        QosMaps()
+        .managed_by(ctx, Ref(kind="appliance/qos-map", name="global", appliance="BR2-EC"))
+        .state
+        is Owned.UNOWNED
     )
 
 

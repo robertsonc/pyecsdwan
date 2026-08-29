@@ -18,6 +18,7 @@ from pyecsdwan.cli import reference
 from pyecsdwan.cli.reference import CommandRow
 from pyecsdwan.diffing import render_diff_lines
 from pyecsdwan.journal import TxnJournal
+from pyecsdwan.reports import drift as drift_report
 from pyecsdwan.reports.bgpstate import BgpState
 
 #: Junos-style diff markers -> rich styles.
@@ -40,8 +41,22 @@ def render_plan(console: Console, plan: txn.Plan) -> None:
         console.print(Text(f"[edit {item.ref.key()}]", style="bold"))
         for marker, text in render_diff_lines(item.diff):
             console.print(Text(f"{marker} {text}", style=_MARKER_STYLES.get(marker, "")))
-        if item.owner:
-            console.print(Text(f"  managed-by: {item.owner}", style="bold yellow"))
+        # Both blocking states are shown, and in the same place: an operator
+        # who sees nothing under a diff should be able to read that as "nothing
+        # owns this", which is only true if UNKNOWN prints too (#20).
+        if item.ownership.blocks_write:
+            console.print(Text(f"  {item.ownership.label}", style="bold yellow"))
+    # Ahead of the dim warnings and in red: a collision is not advice, it is a
+    # commit that will be refused, and burying it among tier notes would let an
+    # operator write the whole changeset before finding out (#69).
+    for collision in plan.collisions:
+        console.print(
+            Text(
+                f"shared write target {collision.target} — claimed by "
+                f"{', '.join(collision.refs)}",
+                style="bold red",
+            )
+        )
     for warning in plan.warnings:
         console.print(Text(warning, style="dim"))
     if plan.empty:
@@ -127,12 +142,26 @@ def render_bgp_summary(console: Console, state: BgpState) -> None:
     table = Table(show_header=False, box=None)
     table.add_column("field", style="dim")
     table.add_column("value")
+    # Peers are counted from the neighbours the response actually listed, not
+    # from the summary block's own tally (#87). A live appliance sent neither
+    # `num_peers` nor `num_peers_active`, so this row read "None active of
+    # None" — a Python repr in operator output — directly above a table of two
+    # established sessions parsed from the same response. What we can verify is
+    # the rows; the summary's claim is shown too, and only when it disagrees.
+    peers = f"{state.observed_established} established of {state.observed_peers} observed"
+    if state.summary_peer_counts_missing:
+        peers += "  (the summary block reported no counts)"
+    elif state.summary_peer_counts_disagree:
+        peers += (
+            f"  (the summary block says {summary.num_peers_active} active "
+            f"of {summary.num_peers} — same response, disagreeing)"
+        )
     rows: list[tuple[str, object]] = [
-        ("state", f"{summary.state_name} ({summary.bgp_state})"),
+        ("state", summary.state_label),
         ("local ASN", summary.local_asn),
         ("router id", summary.rtr_id),
         ("local ip", summary.local_ip),
-        ("peers", f"{summary.num_peers_active} active of {summary.num_peers}"),
+        ("peers", peers),
         ("routes received", summary.num_bgp_rtes_rcvd),
         ("  from eBGP", summary.num_ebgp_rtes),
         ("  from iBGP", summary.num_ibgp_rtes),
@@ -237,3 +266,60 @@ def render_command_reference(console: Console, rows: list[CommandRow]) -> None:
             style="dim",
         )
     )
+
+
+#: Drift statuses -> style. `undeclared` is dim rather than green on purpose:
+#: it is not a passing row, it is a row nobody has said anything about.
+_DRIFT_STYLES: dict[str, str] = {
+    "drift": "bold yellow",
+    "in-sync": "green",
+    "undeclared": "dim",
+    "unreadable": "bold red",
+    "unsupported": "dim cyan",
+}
+
+
+def render_drift(console: Console, report: drift_report.Report) -> None:
+    """Fabric-wide drift (epic #8).
+
+    Every row is printed, including the ones that found nothing: a report that
+    listed only drift would make an unreadable appliance and a clean one look
+    identical, which is the failure this command exists to prevent.
+    """
+    table = Table(title=f"drift ({len(report.rows)} instance(s))")
+    table.add_column("kind")
+    table.add_column("appliance")
+    table.add_column("instance")
+    table.add_column("status")
+    table.add_column("detail")
+    for row in report.rows:
+        table.add_row(
+            row.noun,
+            row.appliance or Text("-", style="dim"),
+            row.name,
+            Text(row.status.value, style=_DRIFT_STYLES.get(row.status.value, "")),
+            Text(
+                f"{row.entries} path(s): {row.detail}" if row.entries else row.detail,
+                style="dim",
+            ),
+        )
+    console.print(table)
+
+    counts = report.counts
+    console.print(
+        "  ".join(
+            f"{name}: {n}" for name, n in counts.items() if n or name in ("drift", "in-sync")
+        )
+    )
+    for note in report.notes:
+        console.print(Text(note, style="dim"))
+    if not report.complete:
+        # Said outright, not left to be inferred from a count: the whole
+        # difference between this and a report that lies is this line.
+        console.print(
+            Text(
+                f"incomplete: {len(report.inconclusive)} instance(s) could not be compared, "
+                f"so \"no drift\" is not a claim this run can make",
+                style="bold red",
+            )
+        )

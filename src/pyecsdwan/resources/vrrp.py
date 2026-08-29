@@ -54,6 +54,7 @@ from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
     Diff,
+    Ownership,
     RawState,
     Ref,
     Resource,
@@ -278,7 +279,7 @@ class Vrrp(Resource):
 
     # -- ownership --------------------------------------------------------------
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:
+    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
         ne_pk = self._ne_pk(ctx, ref)
         return owning_group(ctx, self.kind, ne_pk)
 

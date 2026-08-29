@@ -539,10 +539,10 @@ def test_shell_completes_show_run_appliance_names(shell_state: ShellState) -> No
     """A third seam test, following the command through the tree: the scope
     noun, then the appliance name, then the flag that selects vendor text."""
     completer = ShellCompleter(shell_state)
-    assert "configuration" in completer._options(["show"])
-    assert "appliance" in completer._options(["show", "configuration"])
-    assert "BR1-EC" in completer._options(["show", "configuration", "appliance"])
-    assert "--format" in completer._options(["show", "configuration", "appliance", "BR1-EC"])
-    assert completer._options(
+    assert "configuration" in completer.next_tokens(["show"])
+    assert "appliance" in completer.next_tokens(["show", "configuration"])
+    assert "BR1-EC" in completer.next_tokens(["show", "configuration", "appliance"])
+    assert "--format" in completer.next_tokens(["show", "configuration", "appliance", "BR1-EC"])
+    assert completer.next_tokens(
         ["show", "configuration", "appliance", "BR1-EC", "--format"]
     ) == ["native"]

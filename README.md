@@ -13,9 +13,14 @@ never had:
 - **`commit confirm <minutes>`**: auto-rollback by a detached watchdog that
   survives SSH death, unless you confirm in time.
 - **`rollback <n>`**: Junos-style history from crash-safe journaled snapshots.
-- **Template-ownership detection**: direct appliance changes on
+- **Template-ownership detection, fail-closed**: direct appliance changes on
   template-managed sections are refused without `--override-template`, because
-  the next template push would silently revert them.
+  the next template push would silently revert them — and so are changes whose
+  ownership could not be *established* (an unreadable template selection, a
+  section name nobody has confirmed against a live Orchestrator). Ownership is
+  `owned` / `unowned` / `unknown`, and only `unowned` writes freely; it is
+  re-read immediately before the write, so associating a template group between
+  `compare` and `commit` cannot slip past the guard.
 - **Tier-0 raw passthrough**: `ec-cli api get|post|put|delete <path>` reaches
   *any* Orchestrator or appliance-proxy endpoint from day one — journaled for
   audit, loudly outside the transaction guarantees.
@@ -89,6 +94,7 @@ support status — and needs no Orchestrator connection at all.
 ```bash
 ec-cli set interface-labels global wan 3 name LTE
 ec-cli diff                     # exit 1 if changes pending -> CI drift check
+ec-cli drift                    # every instance, not just staged ones; 0/1/8
 ec-cli commit --confirm-minutes 10
 ec-cli commit                   # confirm within the window
 ec-cli rollback 1

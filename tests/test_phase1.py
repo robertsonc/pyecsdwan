@@ -12,7 +12,7 @@ import pytest
 from pyecsdwan import config, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.client import OrchClient
-from pyecsdwan.contract import Ctx, Ref
+from pyecsdwan.contract import Ctx, Owned, Ref
 from pyecsdwan.journal import TxnJournal, TxnState
 from pyecsdwan.registry import default_registry
 from pyecsdwan.resolver import Resolver
@@ -369,7 +369,11 @@ def test_ownership_join(world: dict[str, Any]) -> None:
     world["state"].template_association["3.NE"] = ["SecStd"]
 
     ctx = world["ctx"]
-    owner = ownership.owning_group(ctx, "appliance/security-policy", "3.NE")
-    assert owner == "template-group SecStd"
-    assert ownership.owning_group(ctx, "appliance/bgp", "3.NE") is None
-    assert ownership.owning_group(ctx, "appliance/security-policy", "5.NE") is None
+    owns = ownership.owning_group(ctx, "appliance/security-policy", "3.NE")
+    assert owns.state is Owned.OWNED
+    assert owns.owner == "template-group SecStd"
+    # SecStd is associated but selects no "bgp" section — and "bgp" is a
+    # guessed name, so a non-match distinguishes nothing (#20).
+    assert ownership.owning_group(ctx, "appliance/bgp", "3.NE").state is Owned.UNKNOWN
+    # 5.NE has no associated group at all: the one clean negative.
+    assert ownership.owning_group(ctx, "appliance/security-policy", "5.NE").state is Owned.UNOWNED

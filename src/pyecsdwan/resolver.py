@@ -27,6 +27,91 @@ class ResolveError(Exception):
     pass
 
 
+class ProjectedAway(KeyError):
+    """A field this project deliberately does not cache was read (#9).
+
+    Loud on purpose. The alternative — returning ``None`` for a dropped key —
+    is a silent wrong answer of exactly the kind this repository keeps finding:
+    an appliance's site would render blank rather than raising, and nothing
+    would say why.
+    """
+
+
+#: The only ``GET /appliance`` fields written to the on-disk cache.
+#:
+#: The inventory response is far wider than this on a real Orchestrator —
+#: serial numbers, addresses, software and license detail — and all of it used
+#: to land verbatim in ``~/.pyecsdwan/cache/<host>.json``, a plaintext file
+#: that outlives the process. None of it was read. Epic #9's definition of
+#: done asks that nothing be written unredacted; the cheapest way to not leak a
+#: field is to not store it.
+#:
+#: Each entry names what consumes it, because the set is only safe while it is
+#: complete — a field dropped from here that something still reads becomes a
+#: :class:`ProjectedAway` at runtime, not a blank cell.
+APPLIANCE_FIELDS: frozenset[str] = frozenset(
+    {
+        # Resolver.ne_pk_for / appliance_name_for / appliance_names, and every
+        # report that labels a row.
+        "hostName",
+        "nePk",
+        # The `nePk or id` fallback every consumer writes. Not exercised by the
+        # bundled mock, which always sends nePk — an empirical sweep of the
+        # suite therefore missed it, and dropping it would have broken exactly
+        # the fabrics that need it.
+        "id",
+        # `show appliances`, the shell's appliance table, fabric's by-site and
+        # by-model breakdowns.
+        "site",
+        "model",
+        # fabric.py's reachability and topology breakdowns.
+        "state",
+        "networkRole",
+    }
+)
+
+#: Sections cached whole, and why. `overlays` is not an index of names: the
+#: endpoint returns each overlay's whole *configuration*, which
+#: `resources/interface_labels.py` walks in full to find labels in use. There
+#: is no consumed-field subset to project it to.
+UNPROJECTED_SECTIONS: frozenset[str] = frozenset({"overlays", "template_groups"})
+
+
+def project_appliance(record: dict[str, Any]) -> dict[str, Any]:
+    """Keep only :data:`APPLIANCE_FIELDS`, in the order the server sent them."""
+    return {k: v for k, v in record.items() if k in APPLIANCE_FIELDS}
+
+
+class ApplianceRecord(dict[str, Any]):
+    """One cached appliance, which knows what it is *not* carrying.
+
+    A plain dict cannot tell "the Orchestrator did not send this" from "we
+    chose not to keep it", and the two need different answers: the first is
+    data, the second is a bug in :data:`APPLIANCE_FIELDS`.
+    """
+
+    def _check(self, key: Any) -> None:
+        if key not in APPLIANCE_FIELDS:
+            raise ProjectedAway(
+                f"{key!r} is not cached: the resolver keeps only "
+                f"{sorted(APPLIANCE_FIELDS)} of the appliance inventory (#9). "
+                f"Read it from a live GET /appliance, or add it to "
+                f"pyecsdwan.resolver.APPLIANCE_FIELDS if it belongs in the cache"
+            )
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        self._check(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key: Any) -> Any:
+        self._check(key)
+        return super().__getitem__(key)
+
+    def __contains__(self, key: Any) -> bool:
+        self._check(key)
+        return super().__contains__(key)
+
+
 def _suggest(name: str, known: list[str]) -> str:
     import difflib
 
@@ -48,8 +133,16 @@ class Resolver:
     # -- appliances ----------------------------------------------------------
 
     def appliances(self) -> list[dict[str, Any]]:
+        """Cached inventory, projected to :data:`APPLIANCE_FIELDS`.
+
+        Wrapped in :class:`ApplianceRecord` on the way out rather than only
+        projected on the way in, so reading a dropped field raises here instead
+        of quietly answering ``None`` three layers away.
+        """
         value = self._section("appliances", self._fetch_appliances)
-        return value if isinstance(value, list) else []
+        if not isinstance(value, list):
+            return []
+        return [ApplianceRecord(a) for a in value if isinstance(a, dict)]
 
     def ne_pk_for(self, name: str) -> str:
         """Appliance hostname -> nePk; falls back to accepting a raw nePk."""
@@ -142,8 +235,12 @@ class Resolver:
         self._save()
 
     def _fetch_appliances(self) -> list[dict[str, Any]]:
+        """Projected before it is stored, so an unwanted field is never written
+        to disk *or* held in memory — one rule, not two."""
         raw = self.client.get("/appliance")
-        return raw if isinstance(raw, list) else []
+        if not isinstance(raw, list):
+            return []
+        return [project_appliance(a) for a in raw if isinstance(a, dict)]
 
     def _section(self, name: str, fetch: Any) -> Any:
         entry = self._data.get(name)

@@ -40,7 +40,7 @@ from pyecsdwan.client import OrchApiError
 from pyecsdwan.contract import Ctx, Ref, Resource, Reversibility, Scope, Tier
 from pyecsdwan.journal import TxnJournal, TxnState, list_txns
 from pyecsdwan.registry import Registry, UnknownKind, default_registry
-from pyecsdwan.reports import DEFAULT_CONCURRENCY, applianceconfig, fabric, versions
+from pyecsdwan.reports import DEFAULT_CONCURRENCY, applianceconfig, drift, fabric, versions
 from pyecsdwan.reports import flows as flows_report
 from pyecsdwan.resolver import ResolveError
 
@@ -467,6 +467,74 @@ def diff_(ctx: typer.Context) -> None:
 
 
 app.command("compare", help="Alias for 'diff'.")(diff_)
+
+
+@app.command("drift")
+def drift_(
+    ctx: typer.Context,
+    kind: Annotated[
+        list[str] | None,
+        typer.Option("--kind", help="Limit to these kinds (repeatable). Default: every kind."),
+    ] = None,
+    timeout: Annotated[
+        float | None,
+        typer.Option("--timeout", help="Overall deadline (seconds) for the fan-out."),
+    ] = None,
+    max_concurrency: Annotated[
+        int,
+        typer.Option("--max-concurrency", help="Reads in flight at once."),
+    ] = DEFAULT_CONCURRENCY,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    assume_yes: Annotated[bool, _YES_OPTION] = False,
+) -> None:
+    """Fabric-wide drift: every instance of every kind, against staged intent.
+
+    `diff` compares only what you staged, so an empty candidate reports no
+    changes. This enumerates instead, and reports what `diff` had no reason to
+    mention: instances nobody has declared, instances that could not be read,
+    and kinds no curated resource can compare.
+
+    Exit 0 clean, 1 drift found, 8 the run was incomplete — and 8 outranks 1,
+    because "no drift" from a report that skipped part of the fabric is a claim
+    it has not earned.
+    """
+    state = _state(ctx)
+    rt_ctx, registry, settings = _bootstrap(state)
+    # Every kind, every instance: the heaviest read this CLI has. `list_refs`
+    # for most appliance-scope kinds is itself a per-appliance call, so the
+    # estimate counts the curated kinds rather than pretending it is one.
+    _gate_fanout(rt_ctx, assume_yes, calls_each=_drift_calls_each(registry, kind))
+    report = drift.collect(
+        rt_ctx,
+        registry,
+        CandidateStore(settings.host),
+        kinds=kind or None,
+        concurrency=max_concurrency,
+        timeout=timeout,
+    )
+    if as_json:
+        console.print_json(json.dumps(report.as_json(), default=str))
+    else:
+        render.render_drift(console, report)
+    raise typer.Exit(report.exit_code)
+
+
+def _drift_calls_each(registry: Registry, kinds: list[str] | None) -> int:
+    """Roughly how many calls this makes per appliance, for the cost prompt.
+
+    Appliance-scope kinds only: an orchestrator-scope read is one call for the
+    whole fabric, so counting it per appliance would inflate the estimate and
+    train operators to ignore the warning.
+    """
+    wanted = kinds or list(registry.kinds())
+    return max(
+        1,
+        sum(
+            1
+            for k in wanted
+            if k in registry.kinds() and registry.get(k).scope is Scope.APPLIANCE
+        ),
+    )
 
 
 @app.command()
@@ -2196,10 +2264,30 @@ def _render_resource(
         ref = Ref(kind=kind, name=instance, appliance=appliance)
 
     canonical = resource.normalize(resource.fetch(rt_ctx, ref))
+    # Reading config without knowing whether a template owns it is how an
+    # operator ends up making a direct change that the next push reverts (#20).
+    # Costs two round trips for one instance, and only the two states that
+    # matter are printed — UNOWNED says nothing an operator needs to act on.
+    owns = resource.managed_by(rt_ctx, ref)
     if as_json:
-        console.print_json(json.dumps({"ref": str(ref), "config": canonical}, default=str))
+        console.print_json(
+            json.dumps(
+                {
+                    "ref": str(ref),
+                    "config": canonical,
+                    "ownership": {
+                        "state": owns.state.value,
+                        "owner": owns.owner,
+                        "reason": owns.reason,
+                    },
+                },
+                default=str,
+            )
+        )
         return
     console.print(Text(f"# {ref}", style="dim"))
+    if owns.blocks_write:
+        console.print(Text(f"# {owns.label}", style="bold yellow"))
     if canonical is None:
         console.print("(not present)")
         return

@@ -13,6 +13,7 @@ that disagrees with its rows.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Iterator
 from typing import Any
@@ -438,3 +439,188 @@ def test_partial_outranks_stale(ctx: Ctx) -> None:
     payload = json.loads(result.stdout)
     assert payload["status"] == Outcome.PARTIAL.value
     assert payload["cached"] is True
+
+
+# -- #87: what a live appliance actually sent --------------------------------
+#
+# The report in #87 is one run against a real fabric, and it contains its own
+# contradiction: `show appliance S1-ecv-01 bgp summary` printed
+#
+#     state    code 11 (11)
+#     peers    None active of None
+#     routes received  0
+#
+# while `bgp neighbors`, parsed from the *same* `/bgp/state` response, listed
+# two peers in Established with 10 and 11 prefixes received. Three separate
+# defects, none of which any fixture here could reach: the mock always
+# populates the peer counts, and always reports a state code the map knows.
+
+
+def test_the_state_names_are_the_schemas_not_the_peer_state_machine() -> None:
+    """The one that would have hurt someone.
+
+    `bgp_state` is documented as "Overall state of the routerd & bgp
+    processes", enumerated 0-10 in the appliance baseline. The first
+    implementation filled 2-8 with the standard BGP *peer* FSM names, because
+    "BGP state" means that almost everywhere else. So an appliance reporting 6
+    — "RM Initializing" — was told its BGP was **established**.
+
+    Asserted against the schema's words, and specifically that the peer-FSM
+    vocabulary is gone: a rename back would be a confident wrong answer about
+    whether BGP is up, which is the only question this view exists to answer.
+    """
+    assert bgpstate.BGP_STATE_NAMES[6] == "rm initializing"
+    assert bgpstate.BGP_STATE_NAMES[2] == "mgmt stub initializing"
+    assert bgpstate.BGP_STATE_NAMES[5] == "rtm active"
+    peer_fsm = {"idle", "connect", "opensent", "openconfirm", "established", "clearing"}
+    assert not (set(bgpstate.BGP_STATE_NAMES.values()) & peer_fsm), bgpstate.BGP_STATE_NAMES
+    # 0, 1, 9 and 10 lined up by coincidence and must not have been disturbed.
+    assert bgpstate.BGP_STATE_NAMES[0] == "not enabled"
+    assert bgpstate.BGP_STATE_NAMES[9] == "active"
+
+
+def _summary_with(**overrides: Any) -> bgpstate.BgpSummary:
+    base: dict[str, Any] = {
+        "bgp_state": 9,
+        "bgp_state_str": 9,
+        "local_asn": 64501,
+        "local_ip": "10.254.1.1",
+        "rtr_id": "10.254.1.1",
+        "num_peers": 2,
+        "num_peers_active": 2,
+        "num_bgp_rtes_rcvd": 0,
+        "num_ebgp_rtes": 0,
+        "num_ibgp_rtes": 0,
+        "num_rib_rtes": 0,
+        "num_subs_installed": 0,
+        "reject_mismatches": 0,
+        "reject_unpreferred": 0,
+        "mgmt_stub_tot_errors": 0,
+        "mgmt_stub_last_err_str": "",
+        "tunbgp_tot_errors": 0,
+        "tunbgp_last_err_str": "",
+    }
+    base.update(overrides)
+    return bgpstate.BgpSummary(**base)
+
+
+def _peer(ip: str, state_str: str = "Established") -> bgpstate.BgpNeighbor:
+    return bgpstate.BgpNeighbor(
+        peer_ip=ip, asn=65001, peer_state=6, peer_state_str=state_str,
+        local_ip="10.254.1.1", rtr_id="10.254.1.1", rcvd_pfxs=10, sent_pfxs=2,
+        rcvd_updates=71, sent_updates=4, time_established=1, time_last_update=1,
+        peer_caps="75008",
+    )
+
+
+def _state(summary: bgpstate.BgpSummary, *peers: bgpstate.BgpNeighbor) -> bgpstate.BgpState:
+    return bgpstate.BgpState(
+        appliance="S1-ecv-01", ne_pk="12.NE", summary=summary,
+        neighbors=peers, neighbor_count=len(peers), cached=False,
+    )
+
+
+def test_an_unrecognised_state_code_says_so_once() -> None:
+    """The live box reported code 11; the vendored 7.2.0 enumeration stops at
+    10. Rendering was `f"{state_name} ({bgp_state})"`, which printed the number
+    twice — "code 11 (11)" — and gave no hint the tool did not recognise it."""
+    label = _summary_with(bgp_state=11).state_label
+    assert "11" in label
+    assert label.count("11") == 1, label
+    assert "unrecognised" in label and "7.2.0" in label
+
+
+def test_a_known_state_still_carries_its_number() -> None:
+    """Guards the fix from over-reach: the code is what an operator reads back
+    to support, so it must survive alongside the name."""
+    assert _summary_with(bgp_state=9).state_label == "active (9)"
+
+
+def test_peers_are_counted_from_the_neighbours_the_response_listed() -> None:
+    """The live payload carried neither `num_peers` nor `num_peers_active`, so
+    the row read "None active of None" — a Python repr in operator output —
+    directly above a table of two Established sessions from the same response.
+
+    What can be verified is the rows, so the rows are what the count comes
+    from, and the peer's own `peer_state_str` decides "established" rather than
+    a numeric code we would have to map (that mapping is what this issue found
+    to be wrong).
+    """
+    state = _state(
+        _summary_with(num_peers=None, num_peers_active=None),
+        _peer("172.16.254.1"),
+        _peer("172.16.254.2"),
+    )
+    assert state.observed_peers == 2
+    assert state.observed_established == 2
+    assert state.summary_peer_counts_missing
+
+
+def test_a_peer_the_appliance_does_not_call_established_is_not_counted() -> None:
+    state = _state(
+        _summary_with(num_peers=None, num_peers_active=None),
+        _peer("172.16.254.1"),
+        _peer("172.16.254.2", state_str="Idle"),
+    )
+    assert state.observed_peers == 2
+    assert state.observed_established == 1
+
+
+def test_a_configured_only_peer_is_observed_by_nobody() -> None:
+    """Configuration is not observation: a peer added from `/bgp/config` has no
+    live state, and counting it would restate intent as fact."""
+    configured = dataclasses.replace(_peer("10.200.0.9"), configured_only=True, peer_state_str="")
+    state = _state(
+        _summary_with(num_peers=None, num_peers_active=None), _peer("1.1.1.1"), configured
+    )
+    assert state.observed_peers == 1
+    assert state.observed_established == 1
+
+
+def test_a_summary_that_disagrees_with_its_own_rows_is_flagged() -> None:
+    """Both numbers came from one response. The report shows both rather than
+    quietly choosing which one the operator should have been told."""
+    state = _state(_summary_with(num_peers=0, num_peers_active=0), _peer("1.1.1.1"))
+    assert state.summary_peer_counts_disagree
+    assert not state.summary_peer_counts_missing
+
+
+def test_either_count_disagreeing_on_its_own_is_enough() -> None:
+    """Two independent comparisons, so each needs its own case.
+
+    A mutation sweep disabled the *total* comparison and the test above still
+    passed, because its fixture disagreed on both counts and the *active*
+    comparison caught it. These isolate them: one where only the total is
+    wrong, one where only the active count is.
+    """
+    one_peer = (_peer("1.1.1.1"),)
+    only_total_wrong = _state(_summary_with(num_peers=5, num_peers_active=1), *one_peer)
+    assert only_total_wrong.summary_peer_counts_disagree, "5 configured against 1 listed"
+
+    only_active_wrong = _state(_summary_with(num_peers=1, num_peers_active=0), *one_peer)
+    assert only_active_wrong.summary_peer_counts_disagree, "0 active against 1 established"
+
+
+def test_a_summary_that_agrees_is_not_flagged() -> None:
+    state = _state(_summary_with(num_peers=1, num_peers_active=1), _peer("1.1.1.1"))
+    assert not state.summary_peer_counts_disagree
+
+
+def test_no_python_none_reaches_the_operator() -> None:
+    """The literal defect in the report. Rendering a `None` tells the reader
+    nothing and looks like a crash that did not happen."""
+    from pyecsdwan.cli.render import render_bgp_summary
+
+    console = Console(record=True, width=200)
+    render_bgp_summary(
+        console,
+        _state(
+            _summary_with(bgp_state=11, num_peers=None, num_peers_active=None),
+            _peer("172.16.254.1"),
+            _peer("172.16.254.2"),
+        ),
+    )
+    out = console.export_text()
+    assert "None" not in out, out
+    assert "2 established of 2 observed" in out
+    assert "unrecognised code 11" in out

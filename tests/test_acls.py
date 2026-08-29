@@ -19,7 +19,7 @@ import pytest
 from pyecsdwan import config, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.client import OrchClient
-from pyecsdwan.contract import Ctx, Ref
+from pyecsdwan.contract import Ctx, Owned, Ref
 from pyecsdwan.journal import TxnState
 from pyecsdwan.resolver import Resolver
 
@@ -511,16 +511,20 @@ def test_del_dependent_directive_never_shows_as_drift(world: dict[str, Any]) -> 
 # -- managed_by: gms_marked preferred over the template-section join -----------
 
 
-def test_acl_managed_by_none_when_unmanaged(world: dict[str, Any]) -> None:
-    assert Acls().managed_by(world["ctx"], ACL_REF) is None
+def test_acl_managed_by_unowned_when_no_group_is_associated(world: dict[str, Any]) -> None:
+    """No associated template group is the one negative that holds whatever the
+    section names are: ownership needs a group, and there is none (#20)."""
+    owns = Acls().managed_by(world["ctx"], ACL_REF)
+    assert owns.state is Owned.UNOWNED
+    assert not owns.blocks_write
 
 
 def test_acl_managed_by_prefers_gms_marked(world: dict[str, Any]) -> None:
     state = world["state"]
     state.acls[NE_PK]["Overlay_BulkApps"]["entry"]["1000"]["gms_marked"] = True
-    owner = Acls().managed_by(world["ctx"], ACL_REF)
-    assert owner is not None
-    assert "gms_marked" in owner
+    owns = Acls().managed_by(world["ctx"], ACL_REF)
+    assert owns.state is Owned.OWNED
+    assert "gms_marked" in owns.owner
 
 
 def test_acl_managed_by_falls_back_to_template_section(world: dict[str, Any]) -> None:
@@ -528,7 +532,9 @@ def test_acl_managed_by_falls_back_to_template_section(world: dict[str, Any]) ->
     state.template_groups["Branch-Std"] = {"name": "Branch-Std", "templates": []}
     state.template_selection["Branch-Std"] = ["acls"]
     state.template_association[NE_PK] = ["Branch-Std"]
-    assert Acls().managed_by(world["ctx"], ACL_REF) == "template-group Branch-Std"
+    owns = Acls().managed_by(world["ctx"], ACL_REF)
+    assert owns.state is Owned.OWNED
+    assert owns.owner == "template-group Branch-Std"
 
 
 # -- orchestrator-scope e2e ----------------------------------------------------

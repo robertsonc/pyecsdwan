@@ -890,18 +890,24 @@ def _rollback_method(
 
 def _managed_by_method(endpoint: specs.Endpoint) -> list[str]:
     return [
-        "    def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:",
+        "    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:",
         *_docstring(
             "        ",
             "Template ownership for this appliance-scope section.",
-            "TODO(curation): pyecsdwan.ownership.KIND_TO_TEMPLATE_SECTIONS carries no "
-            f"entry for this kind, so this returns None -- which reads as 'no template "
-            f"owns it' and is an assumption, not a finding. Before promoting, add the "
-            f"template section name(s) covering {endpoint.path} to that map; the next "
-            f"template push would otherwise silently revert a direct write here.",
+            "TODO(curation): pyecsdwan.ownership.SECTION_MAP carries no entry for this "
+            "kind, so owning_group() answers UNKNOWN and the commit guard refuses a "
+            "direct write without --override-template. That is the intended state for "
+            "an uncurated stub: before promoting, add the template section name(s) "
+            f"covering {endpoint.path} to that map, verified against a live template "
+            f"group, or the next template push silently reverts a direct write here. "
+            f"(Until #20 this returned None, which read as 'no template owns it' -- an "
+            f"assumption wearing a finding's clothes.)",
         ),
         "        if ref.appliance is None:",
-        "            return None",
+        # One line on purpose: the emitter and the post-write formatter
+        # disagree about how to indent a wrapped call, and a golden test
+        # compares them byte for byte.
+        '            return Ownership.unknown(f"{KIND} needs an appliance on the ref for a nePk")',
         "        return owning_group(ctx, self.kind, ctx.resolver.ne_pk_for(ref.appliance))",
     ]
 
@@ -1150,6 +1156,7 @@ def render_stub_module(
             "Ctx",
             "Diff",
             "NotCurated",
+            "Ownership",
             "RawState",
             "Ref",
             "Resource",

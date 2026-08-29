@@ -18,7 +18,7 @@ import pyecsdwan.resources  # noqa: F401 - registers the built-in plugins
 from pyecsdwan import config, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.client import OrchClient
-from pyecsdwan.contract import Ctx, Ref, Reversibility, Scope, Tier
+from pyecsdwan.contract import Ctx, Owned, Ref, Reversibility, Scope, Tier
 from pyecsdwan.registry import default_registry
 from pyecsdwan.resolver import Resolver
 from pyecsdwan.resources.bgp import Bgp
@@ -219,9 +219,29 @@ def test_normalize_rejects_non_mapping_neighbor_entry():
 # -- managed_by ----------------------------------------------------------------
 
 
-def test_managed_by_none_when_no_template_group_selects_bgp(world: dict[str, Any]) -> None:
+def test_managed_by_unowned_when_no_group_is_associated(world: dict[str, Any]) -> None:
     ctx = world["ctx"]
-    assert Bgp().managed_by(ctx, REF) is None
+    assert Bgp().managed_by(ctx, REF).state is Owned.UNOWNED
+
+
+def test_managed_by_unknown_when_an_associated_group_does_not_select_bgp(
+    world: dict[str, Any],
+) -> None:
+    """The new behaviour, and the reason #20 is a P0. "bgp" is a guessed
+    section name — spelled after the ECOS path, never seen in a live
+    selected-section list — so a group that does not select it has not told us
+    anything: the group may select the real section under another name. The old
+    answer here was a confident None, which let a direct write straight through
+    to be reverted by the next push."""
+    ctx, state = world["ctx"], world["state"]
+    state.template_groups["Branch-Std"] = {"name": "Branch-Std"}
+    state.template_selection["Branch-Std"] = ["dns"]
+    state.template_association[NE_PK] = ["Branch-Std"]
+
+    owns = Bgp().managed_by(ctx, REF)
+    assert owns.state is Owned.UNKNOWN
+    assert owns.blocks_write
+    assert "unverified" in owns.reason
 
 
 def test_managed_by_reports_owning_template_group(world: dict[str, Any]) -> None:
@@ -230,8 +250,9 @@ def test_managed_by_reports_owning_template_group(world: dict[str, Any]) -> None
     state.template_selection["Default Template Group"] = ["bgp"]
     state.template_association[NE_PK] = ["Default Template Group"]
 
-    owner = Bgp().managed_by(ctx, REF)
-    assert owner == "template-group Default Template Group"
+    owns = Bgp().managed_by(ctx, REF)
+    assert owns.state is Owned.OWNED
+    assert owns.owner == "template-group Default Template Group"
 
 
 # -- apply/rollback: real writes through the transaction engine ---------------

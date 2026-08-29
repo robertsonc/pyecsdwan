@@ -29,7 +29,7 @@ import pyecsdwan.resources  # noqa: F401 - registers the built-in plugins
 from pyecsdwan import config, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.client import OrchClient
-from pyecsdwan.contract import Ctx, Ref, Reversibility, Scope
+from pyecsdwan.contract import Ctx, Owned, Ref, Reversibility, Scope
 from pyecsdwan.registry import default_registry
 from pyecsdwan.resolver import Resolver
 from pyecsdwan.resources.nat import (
@@ -428,9 +428,9 @@ def test_nat_maps_managed_by_prefers_gms_marked(settings: Any) -> None:
     respx.get(APPLIANCE_URL).mock(
         return_value=httpx.Response(200, json=copy.deepcopy(_RAW_ENVELOPE))
     )
-    owner = NatMaps().managed_by(_ctx(settings), MAPS_REF)
-    assert owner is not None
-    assert "gms_marked" in owner
+    owns = NatMaps().managed_by(_ctx(settings), MAPS_REF)
+    assert owns.state is Owned.OWNED
+    assert "gms_marked" in owns.owner
 
 
 @respx.mock
@@ -445,7 +445,9 @@ def test_nat_maps_managed_by_falls_back_to_template_join(settings: Any) -> None:
     respx.get(f"{BASE}/template/templateSelection").mock(
         return_value=httpx.Response(200, json=["natMaps"])
     )
-    assert NatMaps().managed_by(_ctx(settings), MAPS_REF) == "template-group NatStd"
+    owns = NatMaps().managed_by(_ctx(settings), MAPS_REF)
+    assert owns.state is Owned.OWNED
+    assert owns.owner == "template-group NatStd"
 
 
 def test_nat_maps_requires_appliance_on_ref(settings: Any) -> None:
@@ -659,7 +661,7 @@ def test_snat_maps_fetch_tolerates_no_content(settings: Any) -> None:
 
 def test_snat_maps_has_no_owner(settings: Any) -> None:
     # Orchestrator-scope config has no template owner (contract default).
-    assert SnatMaps().managed_by(_ctx(settings), SNAT_REF) is None
+    assert SnatMaps().managed_by(_ctx(settings), SNAT_REF).state is Owned.UNOWNED
 
 
 # =============================================================================

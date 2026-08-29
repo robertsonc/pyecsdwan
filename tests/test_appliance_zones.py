@@ -22,7 +22,7 @@ import pyecsdwan.resources  # noqa: F401 - registers the built-in plugins
 from pyecsdwan import config, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.client import OrchClient
-from pyecsdwan.contract import Ctx, Ref, Reversibility
+from pyecsdwan.contract import Ctx, Owned, Ref, Reversibility
 from pyecsdwan.registry import default_registry
 from pyecsdwan.resources.appliance_zones import ApplianceSecurityMaps, ApplianceZones
 
@@ -565,10 +565,12 @@ def test_e2e_zones_managed_by_ownership_join(world: dict[str, Any]) -> None:
 
     ctx = world["ctx"]
     ref = Ref(kind="appliance/zones", name="global", appliance="BR1-EC")
-    assert ApplianceZones().managed_by(ctx, ref) == "template-group NetStd"
+    owns = ApplianceZones().managed_by(ctx, ref)
+    assert owns.state is Owned.OWNED
+    assert owns.owner == "template-group NetStd"
 
     other_ref = Ref(kind="appliance/zones", name="global", appliance="BR2-EC")  # unassociated
-    assert ApplianceZones().managed_by(ctx, other_ref) is None
+    assert ApplianceZones().managed_by(ctx, other_ref).state is Owned.UNOWNED
 
 
 def test_e2e_secmaps_idempotent_round_trip_against_seeded_state(world: dict[str, Any]) -> None:
@@ -607,8 +609,8 @@ def test_e2e_secmaps_managed_by_prefers_gms_marked(world: dict[str, Any]) -> Non
     ctx = world["ctx"]
     ref = Ref(kind="appliance/security-maps", name="global", appliance="HUB1-EC")
     result = ApplianceSecurityMaps().managed_by(ctx, ref)
-    assert result is not None
-    assert "gms_marked" in result
+    assert result.state is Owned.OWNED
+    assert "gms_marked" in result.owner
 
 
 def test_e2e_secmaps_managed_by_falls_back_to_template_join(world: dict[str, Any]) -> None:
@@ -621,4 +623,6 @@ def test_e2e_secmaps_managed_by_falls_back_to_template_join(world: dict[str, Any
 
     ctx = world["ctx"]
     ref = Ref(kind="appliance/security-maps", name="global", appliance="BR1-EC")
-    assert ApplianceSecurityMaps().managed_by(ctx, ref) == "template-group FwStd"
+    owns = ApplianceSecurityMaps().managed_by(ctx, ref)
+    assert owns.state is Owned.OWNED
+    assert owns.owner == "template-group FwStd"

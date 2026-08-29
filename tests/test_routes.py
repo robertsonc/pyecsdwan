@@ -18,7 +18,7 @@ import pytest
 from pyecsdwan import config, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.client import OrchClient
-from pyecsdwan.contract import Ctx, Ref
+from pyecsdwan.contract import Ctx, Owned, Ref
 from pyecsdwan.journal import TxnState
 from pyecsdwan.resolver import Resolver
 
@@ -337,8 +337,8 @@ def test_whole_resource_delete_is_refused(world: dict[str, Any]) -> None:
 # -- managed_by: gms_marked preferred over the template-section join -----------
 
 
-def test_managed_by_none_when_unmanaged(world: dict[str, Any]) -> None:
-    assert Routes().managed_by(world["ctx"], REF) is None
+def test_managed_by_unowned_when_no_group_is_associated(world: dict[str, Any]) -> None:
+    assert Routes().managed_by(world["ctx"], REF).state is Owned.UNOWNED
 
 
 def test_managed_by_prefers_gms_marked(world: dict[str, Any]) -> None:
@@ -346,9 +346,9 @@ def test_managed_by_prefers_gms_marked(world: dict[str, Any]) -> None:
     iface = state.static_routes[NE_PK]["prefix"]["0.0.0.0/0"]["nhop"]["0.0.0.0"]["interface"]
     iface["default"]["gms_marked"] = True
 
-    owner = Routes().managed_by(world["ctx"], REF)
-    assert owner is not None
-    assert "gms_marked" in owner
+    owns = Routes().managed_by(world["ctx"], REF)
+    assert owns.state is Owned.OWNED
+    assert "gms_marked" in owns.owner
 
 
 def test_managed_by_falls_back_to_template_section(world: dict[str, Any]) -> None:
@@ -357,5 +357,6 @@ def test_managed_by_falls_back_to_template_section(world: dict[str, Any]) -> Non
     state.template_selection["Branch-Std"] = ["routes"]
     state.template_association[NE_PK] = ["Branch-Std"]
 
-    owner = Routes().managed_by(world["ctx"], REF)
-    assert owner == "template-group Branch-Std"
+    owns = Routes().managed_by(world["ctx"], REF)
+    assert owns.state is Owned.OWNED
+    assert owns.owner == "template-group Branch-Std"

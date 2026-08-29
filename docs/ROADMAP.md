@@ -26,9 +26,12 @@ URL-escape guard, confirm-vs-revert atomicity, default-fill idempotency, …).
 against a spec-confirmed appliance-proxy endpoint but not yet live-write-
 tested); `appliance/loopback` (#18, read+diff) + `loopback-orch`
 (#18, fabric-wide pool, full read-modify-write); `appliance/zones` +
-`appliance/security-maps` (#19). Template-ownership detection (#20) partially
-grounded — `dns`/`routes`/`shaper` section names confirmed live, the rest
-stay unverified placeholders.
+`appliance/security-maps` (#19). Template-ownership detection (#20) now
+fails closed: ownership is `owned`/`unowned`/`unknown`, anything unreadable or
+unverified refuses the write, and the check is repeated immediately before the
+write phase. Seven kinds carry live-confirmed section names; the remaining
+sixteen answer `unknown` on a non-match until someone verifies them against a
+real template group (`docs/live-validation.md`).
 
 **Phase 3 — orchestrator-scope breadth (#4), 8 of 9 issues.** Orchestrator
 firewall zones (#30); ACLs + IP objects + AppExpress groups (#31); NAT maps,
@@ -109,6 +112,21 @@ applied. Commit-time drift now **fails closed** — the engine used to notice
 that server state had moved since compare, recompute the diff and carry on,
 folding another operator's change into this one's changeset; `--rebase` opts
 in and re-merges intent over current state. `show locks` reports holders.
+
+
+*Fabric-wide drift (#8).* `ec-cli drift` enumerates every instance of every
+kind and compares it against staged intent. The rows worth having are the ones
+`diff` never had a reason to print: an instance nobody has declared is
+**undeclared**, not in sync — reporting it as clean is how an entirely
+unmanaged fabric passes a drift check. An instance that could not be read is
+**unreadable**, and a Tier-1 stub is **unsupported** (and is never fetched;
+there is no canonical form to compare, so the round trip is pure load on a
+control plane). Exit 0 / 1 / 8, and **8 outranks 1**: a run that skipped part
+of the fabric has not earned the word "clean", so incompleteness is reported
+ahead of the drift it did find. Unsaved running-config changes are a note, not
+a row — "differs from declared intent" and "differs from what is on flash" are
+two axes, and folding them together is the collapsing the whole command exists
+to avoid.
 
 *MCP trust boundary (#62).* `mcp_server/` reflectively exposed every public
 method of the vendored `pyedgeconnect` SDK — 641 on `Orchestrator`, ~250 of
@@ -206,7 +224,7 @@ from the registry so it cannot drift again.
 | **Async job handling** (#5) | no silent success on keyless pushes; per-appliance fan-out; preconfig channel; cancellation | #21–#24 |
 | **Tier-1 spec pipeline** (#6) ✅ | `tools/spec_sync.py`, model/binding/stub codegen, `show coverage`, promotion gating | #25–#29 |
 | **Fleet lifecycle** (#7) | discovery/approval, decommission cascade, preconfig, backup/restore, upgrades, licensing — IRREVERSIBLE class | in-epic checklist |
-| **Fabric ops & observability** (#8) | `drift`, declarative bulk apply, JSON Schema, dashboard-parity views | #54 (✅ shipped) + in-epic checklist |
+| **Fabric ops & observability** (#8) | `drift` (✅ shipped), declarative bulk apply, JSON Schema, dashboard-parity views | #54 (✅ shipped) + in-epic checklist |
 | **Production hardening** (#9) | concurrency, MCP trust boundary, CI/packaging, async-job fail-closed, evidence ladder, retry policy | #62–#68 (#62–#67 ✅ shipped; #68 open) |
 | **CLI information architecture** (#70) ✅ | intent-separated command taxonomy, spec-driven design; constitution + design corpus + grammar, then the migration itself | #49, #71–#78 (all shipped; one flag decision open) |
 | **(v2) RBAC broker** (#10) | direct-to-appliance access, gated — explicitly out of v1 scope | in-epic checklist |

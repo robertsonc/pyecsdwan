@@ -29,7 +29,7 @@ import pyecsdwan.resources  # noqa: F401 - registers the built-in plugins
 from pyecsdwan import config, ownership, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.client import OrchClient
-from pyecsdwan.contract import Ctx, Ref, Reversibility, Scope, Tier
+from pyecsdwan.contract import Ctx, Owned, Ref, Reversibility, Scope, Tier
 from pyecsdwan.registry import default_registry
 from pyecsdwan.resources.common_settings import (
     Banners,
@@ -557,7 +557,9 @@ def test_schedule_timezone_refuses_to_write_empty(settings: Any) -> None:
 
 def test_schedule_timezone_has_no_template_owner(settings: Any) -> None:
     res = ScheduleTimezone()
-    assert res.managed_by(_ctx(settings), Ref(kind=res.kind, name="global")) is None
+    # Orchestrator-scope: a positive UNOWNED, not a shrug — template groups
+    # push appliance config, so nothing template-owned can exist here.
+    assert res.managed_by(_ctx(settings), Ref(kind=res.kind, name="global")).state is Owned.UNOWNED
 
 
 # == e2e against the bundled mock =============================================
@@ -779,15 +781,17 @@ def test_e2e_managed_by_reports_owning_template_group(
     res = cls()
 
     # No association yet: nothing owns this section.
-    assert res.managed_by(ctx, _ref(res.kind, "BR1-EC")) is None
+    assert res.managed_by(ctx, _ref(res.kind, "BR1-EC")).state is Owned.UNOWNED
 
     state.template_groups["NetStd"] = {"name": "NetStd", "templates": []}
     state.template_selection["NetStd"] = [section, "dns"]
     state.template_association["3.NE"] = ["NetStd"]
 
-    assert res.managed_by(ctx, _ref(res.kind, "BR1-EC")) == "template-group NetStd"
+    owns = res.managed_by(ctx, _ref(res.kind, "BR1-EC"))
+    assert owns.state is Owned.OWNED
+    assert owns.owner == "template-group NetStd"
     # An unassociated appliance is still unowned.
-    assert res.managed_by(ctx, _ref(res.kind, "BR2-EC")) is None
+    assert res.managed_by(ctx, _ref(res.kind, "BR2-EC")).state is Owned.UNOWNED
 
 
 def test_e2e_plan_warns_on_template_owned_section(world: dict[str, Any]) -> None:

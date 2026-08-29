@@ -116,9 +116,6 @@ the wrong implementation pass every assertion.
   (Distinct from API-key auth, which this session validated works fine
   against live gear — this item is specifically about the interactive
   username/password session-login path.)
-- **Resolver cache projection.** `/appliance` is cached whole; project it to
-  the fields actually consumed (hostName/nePk/site/model) to avoid persisting
-  inventory/recon data. File mode is already 0o600.
 - **`OrchClient.appliance_request()` has no query-param passthrough.**
   `deleteDependencies` and similar flags aren't body fields, so
   `resources/appliance_zones.py` (#19) had to bypass the helper and call
@@ -133,15 +130,13 @@ the wrong implementation pass every assertion.
   `managed_by()` routinely, a short-TTL per-plan cache (keyed by nePk/group)
   would cut this down across a multi-resource changeset touching one
   appliance.
-- **Per-changeset "object lock" for resources sharing one server object.**
-  `appliance/deployment` (#12) and `appliance/dhcp` (#13) can both stage
-  changes to the *same* underlying `deployment` object in one commit; today
-  each does a correct but order-dependent read-modify-write with no
-  detection or reporting of the overlap (documented as a sharp edge in
-  `dhcp.py`'s module docstring). Worth a real fix — e.g. an optional
-  `Resource.write_target(ctx, ref) -> str | None` hook so `txn.py` can warn
-  at plan time — if a third resource starts sharing an object; two is still
-  proportionate to a docstring.
+- **A shared write target has no `--json` surface, because `compare` has
+  none.** #69 detects the collision at plan time, prints it in `compare`, and
+  refuses at commit. The issue also asked for it in JSON output — but `diff`/
+  `compare` takes no `--format`/`--json` today, so there is nothing to add the
+  field to. It goes in when the plan gets a machine-readable surface (epic #8's
+  bulk apply will want one anyway); the shape is `txn.Collision`, already a
+  frozen dataclass carrying `target` and `refs`.
 - **`Resource.list_refs()` has no cross-appliance enumeration support.**
   Its signature (`list_refs(self, ctx)`) can't express "every appliance ×
   this kind" without each resource re-deriving it from
@@ -330,17 +325,19 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   version-aware
   sort before 9.10 ships. Found while building #51; not fixed here because
   `specs.py` was owned by parallel work.
-- **`loopback.reclaim_deleted_ips()` builds a path that does not exist.** It
-  calls `DELETE /loopbackOrch/pool/reclaim/{id}` when given a `loopback_id`,
-  but neither vendored baseline has that path — the Orchestrator spec's
-  `DELETE /loopbackOrch/pool/reclaim` takes `id` as a **required query
-  parameter** ("Reclaim all deleted ip addresses or Reclaim deleted ip address
-  by id"). Both call forms are therefore wrong: the by-id one 404s, and the
-  "all" one omits a parameter the spec marks required. Found by #28's
-  declared-endpoints-exist-in-spec check; the function is a maintenance
-  helper no `apply()` path reaches, so it was left alone rather than fixed
-  in a coverage change. `Resource.endpoints` for `loopback-orch` declares only
-  the real `DELETE /loopbackOrch/pool/reclaim`.
+- **Bulk loopback reclaim is documented but unexposed, and "reclaim all" is
+  unresolved.** Fixing #60 settled the by-id call (`id` is a query parameter;
+  `/reclaim/{id}` is not a route) but not the other half of the vendor's own
+  summary, "Reclaim all deleted ip addresses **or** Reclaim deleted ip address
+  by id" — that operation's only parameter is `id`, marked required, so one
+  half of the sentence has no route behind it in anything vendored here.
+  `reclaim_deleted_ips()` therefore requires an id and the all-mode is not
+  offered. Two questions for whoever has a fabric: does an id-less
+  `DELETE /loopbackOrch/pool/reclaim` reclaim everything or 400, and are
+  `DELETE /loopbackOrch/pool/reclaimBySeg?segId=` and
+  `.../reclaimBySegRegSubnet?seg=&reg=&subnet=` (both unambiguous, neither
+  exposed) the intended bulk surface? See
+  `resources/loopback.RECLAIM_ALL_HAS_NO_KNOWN_ROUTE`.
 - **`appliance POST /virtualif/loopback` exists but `appliance/loopback` still
   refuses to write.** The module says "no documented endpoint" for the write
   path and `apply()` raises; the appliance baseline does list POST (and
@@ -388,7 +385,7 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   vendored spec documents `overlays` as *overlay IDs* joined by `|`
   (`"1|2"`); `mock/server.py` matches *overlay names* split on `,`. Sending
   the spec's form returns nothing from the mock, and vice versa. Nothing
-  today uses the filter — `show flows summary` (#58) counts rows from one
+  today uses the filter — `show fabric flows summary` (#58) counts rows from one
   read per appliance instead, for reasons documented in
   `reports/flows.py` — so this is latent rather than broken. Whoever adds an
   `--overlay` filter must resolve it against live gear first, and will also
@@ -419,12 +416,14 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   OpenAPI (`/broadcastCli` -> `text/plain` string) nor the payload examples
   document any endpoint that returns the per-appliance command output, and
   `docs/research/appliance-config.md` records the same ("Text response, no
-  per-appliance status from broadcastCli"). So `show run appliance A B` reads
+  per-appliance status from broadcastCli"). So `show configuration appliance A B
+  --format native` reads
   text per appliance through the proxy `cli` path via the bounded fan-out, and
   `--broadcast` is the opt-in "run this read across these appliances and
   confirm it ran" form. If a later Orchestrator release exposes broadcast
   output retrieval, `broadcast_read_command` is the one function that changes.
-- **`show run`'s security section derives its segment pairs instead of listing
+- **`show configuration appliance --format native`'s security section derives its
+  segment pairs instead of listing
   them, and reads deployment through the appliance proxy rather than the
   Orchestrator-scope endpoint** (issue #55). Two endpoint findings, both
   recorded here because a later Orchestrator release could make either moot:
@@ -501,10 +500,31 @@ orchestrator-scope path is ever wanted, the mock needs the route first.
 
 ### Smaller items
 
-- `show flows summary` counts rows because `active` carries no per-overlay
+- `show fabric flows summary` counts rows because `active` carries no per-overlay
   breakdown. A cell bounded by `--max-flows` renders as `2+` and the footer
   says so; if the API ever grows a per-overlay summary, the counting can go.
 - The mock's `overlays` filter on `GET /flow` splits names on `,` while the
   spec says IDs split on `|`. Nothing uses it. Reconcile if anything starts to.
+- **Resolved by #94: `ipEitherFlag` is directional when true.** This file
+  carried it as "name versus description, unverified live". The live run in
+  #94 settled it in favour of the description — `true` matches `ip1` as the
+  *source only*, so `show fabric flow <ip>` was searching one direction and
+  answering "no flows found" for any host that mostly receives traffic. The
+  client now sends `false`, and the mock implements the documented semantics
+  rather than the name it had been agreeing with.
+- **Still unexplained from #94: two appliances answer `GET /flow` with a hard
+  500.** `S3-ecv-01` and `S3-ecv-02` returned 500 in 42-48ms on every attempt
+  while four siblings answered 200 in 300-1500ms. A fast deterministic 500
+  looks like rejection rather than a failure during work, so a parameter those
+  two do not accept is one candidate and an appliance-side fault is another.
+  Worth checking whether `show fabric flows summary` — same endpoint, no
+  address parameters — succeeds on the same two appliances: if it does, the
+  filter arguments are implicated; if it does not, they are unhealthy.
+- The flow report labels any failed fan-out item "unreachable", including an
+  API error like that 500. The appliance may be perfectly reachable and the
+  *query* at fault, so the word sends an operator to check the wrong thing.
+  Renaming it touches the `--json` payload's `unreachable` key, so it wants
+  its own change rather than riding along with a P0 fix.
 - Zone and VRF ids in flow rows are rendered as integers; no name lookup.
-- `--section` on `show run` takes one name, not a repeatable list.
+- `--section` on `show configuration appliance --format native` takes one name,
+  not a repeatable list.

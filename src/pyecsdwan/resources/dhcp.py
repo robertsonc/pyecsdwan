@@ -48,20 +48,26 @@ the freshly-fetched object is skipped with a warning log (never invented) —
 this resource does not create interfaces or IPs, only their ``dhcpd``
 config.
 
-Known sharp edge — same-changeset overlap with ``appliance/deployment``:
-both this resource and ``appliance/deployment`` (#12) can stage changes to
-the *same underlying server object* in one changeset. There is no
-``dependencies`` relationship between them (neither legitimately needs to
-apply before the other — see the issue notes), so within one commit,
-whichever of the two applies second does a GET-then-POST against whatever
-the first one already wrote. That is correct, individually-consistent
-read-modify-write behavior — no data is lost — but if both stage
-*conflicting* values on overlapping paths (which cannot happen here, since
-this resource only ever touches ``dhcpd``/``dhcpFailover`` and
-``appliance/deployment`` in practice manages everything else) the effective
-end state depends on apply order within the changeset, which is otherwise
-unspecified. Neither resource detects or reports this; see the module's
-proposed ``docs/futures/`` entry for a possible fix.
+Same-changeset overlap with ``appliance/deployment`` — refused since #69:
+both this resource and ``appliance/deployment`` (#12) write the *same
+underlying server object*, so both declare the same
+:meth:`~pyecsdwan.contract.Resource.write_target` and a changeset containing
+both is refused at plan time.
+
+This paragraph used to say the overlap was harmless — that whichever applied
+second did a GET-then-POST against what the first had written, so "no data is
+lost". **That was only half true, and the wrong half was load-bearing.** It
+describes *this* resource, which re-reads the live object and splices its
+subtree in (see ``_write``). ``appliance/deployment`` does not: it posts the
+body it computed at plan time, so a DHCP change applied before it is silently
+overwritten. There is no ``dependencies`` relationship between the two and the
+apply order is unspecified, which made the outcome a coin toss between "fine"
+and "your DHCP change is gone".
+
+``tests/test_write_collisions.py`` drives the losing order deliberately, with
+the guard bypassed, so the loss is demonstrated rather than asserted — and so
+that the refusal can be softened with evidence if ``deployment.apply()`` ever
+starts re-reading.
 
 Reversibility: REVERSIBLE. ``fetch()`` (and therefore any journaled
 snapshot) is the full raw deployment object, so ``rollback()`` runs the same
@@ -100,6 +106,7 @@ from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
     Diff,
+    Ownership,
     RawState,
     Ref,
     Resource,
@@ -361,7 +368,13 @@ class Dhcp(Resource):
 
     # -- ownership ------------------------------------------------------------
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The whole ``deployment`` object on one appliance — which
+        :mod:`pyecsdwan.resources.deployment` replaces too (#69). Instance-scoped
+        by nePk: two appliances are two objects, not a conflict."""
+        return f"appliance {self._ne_pk(ctx, ref)} deployment"
+
+    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
         return ownership.owning_group(ctx, self.kind, self._ne_pk(ctx, ref))
 
     # -- enumeration ------------------------------------------------------------

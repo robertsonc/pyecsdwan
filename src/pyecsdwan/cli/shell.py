@@ -317,10 +317,45 @@ def dispatch(line: str, state: ShellState) -> None:
         dispatch_operational(line, state)
 
 
+#: The token an operator types to ask what may come next.
+HELP_TOKEN = "?"  # noqa: S105 - a question mark, not a credential
+
+
+def _help_for(prior: list[str], state: ShellState) -> Nonterminal:
+    """What may follow ``prior``, as the Nonterminal the renderer already knows.
+
+    Deliberately not a new answer: a Nonterminal is what the parser raises when
+    a token is *omitted*, so `show appliance A bgp` and `show appliance A bgp ?`
+    now print the same thing. Two spellings of one question deserve one answer.
+    """
+    options = ShellCompleter(state).next_tokens(prior)
+    path = " ".join(prior)
+    if not options:
+        note = (
+            "nothing follows this — it is a complete command"
+            if path
+            else "no commands are available here"
+        )
+        return Nonterminal(path=path or "(start)", options=(), note=note)
+    return Nonterminal(path=path or "(start)", options=options)
+
+
 def dispatch_operational(line: str, state: ShellState) -> None:
     """Execute one operational-mode line; command errors print red, never raise."""
     tokens = _tokenize(line, state.console)
     if not tokens:
+        return
+    if tokens[-1] == HELP_TOKEN:
+        # `?` is how a Junos operator asks "what now", and this shell answers
+        # every other way of asking (#89): omit the token and the parser raises
+        # a Nonterminal listing the continuations. Typing `?` produced
+        # "unknown command '?'" instead — the one spelling that reads as a
+        # question got treated as a noun.
+        #
+        # Routed through the completer's tree rather than a second table, so
+        # `?` and Tab cannot drift apart: they are the same function. That is
+        # Principle IV inside one interface.
+        _render_nonterminal(state.console, _help_for(tokens[:-1], state))
         return
     try:
         _run_operational(tokens, state)
@@ -883,7 +918,17 @@ def _show_fabric_config(args: list[str], state: ShellState) -> None:
 
     args, assume_yes = _take_yes_flag(args)
     if len(args) > 1:
-        raise ValueError(_SHOW_FABRIC_CONFIG_USAGE)
+        # Name what was unexpected (#89). This used to raise the bare usage
+        # line, so an operator drilling into `fabric deployment interfaces`
+        # was told the shape of the command but not that `deployment` had been
+        # accepted and `interfaces` was the surplus — and a usage string on its
+        # own reads as "everything you typed was wrong".
+        extra = " ".join(args[1:])
+        raise ValueError(
+            f"'{args[0]}' takes no further tokens, but got '{extra}'. "
+            f"Sections are a whole view, not a path into one.\n"
+            f"{_SHOW_FABRIC_CONFIG_USAGE}"
+        )
     section = args[0] if args else None
     try:
         sections = fabric.resolve_sections(section)
@@ -1181,14 +1226,14 @@ class ShellCompleter(Completer):
         else:
             current, prior = "", words
         try:
-            options = self._options(prior)
+            options = self.next_tokens(prior)
         except Exception:  # noqa: BLE001 - completion must never break the prompt
             return
         for option in sorted(set(options)):
             if option.startswith(current):
                 yield Completion(option, start_position=-len(current))
 
-    def _options(self, prior: list[str]) -> list[str]:
+    def next_tokens(self, prior: list[str]) -> list[str]:
         """Valid next tokens after ``prior``.
 
         Walks the same tree the dispatcher does, one frame per token, so a

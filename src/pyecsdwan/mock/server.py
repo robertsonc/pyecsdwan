@@ -1899,8 +1899,12 @@ class MockState:
     loopback_orch: dict[str, Any] = field(default_factory=_seed_loopback_orch)
     #: Pool allocation detail ({segmentId: {segment, subnet, totalAddr,
     #: addrAllocated, addrDeleted}}) — mutated only by the reclaim
-    #: endpoints' addrDeleted bookkeeping, never by POST /loopbackOrch.
+    #: endpoint's addrDeleted bookkeeping, never by POST /loopbackOrch.
     loopback_orch_pool: dict[str, Any] = field(default_factory=_seed_loopback_orch_pool)
+    #: Ids passed to DELETE /loopbackOrch/pool/reclaim, in order. The pool
+    #: counter alone cannot show *which* id was sent, which is how the path-vs-
+    #: query bug (#60) went unobserved here.
+    loopback_reclaimed_ids: list[int] = field(default_factory=list)
     # -- internal subnets (#37) --
     #: Fabric-wide internal-subnet table, replaced wholesale by
     #: POST /gms/internalSubnets2.
@@ -2714,9 +2718,21 @@ def create_app(state: MockState | None = None) -> FastAPI:
         """Active flows with the server-side filters a report relies on.
 
         `nePk` and `maxFlows` are required (FastAPI 422s without them, as the
-        real API 400s). `ipEitherFlag` is the one that matters: it matches an
-        address at *either* end, which is what makes `show flow <ip>` a server-
-        side query rather than a fetch-everything-and-filter.
+        real API 400s).
+
+        **`ipEitherFlag` means the opposite of what its name suggests**, and
+        this mock used to get it backwards (#94). The vendored baseline says:
+        "Enable directionality for IP. If true, ip1 will be treated as the
+        source IP, and ip2 will be treated as the destination IP." So `true`
+        matches ip1 against the **source only**; `false` matches it at either
+        end.
+
+        This mock previously implemented the name — `true` meant either-end —
+        which is also what `reports/flows.py` believed, so the two agreed and
+        every test passed while the live fabric returned nothing for a real
+        address. A fixture that encodes the same assumption as the code under
+        test cannot falsify it; modelling the *documented* behaviour is what
+        lets the test disagree.
 
         `mask1`/`mask2` widen their address to a prefix. Omitted, the match is
         the single host — so a client that parses `<ip>/<prefix>` but forgets
@@ -2725,25 +2741,35 @@ def create_app(state: MockState | None = None) -> FastAPI:
         """
         rows = list(mock.flows.get(nePk, []))
         if ip1 and ipEitherFlag:
+            # Directional: ip1 is the source end, and nothing else.
+            rows = [r for r in rows if _flow_ip_matches(r.get("ip1"), ip1, mask1)]
+        elif ip1:
             rows = [
                 r
                 for r in rows
                 if _flow_ip_matches(r.get("ip1"), ip1, mask1)
                 or _flow_ip_matches(r.get("ip2"), ip1, mask1)
             ]
-        elif ip1:
-            rows = [r for r in rows if _flow_ip_matches(r.get("ip1"), ip1, mask1)]
         if ip2:
             rows = [r for r in rows if _flow_ip_matches(r.get("ip2"), ip2, mask2)]
         if overlays:
             wanted = {o.strip() for o in overlays.split(",") if o.strip()}
             rows = [r for r in rows if r.get("overlayName") in wanted]
         truncated = rows[:maxFlows]
-        passthrough = sum(1 for r in truncated if r.get("overlayName") == "Passthrough")
+        # `active` is the appliance's own flow census: the whole table, taking
+        # no notice of `ip1` or `maxFlows`. This used to be recomputed from
+        # `truncated`, which made `reported_total > len(rows)` impossible and
+        # left the truncation signal it feeds untested (#94) — the mock could
+        # not reproduce the very condition a live fabric reported, where four
+        # appliances answered a filtered search with zero rows and a non-zero
+        # census. Counting the unfiltered table is both what the real API does
+        # and what lets a test tell the two populations apart.
+        census = list(mock.flows.get(nePk, []))
+        passthrough = sum(1 for r in census if r.get("overlayName") == "Passthrough")
         return {
             "active": {
-                "total_flows": len(truncated),
-                "flows_optimized": len(truncated) - passthrough,
+                "total_flows": len(census),
+                "flows_optimized": len(census) - passthrough,
                 "flows_passthrough": passthrough,
                 "flows_management": 0,
                 "flows_with_issues": 0,
@@ -2819,21 +2845,29 @@ def create_app(state: MockState | None = None) -> FastAPI:
     async def get_loopback_orch_pool() -> Any:
         return mock.loopback_orch_pool
 
-    @api.delete("/loopbackOrch/pool/reclaim/{loopback_id}")
-    async def reclaim_one_loopback_ip(loopback_id: int) -> Response:
+    # One route, `id` as a required query parameter — which is all the vendored
+    # sources describe (#60). This mock used to serve two: a
+    # `/reclaim/{loopback_id}` path form that exists in neither the 7.2.0
+    # baseline nor the vendor's 9.3-9.6 collections, and an argument-less
+    # "reclaim all". The resource called both, so the suite confirmed a request
+    # a real Orchestrator would 404 rather than catching it.
+    #
+    # Neither is modeled now. The path form is not a route; the all-mode is the
+    # unresolved half of the vendor's own summary (see
+    # `resources/loopback.RECLAIM_ALL_HAS_NO_KNOWN_ROUTE`) and inventing a
+    # behavior for it here is exactly how the last invented route survived. A
+    # missing `id` is rejected, per the baseline's `required: true`.
+    @api.delete("/loopbackOrch/pool/reclaim")
+    # `id` shadows the builtin on purpose: FastAPI binds the query key from
+    # the parameter name, and the wire name is `id`.
+    async def reclaim_loopback_ip(id: int) -> Response:
+        mock.loopback_reclaimed_ids.append(id)
         # Mock bookkeeping only: decrements segment "0"'s addrDeleted count
         # (no per-id deleted-ip history is modeled here) so the route is
         # observably real rather than a no-op 204.
         pool = mock.loopback_orch_pool.get("0")
         if isinstance(pool, dict) and pool.get("addrDeleted", 0) > 0:
             pool["addrDeleted"] -= 1
-        return Response(status_code=204)
-
-    @api.delete("/loopbackOrch/pool/reclaim")
-    async def reclaim_all_loopback_ips() -> Response:
-        for pool in mock.loopback_orch_pool.values():
-            if isinstance(pool, dict):
-                pool["addrDeleted"] = 0
         return Response(status_code=204)
 
     # -- end loopback (#18) ---------------------------------------------------
