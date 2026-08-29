@@ -34,7 +34,12 @@ from pyecsdwan import audit, config, desired, evidence, locking, runtime, specs,
 from pyecsdwan import journal as journal_mod
 from pyecsdwan import registry as registry_mod
 from pyecsdwan import retry as retry_mod
-from pyecsdwan.candidate import CandidateCorruptError, CandidateStore, IntentSource
+from pyecsdwan.candidate import (
+    CandidateCorruptError,
+    CandidateFormatError,
+    CandidateStore,
+    IntentSource,
+)
 from pyecsdwan.cli import fanout, outcomes, reference, render
 from pyecsdwan.cli.outcomes import Outcome
 from pyecsdwan.client import OrchApiError
@@ -3014,6 +3019,7 @@ def main() -> None:
         ResolveError,
         UnknownKind,
         CandidateCorruptError,
+        CandidateFormatError,
         ValueError,
     ) as exc:
         if _DEBUG:

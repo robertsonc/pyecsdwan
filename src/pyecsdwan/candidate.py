@@ -57,6 +57,32 @@ def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+#: On-disk schema version for the candidate store. Bumped only alongside an
+#: entry in :data:`CANDIDATE_MIGRATIONS`; a file claiming anything higher was
+#: written by a newer binary and is refused rather than guessed at (#108).
+CANDIDATE_FORMAT = 1
+
+#: Older formats this binary knows how to read, mapped to the function that
+#: brings one forward. Empty because 1 is the first version — the mapping
+#: exists so adding version 2 is a change here rather than a new mechanism.
+CANDIDATE_MIGRATIONS: dict[int, Any] = {}
+
+#: Every mode `materialize_desired` knows how to honour. Anything else is an
+#: error: modes decide whether omitted keys keep their live values, and
+#: guessing that is the difference between a replace and a merge.
+SUPPORTED_MODES = frozenset({"merge", "replace", "delete"})
+
+
+class CandidateFormatError(Exception):
+    """The candidate store was written by a binary this one cannot read.
+
+    Distinct from :class:`CandidateCorruptError`, which quarantines the file:
+    a future format is not damaged, it is simply newer, and moving it would
+    destroy state the binary that wrote it can still use. Refuse and leave the
+    bytes alone (#108).
+    """
+
+
 def materialize_desired(item: CandidateItem, current_canonical: Any) -> Any:
     """The desired canonical-input state for one candidate item.
 
@@ -68,6 +94,16 @@ def materialize_desired(item: CandidateItem, current_canonical: Any) -> Any:
         return None
     if item.mode == "replace":
         return copy.deepcopy(item.intent)
+    if item.mode != "merge":
+        # Not a fallback to merge. An unrecognised mode used to land here
+        # silently, so `replace-all` — one typo from `replace` — merged
+        # instead, leaving on the appliance exactly the keys the operator
+        # meant to remove (#108). Checked here as well as at load because
+        # `commit --rebase` re-materializes through this function directly.
+        raise CandidateFormatError(
+            f"candidate item {item.ref_key} has unknown mode {item.mode!r}; "
+            f"expected one of {', '.join(sorted(SUPPORTED_MODES))}"
+        )
     base = copy.deepcopy(current_canonical) if isinstance(current_canonical, dict) else {}
     # Prune the deleted subtrees from the base FIRST, then merge intent, so
     # a `delete <subtree>` followed by a `set` under it keeps only the set
@@ -261,17 +297,44 @@ class CandidateStore:
                 f"candidate store {self.path} is corrupt ({exc}); moved to {corrupt}. "
                 f"Re-stage your changes."
             ) from exc
+        fmt = data.get("format", CANDIDATE_FORMAT)
+        if not isinstance(fmt, int) or fmt > CANDIDATE_FORMAT:
+            # Refused *before* anything is parsed and without touching the
+            # file: the newer binary that wrote it must still be able to use
+            # it, which quarantining or rewriting would prevent.
+            raise CandidateFormatError(
+                f"candidate store {self.path} is format {fmt!r}, but this build "
+                f"reads at most {CANDIDATE_FORMAT}; upgrade, or discard it with a "
+                f"build that understands it. The file has not been modified."
+            )
+        migrate = CANDIDATE_MIGRATIONS.get(fmt)
+        if migrate is not None:
+            data = migrate(data)
         for entry in data.get("items", []):
+            mode = entry.get("mode")
+            if mode not in SUPPORTED_MODES:
+                # A missing mode used to default to merge, which is the unsafe
+                # direction: it silently keeps live values the operator may
+                # have staged a replace to remove.
+                raise CandidateFormatError(
+                    f"candidate store {self.path} holds item "
+                    f"{entry.get('ref_key')!r} with mode {mode!r}; expected one of "
+                    f"{', '.join(sorted(SUPPORTED_MODES))}. The file has not been "
+                    f"modified."
+                )
             item = CandidateItem(
                 ref_key=entry["ref_key"],
-                mode=entry.get("mode", "merge"),
+                mode=mode,
                 intent=entry.get("intent", {}),
                 delete_paths=entry.get("delete_paths", []),
             )
             self.items[item.ref_key] = item
 
     def _save(self) -> None:
-        payload = {"format": 1, "items": [dataclasses.asdict(i) for i in self.items.values()]}
+        payload = {
+            "format": CANDIDATE_FORMAT,
+            "items": [dataclasses.asdict(i) for i in self.items.values()],
+        }
         # Unique temp name + fsync + 0o600: two shells staging against the same
         # host must not O_TRUNC each other's staging file, and the candidate can
         # hold secret config values.
