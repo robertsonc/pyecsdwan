@@ -667,9 +667,9 @@ def test_the_appliance_and_appliances_ambiguity_is_gone_by_construction(
 def test_shell_completer_offers_both_forms(shell_state: ShellState) -> None:
     """The two halves now sit under different tokens, and completion follows."""
     completer = ShellCompleter(shell_state)
-    assert set(fabric.SECTIONS) <= set(completer._options(["show", "configuration", "fabric"]))
-    assert "appliance" in completer._options(["show", "configuration"])
-    assert "fabric" in completer._options(["show", "configuration"])
+    assert set(fabric.SECTIONS) <= set(completer.next_tokens(["show", "configuration", "fabric"]))
+    assert "appliance" in completer.next_tokens(["show", "configuration"])
+    assert "fabric" in completer.next_tokens(["show", "configuration"])
 
 
 # -- read-only ----------------------------------------------------------------

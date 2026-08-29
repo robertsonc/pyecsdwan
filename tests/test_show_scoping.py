@@ -542,7 +542,7 @@ def test_completion_offers_instance_names_after_an_appliance_scoped_kind(
     """The position that used to offer nothing at all."""
     _base, mstate = mock_server
     _wide(shell_state, mstate, wide_fabric)
-    options = _completer(shell_state)._options(BANNERS_PRIOR)
+    options = _completer(shell_state).next_tokens(BANNERS_PRIOR)
     assert options == ["global"], options
 
 
@@ -550,7 +550,7 @@ def test_completion_offers_instance_names_after_an_orchestrator_kind(
     shell_state: ShellState,
 ) -> None:
     """Same position, other scope — `show <kind> <TAB>` with no appliance."""
-    options = _completer(shell_state)._options(["show", "configuration", "region"])
+    options = _completer(shell_state).next_tokens(["show", "configuration", "region"])
     assert options == ["Default", "EMEA"], options
 
 
@@ -568,7 +568,7 @@ def test_completion_offers_the_same_names_for_set_and_show(
         (BANNERS_PRIOR, ["set", "appliance", "BR1-EC", "banners"]),
         (["show", "configuration", "region"], ["set", "region"]),
     ):
-        assert completer._options(show) == completer._options(ref) != []
+        assert completer.next_tokens(show) == completer.next_tokens(ref) != []
 
 
 def test_completion_never_offers_another_appliances_instances(
@@ -583,7 +583,7 @@ def test_completion_never_offers_another_appliances_instances(
         "list_refs",
         _multi_instance_refs({"BR1-EC": ["only-on-br1"], "BR2-EC": ["only-on-br2"]}),
     )
-    options = _completer(shell_state)._options(BANNERS_PRIOR)
+    options = _completer(shell_state).next_tokens(BANNERS_PRIOR)
     assert options == ["only-on-br1"], options
 
 
@@ -601,7 +601,7 @@ def test_completion_offers_exactly_what_the_command_accepts(
         "list_refs",
         _multi_instance_refs({"BR1-EC": ["wan1", "wan2"], "BR2-EC": ["elsewhere"]}),
     )
-    offered = _completer(shell_state)._options(BANNERS_PRIOR)
+    offered = _completer(shell_state).next_tokens(BANNERS_PRIOR)
     assert offered == ["wan1", "wan2"], offered
     for name in offered:
         out = _shell(shell_state, f"show configuration appliance BR1-EC banners {name}")
@@ -617,8 +617,8 @@ def test_completion_does_not_offer_an_appliance_kind_at_the_bare_position(
     """The bare position is Orchestrator scope, so an appliance-scoped noun has
     nothing to offer there — the command rejects that form anyway, and a
     completion the command then refuses is worse than no completion."""
-    assert _completer(shell_state)._options(["show", "configuration", SINGLETON_NOUN]) == []
-    assert _completer(shell_state)._options(["show", "configuration", SINGLETON_KIND]) == []
+    assert _completer(shell_state).next_tokens(["show", "configuration", SINGLETON_NOUN]) == []
+    assert _completer(shell_state).next_tokens(["show", "configuration", SINGLETON_KIND]) == []
     out = _shell(shell_state, f"show configuration {SINGLETON_NOUN}")
     assert "appliance-scoped" in out, out
 
@@ -640,7 +640,7 @@ def test_completion_degrades_to_nothing_when_the_orchestrator_is_unreachable(
     resource = default_registry.get(SINGLETON_KIND)
     monkeypatch.setattr(type(resource), "list_refs", boom)
     completer = _completer(shell_state)
-    assert completer._options(BANNERS_PRIOR) == []
+    assert completer.next_tokens(BANNERS_PRIOR) == []
     document = Document("show appliance BR1-EC banners ")
     assert list(completer.get_completions(document, CompleteEvent())) == []
 
@@ -652,7 +652,7 @@ def test_completion_survives_a_resource_that_cannot_address_its_instances(
     the prompt — completion is not the place to report it."""
     resource = default_registry.get(SINGLETON_KIND)
     monkeypatch.setattr(type(resource), "list_refs", _DuplicateRefs.list_refs)
-    assert _completer(shell_state)._options(BANNERS_PRIOR) == []
+    assert _completer(shell_state).next_tokens(BANNERS_PRIOR) == []
 
 
 def test_completion_leaves_the_special_show_forms_alone(
@@ -661,10 +661,10 @@ def test_completion_leaves_the_special_show_forms_alone(
     """Instance completion sits after the special forms, which occupy the same
     token position: `show configuration fabric <TAB>` must still offer sections, not instances."""
     completer = _completer(shell_state)
-    assert "appliance" in completer._options(["show", "configuration"])
-    assert completer._options(["show", "transactions"]) == ["pending"]
-    assert completer._options(["show", "fabric", "flows"]) == ["summary"]
-    assert completer._options(["show", "journal"]) == []
+    assert "appliance" in completer.next_tokens(["show", "configuration"])
+    assert completer.next_tokens(["show", "transactions"]) == ["pending"]
+    assert completer.next_tokens(["show", "fabric", "flows"]) == ["summary"]
+    assert completer.next_tokens(["show", "journal"]) == []
 
 
 # -- the old spellings are gone (#74, compatibility.md rules 1 and 2) --------

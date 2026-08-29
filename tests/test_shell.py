@@ -115,7 +115,7 @@ def test_completer_offers_appliance_names_after_show_appliance(
     # no matter what the resolver had.
     monkeypatch.setattr(state.ctx.resolver, "appliance_names", lambda: ["S1-ecv-01"])
     completer = ShellCompleter(state)
-    assert completer._options(["show", "appliance"]) == ["S1-ecv-01"]
+    assert completer.next_tokens(["show", "appliance"]) == ["S1-ecv-01"]
 
 
 def test_completer_offers_kinds_after_show_appliance_name(state: ShellState) -> None:
@@ -127,7 +127,7 @@ def test_completer_offers_kinds_after_show_appliance_name(state: ShellState) -> 
     scope the operator has already given (#77).
     """
     completer = ShellCompleter(state)
-    options = completer._options(["show", "configuration", "appliance", "S1-ecv-01"])
+    options = completer.next_tokens(["show", "configuration", "appliance", "S1-ecv-01"])
     assert "bgp" in options and "banners" in options
     assert "bio" not in options, "orchestrator-scope kind offered in appliance position"
     assert not [o for o in options if "/" in o], f"registry keys leaked: {options}"
@@ -143,10 +143,10 @@ def test_completer_set_appliance_unaffected(state: ShellState) -> None:
     from pyecsdwan.contract import Scope
 
     completer = ShellCompleter(state)
-    options = completer._options(["set", "appliance", "S1-ecv-01"])
+    options = completer.next_tokens(["set", "appliance", "S1-ecv-01"])
     assert options == default_registry.cli_names(Scope.APPLIANCE)
     # `show` reaches the same position through `configuration`, because it must
     # name a datastore and `set` does not — the verb already is one.
-    show = completer._options(["show", "configuration", "appliance", "S1-ecv-01"])
+    show = completer.next_tokens(["show", "configuration", "appliance", "S1-ecv-01"])
     assert set(options) < set(show), show
     assert not [o for o in show if "/" in o], f"registry keys leaked: {show}"
