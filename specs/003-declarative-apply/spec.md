@@ -1,7 +1,8 @@
 # Feature specification: declarative apply from a desired-state directory
 
-**Feature:** `003-declarative-apply` · **Version:** 0.1.0 · **Status:** draft — proposed for owner ratification
+**Feature:** `003-declarative-apply` · **Version:** 1.0.0 · **Status:** ratified
 **Issue(s):** #101, under epic #8; implementation draft #98 · **Author:** repository owner + review agent · **Date:** 2026-08-29
+**Ratified:** 2026-08-29 by the repository owner through merge of #115
 
 ## Problem
 
@@ -52,8 +53,8 @@ failure.
 
 ## Governing decisions
 
-These decisions implement the repository owner's stated direction for this
-draft. Merging the ratification PR approves them as the 1.0 contract.
+These decisions were approved by the repository owner through merge of #115
+and are the binding 1.0 contract.
 
 | # | Decision | Resolution |
 |---|---|---|
@@ -181,13 +182,13 @@ declaratively unsupported even if the command ships for other kinds.
 ## Open questions
 
 No product question is intentionally left for the implementation to guess.
-Merging the ratification PR records owner approval of D1–D16. New questions
+Merge of #115 recorded owner approval of D1–D16. New questions
 that materially change authority, deletion, safety, or evidence reopen this
 spec rather than being absorbed in code review.
 
 ## Acceptance criteria
 
-- [ ] The owner approves D1–D16 and the package is marked 1.0.0 ratified before merge
+- [x] The owner approved D1–D16 through merge of #115; the package is recorded as 1.0.0 ratified
 - [ ] Partial/additive authority is stated consistently in CLI help, README, roadmap, JSON schema, and coverage output
 - [ ] Drift, dry-run, and apply share one intent universe and preflight
 - [ ] Desired-only creates are visible before apply
