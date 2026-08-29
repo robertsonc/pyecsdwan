@@ -133,15 +133,13 @@ the wrong implementation pass every assertion.
   `managed_by()` routinely, a short-TTL per-plan cache (keyed by nePk/group)
   would cut this down across a multi-resource changeset touching one
   appliance.
-- **Per-changeset "object lock" for resources sharing one server object.**
-  `appliance/deployment` (#12) and `appliance/dhcp` (#13) can both stage
-  changes to the *same* underlying `deployment` object in one commit; today
-  each does a correct but order-dependent read-modify-write with no
-  detection or reporting of the overlap (documented as a sharp edge in
-  `dhcp.py`'s module docstring). Worth a real fix — e.g. an optional
-  `Resource.write_target(ctx, ref) -> str | None` hook so `txn.py` can warn
-  at plan time — if a third resource starts sharing an object; two is still
-  proportionate to a docstring.
+- **A shared write target has no `--json` surface, because `compare` has
+  none.** #69 detects the collision at plan time, prints it in `compare`, and
+  refuses at commit. The issue also asked for it in JSON output — but `diff`/
+  `compare` takes no `--format`/`--json` today, so there is nothing to add the
+  field to. It goes in when the plan gets a machine-readable surface (epic #8's
+  bulk apply will want one anyway); the shape is `txn.Collision`, already a
+  frozen dataclass carrying `target` and `refs`.
 - **`Resource.list_refs()` has no cross-appliance enumeration support.**
   Its signature (`list_refs(self, ctx)`) can't express "every appliance ×
   this kind" without each resource re-deriving it from

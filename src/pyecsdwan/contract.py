@@ -394,6 +394,33 @@ class Resource:
         current = self.normalize(self.fetch(ctx, ref))
         return self.diff(ref, current, desired).empty
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """Identify the *server object* this instance replaces, or ``None``.
+
+        Different resources can write the same underlying object. The known
+        case is ``appliance/deployment`` and ``appliance/dhcp``: DHCP has no
+        endpoint of its own and lives in a subtree of the deployment object, so
+        both POST ``/deployment`` on the same appliance (#69).
+
+        Two individually-correct writes to one object are order-dependent, and
+        ordering is not a fix: ``dhcp`` re-reads and splices, so it survives
+        being second, while ``deployment`` posts the whole body it computed at
+        plan time, so whatever it follows is overwritten. Planning refuses when
+        two changed items return the same string.
+
+        The string is opaque and compared for equality only, so it must
+        identify the object *and its instance*: ``"appliance 3.NE deployment"``,
+        never ``"deployment"``, or two appliances would look like a conflict.
+
+        ``None`` means "shares nothing" and is right for most resources. It is
+        not a fail-open the way ownership's was: a resource writing an object
+        nobody else writes has no collision to miss, and
+        ``tests/test_write_collisions.py`` derives the resources that *do*
+        overlap from their declared endpoints, so a future pair cannot stay
+        silently undeclared.
+        """
+        return None
+
     def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
         """Would a template push revert a direct write to this instance?
 

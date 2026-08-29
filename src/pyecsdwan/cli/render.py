@@ -45,6 +45,17 @@ def render_plan(console: Console, plan: txn.Plan) -> None:
         # owns this", which is only true if UNKNOWN prints too (#20).
         if item.ownership.blocks_write:
             console.print(Text(f"  {item.ownership.label}", style="bold yellow"))
+    # Ahead of the dim warnings and in red: a collision is not advice, it is a
+    # commit that will be refused, and burying it among tier notes would let an
+    # operator write the whole changeset before finding out (#69).
+    for collision in plan.collisions:
+        console.print(
+            Text(
+                f"shared write target {collision.target} — claimed by "
+                f"{', '.join(collision.refs)}",
+                style="bold red",
+            )
+        )
     for warning in plan.warnings:
         console.print(Text(warning, style="dim"))
     if plan.empty:

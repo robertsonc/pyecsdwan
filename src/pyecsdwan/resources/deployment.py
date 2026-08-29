@@ -254,6 +254,12 @@ class Deployment(Resource):
 
     # -- ownership ------------------------------------------------------------
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The whole ``deployment`` object on one appliance — which
+        :mod:`pyecsdwan.resources.dhcp` replaces too (#69). Instance-scoped
+        by nePk: two appliances are two objects, not a conflict."""
+        return f"appliance {self._ne_pk(ctx, ref)} deployment"
+
     def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
         return ownership.owning_group(ctx, self.kind, self._ne_pk(ctx, ref))
 

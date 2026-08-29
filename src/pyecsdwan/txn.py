@@ -84,6 +84,11 @@ class PlanItem:
     ownership: Ownership = dataclasses.field(
         default_factory=lambda: Ownership.unknown("ownership was never checked")
     )
+    #: The server object this item replaces, or None when it shares none
+    #: (#69). Resolved once at plan time: unlike ownership it is a function of
+    #: the ref and the resource, not of server state, so it cannot go stale
+    #: between compare and commit.
+    write_target: str | None = None
     #: The staged intent this item came from. ``--rebase`` needs it to
     #: re-materialize desired state against what the server holds *now*;
     #: without it a rebase would re-apply a desired state computed from the
@@ -95,10 +100,25 @@ class PlanItem:
         return not self.diff.empty
 
 
+@dataclasses.dataclass(frozen=True)
+class Collision:
+    """Two or more changed items that replace the same server object (#69)."""
+
+    target: str
+    refs: tuple[str, ...]
+
+    def __str__(self) -> str:
+        return f"{self.target}: {', '.join(self.refs)}"
+
+
 @dataclasses.dataclass
 class Plan:
     items: list[PlanItem]
     warnings: list[str] = dataclasses.field(default_factory=list)
+    #: Shared write targets claimed by more than one changed item. Detected at
+    #: plan time so `compare` shows them, refused at commit time so nothing is
+    #: written first.
+    collisions: list[Collision] = dataclasses.field(default_factory=list)
 
     @property
     def changed_items(self) -> list[PlanItem]:
@@ -180,10 +200,35 @@ def build_plan(ctx: Ctx, registry: Registry, candidate: CandidateStore) -> Plan:
                 desired=desired,
                 diff=diff,
                 ownership=ownership,
+                write_target=resource.write_target(ctx, ref) if diff.entries else None,
                 candidate_item=cand,
             )
         )
-    return Plan(items=items, warnings=warnings)
+    collisions = _write_collisions(items)
+    for collision in collisions:
+        warnings.append(
+            f"shared write target {collision.target} — claimed by "
+            f"{', '.join(collision.refs)}; commit will refuse"
+        )
+    return Plan(items=items, warnings=warnings, collisions=collisions)
+
+
+def _write_collisions(items: list[PlanItem]) -> list[Collision]:
+    """Changed items that replace the same server object (#69).
+
+    Only changed items: an unchanged one issues no write, so it cannot
+    overwrite anything — which is also why ``build_plan`` does not ask an
+    unchanged item for a target it will never use.
+    """
+    by_target: dict[str, list[str]] = {}
+    for item in items:
+        if item.changed and item.write_target is not None:
+            by_target.setdefault(item.write_target, []).append(item.ref.key())
+    return [
+        Collision(target=target, refs=tuple(refs))
+        for target, refs in sorted(by_target.items())
+        if len(refs) > 1
+    ]
 
 
 def commit(
@@ -417,6 +462,21 @@ def _guard(
     override_template: bool,
     allow_untransactional: bool,
 ) -> None:
+    # First, because it is the most destructive class of problem here and the
+    # only one with no legitimate override: two writes to one object mean one
+    # of the two changes is silently discarded, and there is no flag for
+    # "discard my other change on purpose". Splitting the changeset into two
+    # commits is the fix, and the message says so (#69).
+    collisions = _write_collisions(changed)
+    if collisions:
+        raise CommitError(
+            "refusing: two changes in this changeset replace the same server object — "
+            + "; ".join(str(c) for c in collisions)
+            + ". Whichever applies second overwrites the first (deployment posts the "
+            "whole object it computed at plan time, so ordering does not save it). "
+            "Commit them separately."
+        )
+
     # `blocks_write`, not `state is OWNED`: UNKNOWN refuses on exactly the same
     # footing (#20). Reading the state directly here is how the fail-open comes
     # back, so the two lists below are split only to word the message.
