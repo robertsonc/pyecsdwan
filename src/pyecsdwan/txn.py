@@ -943,14 +943,23 @@ def _revert_txn_dir_locked(
                 f"{client_origin!r}"
             ],
         )
+    caveats: list[str] = []
     if client_origin is not None and is_legacy(journal):
         # It matched on a hostname, which is all a format-1 journal records.
-        # Say so rather than let a passed check imply the target was verified.
+        # Recorded *and* reported: the journal is the durable record, but the
+        # operator deciding whether to accept this restore reads the report,
+        # and a silent pass would imply the target had been verified.
         journal.append(
             "PROVENANCE_UNVERIFIED",
             reason="journal predates origin recording; matched on host only",
             orch_host=journal.meta.orch_host,
             session_origin=client_origin,
+        )
+        caveats.append(
+            f"note: transaction {journal.meta.txn_id} predates origin recording, so it "
+            f"was matched to this session on the hostname {journal.meta.orch_host!r} "
+            f"alone. If more than one Orchestrator answers to that name, check this is "
+            f"the right one before accepting the restore."
         )
     applied = journal.applied_refs()
     if not applied:
@@ -964,10 +973,10 @@ def _revert_txn_dir_locked(
             ok=True,
             txn_id=journal.meta.txn_id,
             state=TxnState.AUDIT_ONLY,
-            messages=["nothing to revert (no changes were applied)"],
+            messages=[*caveats, "nothing to revert (no changes were applied)"],
         )
     journal.append("REVERT_TRIGGERED", reason=reason)
-    report = CommitReport(ok=False, txn_id=journal.meta.txn_id)
+    report = CommitReport(ok=False, txn_id=journal.meta.txn_id, messages=list(caveats))
     snapshots = journal.snapshots()
     items: list[PlanItem] = []
     for key in reversed(applied):

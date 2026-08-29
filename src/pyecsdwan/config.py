@@ -148,13 +148,49 @@ class Settings:
 DEFAULT_PORTS = {"https": 443, "http": 80}
 
 
+def _fold_idn(host: str) -> str:
+    """Fold the Unicode and punycode spellings of one name onto one identity.
+
+    `münchen.example.com` and `xn--mnchen-3ya.example.com` are the same host,
+    and leaving them as two identities would fragment state for anyone using
+    an internationalized name. A name the codec refuses (an empty or over-long
+    label) is kept as it is: the job here is to fold equivalent spellings, not
+    to validate, and an unencodable name is still one identity — distinct from
+    every other, because the digest is taken over whatever comes out.
+    """
+    if host.isascii():
+        # Punycode is already ASCII, so encoding it would be a no-op; skipping
+        # keeps IP literals and ordinary names off the codec's error path.
+        return host
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return host
+
+
+def _authority(host: str, port: int | None, scheme: str) -> str:
+    """``host[:port]``, with an IPv6 literal put back in its brackets.
+
+    ``urlsplit`` strips them, and without them the port separator is the same
+    character as the address separator: `[::1]:8443` and `[::1:8443]` — two
+    genuinely different targets — would both render as `::1:8443` and share
+    everything #63 is about keeping apart.
+    """
+    if ":" in host:
+        host = f"[{host}]"
+    if port is None or port == DEFAULT_PORTS.get(scheme):
+        return host
+    return f"{host}:{port}"
+
+
 def canonical_origin(url: str) -> str:
     """One stable identity per Orchestrator, as ``scheme://host[:port][/path]``.
 
     Everything that distinguishes two targets is kept — scheme, host, port and
     base path — and everything that does not is normalized away: case in the
-    scheme and host, a default port written out or omitted, a trailing slash.
-    So `HTTPS://Orch.Example.COM:443/` and `https://orch.example.com` are one
+    scheme and host, a default port written out or omitted, a trailing slash,
+    and the two spellings of an internationalized name. So
+    `HTTPS://Orch.Example.COM:443/` and `https://orch.example.com` are one
     identity, and `https://orch/tenant-a` and `https://orch/tenant-b` are two.
     """
     parsed = urllib.parse.urlsplit(url if "://" in url else f"https://{url}")
@@ -162,10 +198,8 @@ def canonical_origin(url: str) -> str:
     host = (parsed.hostname or "").lower()
     if not host:
         raise ValueError(f"cannot derive an Orchestrator identity from {url!r}")
-    port = parsed.port
-    authority = host if port in (None, DEFAULT_PORTS.get(scheme)) else f"{host}:{port}"
     path = parsed.path.rstrip("/")
-    return f"{scheme}://{authority}{path}"
+    return f"{scheme}://{_authority(_fold_idn(host), parsed.port, scheme)}{path}"
 
 
 def display_host(origin: str) -> str:

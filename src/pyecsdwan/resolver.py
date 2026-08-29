@@ -127,8 +127,8 @@ class Resolver:
         cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         # Keyed by the canonical origin, not the display host: two tenants on
         # one hostname must not share a resolved nePk cache (#63).
-        safe = config.origin_slug(client.settings.origin)
-        self._cache_path = cache_dir / f"{safe}.json"
+        self._origin = client.settings.origin
+        self._cache_path = cache_dir / f"{config.origin_slug(self._origin)}.json"
         self._data: dict[str, Any] = {}
         self._load()
 
@@ -253,11 +253,27 @@ class Resolver:
         self._save()
         return value
 
+    #: Key under which the cache records which Orchestrator it came from.
+    #: Leading underscore so it cannot collide with a section name.
+    ORIGIN_KEY = "_origin"
+
     def _load(self) -> None:
         try:
-            self._data = json.loads(self._cache_path.read_text(encoding="utf-8"))
+            data = json.loads(self._cache_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             self._data = {}
+            return
+        if not isinstance(data, dict) or data.get(self.ORIGIN_KEY) != self._origin:
+            # The file name carries a digest of the origin, so this only fires
+            # for a cache moved, restored from a backup, or written by a build
+            # before #63. Discarded rather than refused: a cache is derivable,
+            # and one refetch is a far smaller cost than resolving a name to
+            # another fabric's nePk and then writing to it.
+            self._data = {}
+            return
+        # Stripped after the check, so nothing downstream can ever mistake the
+        # marker for a cache section.
+        self._data = {k: v for k, v in data.items() if k != self.ORIGIN_KEY}
 
     def _save(self) -> None:
         try:
@@ -268,7 +284,7 @@ class Resolver:
             tmp = Path(tmp_name)
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    json.dump(self._data, fh)
+                    json.dump({**self._data, self.ORIGIN_KEY: self._origin}, fh)
                 os.chmod(tmp, 0o600)
                 os.replace(tmp, self._cache_path)
             except BaseException:

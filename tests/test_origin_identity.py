@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -27,7 +28,7 @@ import pytest
 from pyecsdwan import config, journal
 from pyecsdwan.candidate import CandidateFormatError, CandidateStore
 from pyecsdwan.contract import Ref
-from pyecsdwan.locking import HostLock
+from pyecsdwan.locking import HostLock, LockBusy
 
 ROOT = Path(__file__).resolve().parents[1]
 #: Every tree the gate lints. Tests are included deliberately: a test that
@@ -332,7 +333,7 @@ def test_a_legacy_journal_records_that_its_provenance_was_not_verified(state_hom
     meta["format"] = 1
     (staged_txn.dir / "meta.json").write_text(json.dumps(meta))
 
-    txn_mod.revert_txn_dir(
+    report = txn_mod.revert_txn_dir(
         staged_txn.dir,
         reason="test",
         ctx=_ctx_for("https://orch.example.com"),
@@ -341,6 +342,9 @@ def test_a_legacy_journal_records_that_its_provenance_was_not_verified(state_hom
     reopened = journal.TxnJournal.open(staged_txn.dir)
     kinds = [e["event"] for e in reopened.events()]
     assert "PROVENANCE_UNVERIFIED" in kinds, kinds
+    # And the operator deciding whether to accept the restore has to see it:
+    # the journal is the durable record, the report is what they read.
+    assert any("predates origin recording" in m for m in report.messages), report.messages
 
 
 def test_a_format_two_journal_records_no_such_caveat(state_home):
@@ -357,3 +361,185 @@ def test_a_format_two_journal_records_no_such_caveat(state_home):
     )
     reopened = journal.TxnJournal.open(staged_txn.dir)
     assert "PROVENANCE_UNVERIFIED" not in [e["event"] for e in reopened.events()]
+
+
+# -- spellings the parser itself could collapse ------------------------------
+
+
+@pytest.mark.parametrize(
+    "a,b",
+    [
+        # `urlsplit` strips the brackets, and without them the port separator
+        # is the same character as the address separator.
+        ("https://[::1]:8443", "https://[::1:8443]"),
+        ("https://[2001:db8::1]:443", "https://[2001:db8::1:443]"),
+    ],
+)
+def test_two_ipv6_targets_are_not_collapsed_by_the_parser(a, b):
+    assert config.canonical_origin(a) != config.canonical_origin(b)
+
+
+def test_an_ipv6_origin_keeps_its_brackets():
+    """Or the display host, the legacy match and the readable half of the file
+    name all inherit the same ambiguity."""
+    origin = config.canonical_origin("https://[::1]:8443")
+    assert origin == "https://[::1]:8443"
+    assert config.display_host(origin) == "[::1]:8443"
+
+
+def test_an_ipv6_default_port_still_normalizes():
+    assert config.canonical_origin("https://[::1]:443") == config.canonical_origin(
+        "https://[::1]"
+    )
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "https://münchen.example.com/x",
+        "https://xn--mnchen-3ya.example.com/x",
+        "https://MÜNCHEN.example.com/x",
+    ],
+)
+def test_the_spellings_of_an_internationalized_name_are_one_identity(spelling):
+    assert config.canonical_origin(spelling) == "https://xn--mnchen-3ya.example.com/x"
+
+
+def test_a_name_the_idna_codec_refuses_is_still_an_identity():
+    """Folding equivalent spellings is the job; validating a hostname is not.
+    A name that cannot be encoded still has to key state rather than raise."""
+    label = "ü" * 70
+    origin = config.canonical_origin(f"https://{label}.example.com")
+    assert label in origin
+    assert config.origin_slug(origin)
+
+
+# -- upgrading with work already staged --------------------------------------
+
+
+def test_work_staged_by_an_older_build_is_adopted_not_lost(tmp_path):
+    """The store moved to an origin-keyed name. Reading only the new name
+    would report an empty candidate to an operator who has work staged —
+    which reads as 'nothing to commit', and the work is re-done or lost."""
+    legacy = tmp_path / "orch.example.com.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "format": 1,
+                "items": [
+                    {
+                        "ref_key": "interface_label/L1",
+                        "mode": "replace",
+                        "intent": {"name": "L1"},
+                        "delete_paths": [],
+                    }
+                ],
+            }
+        )
+    )
+    store = CandidateStore("https://orch.example.com", root=tmp_path)
+    assert list(store.items) == ["interface_label/L1"]
+
+    # Retired on the next save, not on read: a read-only session must not
+    # mutate state, and leaving it would let a later session read it back.
+    store.set_desired(Ref("interface_label", "L2"), {"name": "L2"})
+    assert not legacy.exists()
+    assert json.loads(store.path.read_text())["origin"] == "https://orch.example.com"
+
+
+def test_the_new_name_wins_over_a_legacy_file(tmp_path):
+    """Otherwise the fallback would quietly undo the fix for anyone who has
+    both, which is everyone mid-migration."""
+    store = CandidateStore("https://orch.example.com", root=tmp_path)
+    store.set_desired(Ref("interface_label", "NEW"), {"name": "NEW"})
+    (tmp_path / "orch.example.com.json").write_text(
+        json.dumps({"format": 1, "items": [
+            {"ref_key": "interface_label/OLD", "mode": "replace",
+             "intent": {}, "delete_paths": []}
+        ]})
+    )
+    assert list(CandidateStore("https://orch.example.com", root=tmp_path).items) == [
+        Ref("interface_label", "NEW").key()
+    ]
+
+
+# -- across processes, which is the only place exclusion is real -------------
+
+_STAGE_AND_HOLD = """
+import sys, time
+from pathlib import Path
+from pyecsdwan.candidate import CandidateStore
+from pyecsdwan.contract import Ref
+from pyecsdwan.locking import HostLock
+origin, name, ready = sys.argv[1:4]
+store = CandidateStore(origin)
+store.set_desired(Ref("interface_label", name), {"name": name})
+with HostLock(origin, "commit", timeout=10.0):
+    Path(ready).write_text("held")
+    time.sleep(120)
+"""
+
+
+def _spawn(state_home, origin: str, name: str, ready):
+    import os
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _STAGE_AND_HOLD, origin, name, str(ready)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=dict(os.environ, ECSDWAN_HOME=str(state_home)),
+    )
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        if ready.exists():
+            return proc
+        if proc.poll() is not None:
+            raise AssertionError(f"holder died: {proc.communicate()[1]}")
+        time.sleep(0.02)
+    proc.kill()
+    raise AssertionError("holder never took the lock")
+
+
+def test_two_tenants_do_not_contend_across_processes(state_home):
+    """In-process proves nothing: locks are re-entrant per process on purpose,
+    so an in-process second holder nests instead of blocking. Exclusion — and
+    its absence between distinct origins — is a cross-process property."""
+    from pyecsdwan.locking import HostLock
+
+    a = _spawn(state_home, "https://orch.example.com/tenant-a", "A", state_home / "a.ready")
+    try:
+        # A different tenant on the same hostname must not be blocked by A...
+        with HostLock("https://orch.example.com/tenant-b", "commit", timeout=1.0):
+            pass
+        # ...and the same tenant must be.
+        with pytest.raises(LockBusy):
+            HostLock("https://orch.example.com/tenant-a", "commit", timeout=0.5).acquire()
+
+        # Their staged work is in two files, neither seeing the other.
+        assert list(CandidateStore("https://orch.example.com/tenant-a").items) == [
+            Ref("interface_label", "A").key()
+        ]
+        assert CandidateStore("https://orch.example.com/tenant-b").items == {}
+    finally:
+        a.kill()
+        a.wait(timeout=10)
+
+
+def test_a_scheme_distinct_target_does_not_contend_across_processes(state_home):
+    """A plaintext and a TLS endpoint on one name were one lock and one store."""
+    from pyecsdwan.locking import HostLock
+
+    a = _spawn(state_home, "https://orch.example.com", "TLS", state_home / "tls.ready")
+    try:
+        with HostLock("http://orch.example.com", "commit", timeout=1.0):
+            pass
+        assert CandidateStore("http://orch.example.com").items == {}
+        assert list(CandidateStore("https://orch.example.com").items) == [
+            Ref("interface_label", "TLS").key()
+        ]
+    finally:
+        a.kill()
+        a.wait(timeout=10)

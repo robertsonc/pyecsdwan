@@ -32,6 +32,7 @@ import copy
 import dataclasses
 import json
 import os
+import re
 import tempfile
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -64,6 +65,16 @@ CANDIDATE_FORMAT = 2
 #: Older formats this binary knows how to read, mapped to the function that
 #: brings one forward. Populated below, once the migrations are defined.
 CANDIDATE_MIGRATIONS: dict[int, Any] = {}
+
+
+def _legacy_name(origin: str) -> str:
+    """The file name a build before #63 would have used for this origin.
+
+    Reproduced rather than remembered: it was the display host run through a
+    lossy sanitizer, and reconstructing it here is what lets an upgrade find
+    work that is already staged.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "_", config.display_host(origin))
 
 
 def _migrate_1_to_2(data: dict[str, Any], origin: str) -> dict[str, Any]:
@@ -191,6 +202,11 @@ class CandidateStore:
         # `orch:443` and `orch_443` — shared one staging file (#63).
         self.origin = config.as_origin(origin)
         self.path = root / f"{config.origin_slug(self.origin)}.json"
+        # Where a build before #63 would have written this store. Read when the
+        # origin-keyed file does not exist yet, and removed once this session
+        # saves: an operator who upgrades with work staged must not be told
+        # they have none, which is how that work gets re-done or lost.
+        self._legacy_path = root / f"{_legacy_name(self.origin)}.json"
         self.items: dict[str, CandidateItem] = {}
         self.lock = HostLock(self.origin, "candidate", root=lock_root, timeout=lock_timeout)
         self._load()
@@ -331,23 +347,29 @@ class CandidateStore:
         return self.items[key]
 
     def _load(self) -> None:
-        if not self.path.exists():
-            return
+        source = self.path
+        if not source.exists():
+            # Nothing under the origin-keyed name. A build before #63 wrote
+            # this store under the display host; adopt it rather than report
+            # an empty candidate, which would read as "no staged work".
+            if not self._legacy_path.exists():
+                return
+            source = self._legacy_path
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            data = json.loads(source.read_text(encoding="utf-8"))
         except OSError:
             return
         except json.JSONDecodeError as exc:
             # A corrupt candidate must not silently read as empty — that would
             # make commit report "no changes" and the next save overwrite the
             # evidence. Quarantine it and tell the operator.
-            corrupt = self.path.with_suffix(".corrupt")
+            corrupt = source.with_suffix(".corrupt")
             try:
-                self.path.replace(corrupt)
+                source.replace(corrupt)
             except OSError:
-                corrupt = self.path
+                corrupt = source
             raise CandidateCorruptError(
-                f"candidate store {self.path} is corrupt ({exc}); moved to {corrupt}. "
+                f"candidate store {source} is corrupt ({exc}); moved to {corrupt}. "
                 f"Re-stage your changes."
             ) from exc
         fmt = data.get("format", CANDIDATE_FORMAT)
@@ -356,7 +378,7 @@ class CandidateStore:
             # file: the newer binary that wrote it must still be able to use
             # it, which quarantining or rewriting would prevent.
             raise CandidateFormatError(
-                f"candidate store {self.path} is format {fmt!r}, but this build "
+                f"candidate store {source} is format {fmt!r}, but this build "
                 f"reads at most {CANDIDATE_FORMAT}; upgrade, or discard it with a "
                 f"build that understands it. The file has not been modified."
             )
@@ -364,15 +386,23 @@ class CandidateStore:
         if migrate is not None:
             data = migrate(data, self.origin)
         stored = data.get("origin")
-        if stored is not None and stored != self.origin:
-            # Belt and braces behind the digest in the filename: if a file is
+        if stored != self.origin:
+            # Belt and braces behind the digest in the file name: if a file is
             # ever moved, restored from a backup, or copied between machines,
             # the identity travels with it and a mismatch is refused rather
             # than staged against the wrong fabric.
+            #
+            # A *missing* origin is a mismatch too, not a pass. Every format
+            # this build reads either writes the field or has a migration that
+            # supplies it, so its absence means the file was tampered with or
+            # truncated — and the mutation sweep is what showed the difference:
+            # tolerating None made the format-1 migration a no-op that could be
+            # deleted with every test still green.
+            was = "no origin at all" if stored is None else repr(stored)
             raise CandidateFormatError(
-                f"candidate store {self.path} was staged against {stored!r}, but this "
-                f"session targets {self.origin!r}; refusing to apply one Orchestrator's "
-                f"staged work to another. The file has not been modified."
+                f"candidate store {source} carries {was}, but this session targets "
+                f"{self.origin!r}; refusing to apply one Orchestrator's staged work "
+                f"to another. The file has not been modified."
             )
         for entry in data.get("items", []):
             mode = entry.get("mode")
@@ -381,7 +411,7 @@ class CandidateStore:
                 # direction: it silently keeps live values the operator may
                 # have staged a replace to remove.
                 raise CandidateFormatError(
-                    f"candidate store {self.path} holds item "
+                    f"candidate store {source} holds item "
                     f"{entry.get('ref_key')!r} with mode {mode!r}; expected one of "
                     f"{', '.join(sorted(SUPPORTED_MODES))}. The file has not been "
                     f"modified."
@@ -418,3 +448,8 @@ class CandidateStore:
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
+        if self._legacy_path != self.path:
+            # Retired only now, after the replacement is durably in place, and
+            # only under the lock this save already holds. Leaving it would let
+            # a later session read stale staging back out of it.
+            self._legacy_path.unlink(missing_ok=True)
