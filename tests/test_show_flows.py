@@ -133,7 +133,7 @@ def _shell_state(world: dict[str, Any]) -> ShellState:
         registry=default_registry,
         settings=world["settings"],
         console=Console(record=True, width=220),
-        candidate=CandidateStore(world["settings"].host),
+        candidate=CandidateStore(world["settings"].origin),
     )
 
 
@@ -548,7 +548,7 @@ def test_an_unreachable_appliance_degrades_the_flow_search(
 def test_neither_report_writes_anything(world: dict[str, Any], state_home: Any) -> None:
     """Read-only means read-only: no candidate entry, no journal record, no
     transaction, and not a single non-GET request."""
-    candidate = CandidateStore(world["settings"].host)
+    candidate = CandidateStore(world["settings"].origin)
     assert len(candidate) == 0
     assert journal.list_txns() == []
 
@@ -557,7 +557,7 @@ def test_neither_report_writes_anything(world: dict[str, Any], state_home: Any) 
 
     methods = {method for method, _path, _params in world["client"].calls}
     assert methods == {"GET"}, f"a report issued a write: {methods}"
-    assert len(CandidateStore(world["settings"].host)) == 0
+    assert len(CandidateStore(world["settings"].origin)) == 0
     assert journal.list_txns() == []
     assert not any(row.get("hasUnsavedChanges") for row in world["state"].appliances), (
         "a report dirtied appliance running config"

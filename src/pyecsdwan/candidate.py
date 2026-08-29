@@ -32,7 +32,6 @@ import copy
 import dataclasses
 import json
 import os
-import re
 import tempfile
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -60,12 +59,30 @@ def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
 #: On-disk schema version for the candidate store. Bumped only alongside an
 #: entry in :data:`CANDIDATE_MIGRATIONS`; a file claiming anything higher was
 #: written by a newer binary and is refused rather than guessed at (#108).
-CANDIDATE_FORMAT = 1
+CANDIDATE_FORMAT = 2
 
 #: Older formats this binary knows how to read, mapped to the function that
-#: brings one forward. Empty because 1 is the first version — the mapping
-#: exists so adding version 2 is a change here rather than a new mechanism.
+#: brings one forward. Populated below, once the migrations are defined.
 CANDIDATE_MIGRATIONS: dict[int, Any] = {}
+
+
+def _migrate_1_to_2(data: dict[str, Any], origin: str) -> dict[str, Any]:
+    """Format 1 had no origin, because there was no canonical identity yet.
+
+    Adopting the file is safe: format 1 was keyed by the *display host*, so a
+    file this session can even see was staged against something sharing that
+    host — and this session's origin is the only one it can now belong to.
+    Where two origins genuinely shared a host, format 1 had already mixed
+    their staging into one file and no migration can separate what was never
+    recorded; the collision is exactly what version 2 stops happening again.
+
+    Idempotent, and it does not rewrite the file on read: the origin is
+    written on the next save like any other field.
+    """
+    return {**data, "origin": origin}
+
+
+CANDIDATE_MIGRATIONS[1] = _migrate_1_to_2
 
 #: Every mode `materialize_desired` knows how to honour. Anything else is an
 #: error: modes decide whether omitted keys keep their live values, and
@@ -162,18 +179,20 @@ class CandidateItem:
 class CandidateStore:
     def __init__(
         self,
-        host: str,
+        origin: str,
         root: Path | None = None,
         lock_root: Path | None = None,
         lock_timeout: float = DEFAULT_TIMEOUT,
     ):
         root = root if root is not None else config.candidate_root()
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        safe = re.sub(r"[^A-Za-z0-9._-]", "_", host)
-        self.path = root / f"{safe}.json"
-        self.host = host
+        # Keyed by the canonical origin. The old name was the display host run
+        # through a lossy sanitizer, so two tenants under one hostname — and
+        # `orch:443` and `orch_443` — shared one staging file (#63).
+        self.origin = config.as_origin(origin)
+        self.path = root / f"{config.origin_slug(self.origin)}.json"
         self.items: dict[str, CandidateItem] = {}
-        self.lock = HostLock(host, "candidate", root=lock_root, timeout=lock_timeout)
+        self.lock = HostLock(self.origin, "candidate", root=lock_root, timeout=lock_timeout)
         self._load()
 
     # -- mutation ------------------------------------------------------------
@@ -343,7 +362,18 @@ class CandidateStore:
             )
         migrate = CANDIDATE_MIGRATIONS.get(fmt)
         if migrate is not None:
-            data = migrate(data)
+            data = migrate(data, self.origin)
+        stored = data.get("origin")
+        if stored is not None and stored != self.origin:
+            # Belt and braces behind the digest in the filename: if a file is
+            # ever moved, restored from a backup, or copied between machines,
+            # the identity travels with it and a mismatch is refused rather
+            # than staged against the wrong fabric.
+            raise CandidateFormatError(
+                f"candidate store {self.path} was staged against {stored!r}, but this "
+                f"session targets {self.origin!r}; refusing to apply one Orchestrator's "
+                f"staged work to another. The file has not been modified."
+            )
         for entry in data.get("items", []):
             mode = entry.get("mode")
             if mode not in SUPPORTED_MODES:
@@ -367,6 +397,7 @@ class CandidateStore:
     def _save(self) -> None:
         payload = {
             "format": CANDIDATE_FORMAT,
+            "origin": self.origin,
             "items": [dataclasses.asdict(i) for i in self.items.values()],
         }
         # Unique temp name + fsync + 0o600: two shells staging against the same

@@ -198,7 +198,9 @@ def test_the_commit_command_acknowledges_rather_than_wiping(
     base_url, _state, shutdown = run_in_thread()
     try:
         port = base_url.rsplit(":", 1)[1]
-        host = f"127.0.0.1:{port}"
+        # The same origin the CLI derives from `--mock`: scheme is part of the
+        # identity, so `127.0.0.1:PORT` would be a *different* store (#63).
+        host = f"http://127.0.0.1:{port}"
         shell_a = CandidateStore(host)
         shell_a.set_desired(Ref("appliance/banners", "global", appliance="BR1-EC"),
                             {"issue": "A's change"})
@@ -244,7 +246,7 @@ def test_the_shell_commit_also_acknowledges_rather_than_wiping(
     from pyecsdwan.resolver import Resolver
 
     settings, client = mock_fabric
-    host = settings.host
+    host = settings.origin
     shell_a = CandidateStore(host)
     shell_a.set_desired(Ref("appliance/banners", "global", appliance="BR1-EC"),
                         {"issue": "A's change"})

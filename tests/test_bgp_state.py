@@ -71,7 +71,7 @@ def shell_state(ctx: Ctx) -> ShellState:
         registry=default_registry,
         settings=ctx.client.settings,
         console=Console(record=True, width=200),
-        candidate=CandidateStore(ctx.client.settings.host),
+        candidate=CandidateStore(ctx.client.settings.origin),
     )
 
 

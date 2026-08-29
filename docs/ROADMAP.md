@@ -113,6 +113,29 @@ that server state had moved since compare, recompute the diff and carry on,
 folding another operator's change into this one's changeset; `--rebase` opts
 in and re-merges intent over current state. `show locks` reports holders.
 
+*One identity per Orchestrator (#63, second half).* Scoping is only as good as
+the key it scopes by, and the key was the *display host* — the URL with its
+scheme and everything after the first slash thrown away. So
+`https://orch/tenant-a` and `https://orch/tenant-b` were one identity, as were
+a plaintext and a TLS endpoint on one name; and the file names were that
+already-lossy string run through a sanitizer, which mapped `orch:443` and
+`orch_443` together too. Distinct targets then shared one candidate store, one
+lock, one resolver cache and one rollback history — and the guard against
+restoring one Orchestrator's snapshot into another compared display hosts, so
+for exactly these targets it compared equal and waved the restore through.
+Everything that persists or compares identity now keys by
+`Settings.origin`, a canonical `scheme://host[:port][/path]`, with file names
+carrying a digest of the *unsanitized* origin. `host` remains, for display
+only. Journals record both and are matched on the origin; ones written before
+it existed are still matched on their hostname, because losing an operator's
+way back is worse than the ambiguity that inherits — and a restore from one
+says so in the journal rather than implying the target was verified. The rule
+that production never keys state by the lossy field is not a type — both are
+`str` — so it is a test over the source with a reasoned allowlist, covering
+the test tree as well: a test that stages by the display host while the code
+keys by the origin passes while asserting nothing, which is how nineteen of
+them stayed green against two different files.
+
 
 *Fabric-wide drift (#8).* `ec-cli drift` enumerates every instance of every
 kind and compares it against staged intent. The rows worth having are the ones

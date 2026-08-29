@@ -339,7 +339,7 @@ def test_the_shell_sets_the_classified_exit_code(
         registry=default_registry,
         settings=settings,
         console=Console(record=True, width=200),
-        candidate=CandidateStore(settings.host),
+        candidate=CandidateStore(settings.origin),
     )
     failing_orchestrator(failure)
     dispatch_operational("show appliance BR1-EC bgp summary", state)

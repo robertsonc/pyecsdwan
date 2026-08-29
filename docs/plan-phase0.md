@@ -38,7 +38,9 @@ Deviations from the mission's sketch, deliberate:
 ## 2. Journal format (`~/.pyecsdwan/journal/<txn-id>/`)
 
 - `meta.json` — small state index, atomically rewritten (tmp + rename + dir
-  fsync): txn id, host, state machine (PENDING → APPLYING →
+  fsync): txn id, target (`orch_origin`, the canonical
+  `scheme://host[:port][/path]`, plus `orch_host` for display), state machine
+  (PENDING → APPLYING →
   APPLIED_UNCONFIRMED|CONFIRMED → REVERTING → REVERTED/REVERT_FAILED; AUDIT_ONLY
   for Tier-0 calls), confirm deadline, item ref-keys.
 - `events.jsonl` — append-only, fsync per record; the source of truth.

@@ -125,7 +125,9 @@ class Resolver:
         self.ttl = ttl
         cache_dir = cache_dir if cache_dir is not None else config.cache_root()
         cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        safe = re.sub(r"[^A-Za-z0-9._-]", "_", client.settings.host)
+        # Keyed by the canonical origin, not the display host: two tenants on
+        # one hostname must not share a resolved nePk cache (#63).
+        safe = config.origin_slug(client.settings.origin)
         self._cache_path = cache_dir / f"{safe}.json"
         self._data: dict[str, Any] = {}
         self._load()

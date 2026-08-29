@@ -35,7 +35,7 @@ from pyecsdwan.contract import RawState, Ref
 #: On-disk schema version for ``meta.json``. A file claiming anything higher
 #: was written by a newer binary; this one refuses it rather than reading it
 #: through an older shape and rewriting it (#108).
-META_FORMAT = 1
+META_FORMAT = 2
 
 
 class JournalFormatError(Exception):
@@ -110,7 +110,11 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 class TxnMeta:
     txn_id: str
     created_at: str
+    #: Display host, kept for existing readers and for rendering.
     orch_host: str
+    #: Canonical identity of the Orchestrator (#63). Empty on format-1
+    #: journals, which predate it — see :func:`targets`.
+    orch_origin: str = ""
     state: str = TxnState.PENDING
     #: ISO timestamp after which an unconfirmed commit must be reverted.
     confirm_deadline: str | None = None
@@ -157,21 +161,25 @@ class TxnJournal:
     # -- construction --------------------------------------------------------
 
     @classmethod
-    def create(cls, orch_host: str, items: list[Ref], root: Path | None = None) -> TxnJournal:
+    def create(cls, orch_origin: str, items: list[Ref], root: Path | None = None) -> TxnJournal:
         root = root if root is not None else config.journal_root()
         txn_id = new_txn_id()
         txn_dir = root / txn_id
         txn_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
         _fsync_dir(root)  # make the new txn dir itself durable before we fill it
+        orch_origin = config.as_origin(orch_origin)
         meta = TxnMeta(
             txn_id=txn_id,
             created_at=utcnow(),
-            orch_host=orch_host,
+            orch_host=config.display_host(orch_origin),
+            orch_origin=orch_origin,
             items=[r.key() for r in items],
         )
         journal = cls(txn_dir, meta)
         journal._write_meta()
-        journal.append("TXN_BEGIN", host=orch_host, items=meta.items)
+        journal.append(
+            "TXN_BEGIN", host=meta.orch_host, origin=orch_origin, items=meta.items
+        )
         _fsync_dir(txn_dir)  # durably link events.jsonl on first creation
         return journal
 
@@ -436,18 +444,59 @@ def unreadable_txn_dirs(root: Path | None = None) -> list[str]:
     return sorted(_UNREADABLE)
 
 
-def _for_host(txns: list[TxnJournal], host: str | None) -> list[TxnJournal]:
-    if host is None:
+def targets(txn: TxnJournal, origin: str) -> bool:
+    """Whether this transaction belongs to ``origin``.
+
+    Format-2 journals record the canonical origin and are matched exactly. A
+    format-1 journal recorded only the *display host*, which is precisely the
+    ambiguity #63 is about — two origins sharing a hostname wrote into one
+    pool, and nothing in the file can now separate them.
+
+    Those are matched on the host, which keeps an upgrading operator's
+    rollback history reachable. That is deliberate and it is the lesser
+    hazard: discarding history silently would leave a fabric changed with no
+    way back, while the ambiguity it preserves only exists for someone who was
+    already running two origins behind one hostname. `is_legacy` marks them so
+    the surfaces that restore from a snapshot can say the provenance is
+    unverified rather than implying it was checked.
+    """
+    if txn.meta.orch_origin:
+        return txn.meta.orch_origin == origin
+    return txn.meta.orch_host in (origin, config.display_host(origin))
+
+
+def is_legacy(txn: TxnJournal) -> bool:
+    """A journal written before origins were recorded, so its target is
+    inferred from a hostname rather than known."""
+    return not txn.meta.orch_origin
+
+
+def lock_origin(txn: TxnJournal) -> str:
+    """The origin whose locks and state files govern this transaction.
+
+    Format-2 journals record it. A format-1 journal predates it, so the
+    display host is canonicalized instead — a guess, but every path that
+    locks a legacy transaction makes the *same* guess, so they agree with one
+    another, which is the only property a lock actually needs.
+    """
+    return txn.meta.orch_origin or config.as_origin(txn.meta.orch_host)
+
+
+def _for_origin(txns: list[TxnJournal], origin: str | None) -> list[TxnJournal]:
+    if origin is None:
         return txns
-    return [t for t in txns if t.meta.orch_host == host]
+    origin = config.as_origin(origin)
+    return [t for t in txns if targets(t, origin)]
 
 
-def committed_history(root: Path | None = None, host: str | None = None) -> list[TxnJournal]:
-    """Confirmed transactions for ``host`` (all hosts if None), newest first —
+def committed_history(
+    root: Path | None = None, origin: str | None = None
+) -> list[TxnJournal]:
+    """Confirmed transactions for ``origin`` (all targets if None), newest first —
     the ``rollback <n>`` history. Host scoping is mandatory in practice: a
     snapshot from one Orchestrator must never be restored into another."""
-    return _for_host(
-        [t for t in list_txns(root) if t.meta.state == TxnState.CONFIRMED], host
+    return _for_origin(
+        [t for t in list_txns(root) if t.meta.state == TxnState.CONFIRMED], origin
     )
 
 
@@ -468,17 +517,17 @@ def _driven_now(txn: TxnJournal, cache: dict[str, Any]) -> bool:
     """
     from pyecsdwan.locking import HostLock
 
-    host = txn.meta.orch_host
-    if host not in cache:
+    origin = lock_origin(txn)
+    if origin not in cache:
         # read_owner() only reads the record; probing by acquisition would
         # contend with the very commit this is trying to detect.
-        cache[host] = HostLock(host, "commit", timeout=0.0).read_owner()
-    owner = cache[host]
+        cache[origin] = HostLock(origin, "commit", timeout=0.0).read_owner()
+    owner = cache[origin]
     return owner is not None and owner.txn_id == txn.meta.txn_id and owner.is_alive()
 
 
-def orphaned_txns(root: Path | None = None, host: str | None = None) -> list[TxnJournal]:
-    """Unconfirmed/interrupted transactions for ``host`` needing attention.
+def orphaned_txns(root: Path | None = None, origin: str | None = None) -> list[TxnJournal]:
+    """Unconfirmed/interrupted transactions for ``origin`` needing attention.
 
     A transaction is orphaned when it is non-terminal and nothing is driving
     it: an APPLYING txn whose CLI died mid-commit, or an APPLIED_UNCONFIRMED
@@ -491,7 +540,7 @@ def orphaned_txns(root: Path | None = None, host: str | None = None) -> list[Txn
     it, because that is a revert already in progress."""
     out: list[TxnJournal] = []
     owners: dict[str, Any] = {}
-    for txn in _for_host(list_txns(root), host):
+    for txn in _for_origin(list_txns(root), origin):
         if txn.meta.state in TxnState.TERMINAL:
             continue
         if txn.confirm_marker.exists():
@@ -517,7 +566,7 @@ def _deadline_passed(txn: TxnJournal, grace_s: float) -> bool:
     return _dt.datetime.now(tz=_dt.timezone.utc) > deadline + _dt.timedelta(seconds=grace_s)
 
 
-def prune_history(keep: int, root: Path | None = None, host: str | None = None,
+def prune_history(keep: int, root: Path | None = None, origin: str | None = None,
                   audit_keep: int = 200) -> int:
     """Prune terminal transactions, counting rollback history and audit
     records under separate quotas so a burst of Tier-0 ``api`` calls
@@ -525,7 +574,7 @@ def prune_history(keep: int, root: Path | None = None, host: str | None = None,
     number removed."""
     import shutil
 
-    scoped = _for_host(list_txns(root), host)
+    scoped = _for_origin(list_txns(root), origin)
     history = [t for t in scoped if t.meta.state == TxnState.CONFIRMED]
     audit_and_dead = [
         t for t in scoped

@@ -99,7 +99,7 @@ def test_a_tier_1_kind_cannot_be_planned(
             if resource.scope is Scope.APPLIANCE
             else Ref(kind, "x")
         )
-        candidate = CandidateStore(settings.host)
+        candidate = CandidateStore(settings.origin)
         candidate.set_path(ref, ["anything"], 1)
         with pytest.raises(NotCurated):
             txn.build_plan(ctx, default_registry, candidate)
@@ -117,7 +117,7 @@ def test_a_curated_kind_plans_fine(
     client = OrchClient(settings)
     ctx = Ctx(client=client, resolver=Resolver(client))
 
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     candidate.set_path(Ref("appliance/banners", "banners", appliance="BR1-EC"), ["login"], "hi")
     plan = txn.build_plan(ctx, default_registry, candidate)
     assert plan.items

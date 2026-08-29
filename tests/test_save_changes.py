@@ -184,7 +184,7 @@ def engine_world(world: dict[str, Any]) -> dict[str, Any]:
     registry = Registry()
     registry.register(EcosEcho())
     world["registry"] = registry
-    world["candidate"] = CandidateStore(world["settings"].host)
+    world["candidate"] = CandidateStore(world["settings"].origin)
     return world
 
 

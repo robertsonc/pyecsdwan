@@ -126,7 +126,7 @@ def test_a_directory_and_a_candidate_build_the_same_plan(
     ctx = world["ctx"]
     _write(tmp_path, DECLARED, "issue: declared banner\n")
 
-    staged = CandidateStore(world["settings"].host)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_desired(REF, {"issue": "declared banner"})
 
     from_dir = txn.build_plan(ctx, default_registry, desired.load(default_registry, tmp_path))
@@ -234,7 +234,7 @@ def test_a_failed_apply_exits_nonzero(world: dict[str, Any], tmp_path: Path) -> 
     failure this project keeps finding. The mutation sweep caught this: hard-
     coding `Exit(0)` left every other test here green.
     """
-    staged = CandidateStore(world["settings"].host)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_desired(REF, {"issue": "this write will be rejected"})
     world["state"].fail_next_action = True  # the commit's own save-changes fails
 
@@ -255,7 +255,7 @@ def test_a_non_empty_candidate_refuses_the_apply(
     before = dict(_live_banners(world))
     _write(tmp_path, DECLARED, "issue: from git\n")
 
-    staged = CandidateStore(world["settings"].host)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_path(Ref(KIND, "global", appliance="BR2-EC"), ["issue"], "hand-staged")
 
     result = _cli(world, "apply", "--from", str(tmp_path), "--dry-run")
@@ -345,7 +345,7 @@ def _pending_window(world: dict[str, Any]) -> Any:
     """A transaction that has written and is waiting to be confirmed."""
     from pyecsdwan.journal import TxnJournal, TxnState
 
-    journal = TxnJournal.create(world["settings"].host, [REF])
+    journal = TxnJournal.create(world["settings"].origin, [REF])
     journal.set_state(TxnState.APPLIED_UNCONFIRMED)
     return journal
 
@@ -369,7 +369,7 @@ def test_apply_refuses_during_an_active_confirm_window(
     """
     before = dict(_live_banners(world))
     _pending_window(world)
-    staged = CandidateStore(world["settings"].host)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_desired(REF, {"issue": "would be erased when the window expires"})
 
     result = _cli(world, "commit")
@@ -382,7 +382,7 @@ def test_the_refusal_is_the_engine_not_the_command(world: dict[str, Any]) -> Non
     """Stated against `txn.commit` directly, because a test that only drove
     the CLI would pass again the moment someone adds a third entry point."""
     _pending_window(world)
-    staged = CandidateStore(world["settings"].host)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_desired(REF, {"issue": "from a library caller"})
     plan = txn.build_plan(world["ctx"], default_registry, staged)
 
@@ -402,7 +402,7 @@ def test_nothing_is_journaled_for_a_refused_commit(world: dict[str, Any]) -> Non
 
     _pending_window(world)
     before = {t.meta.txn_id for t in list_txns()}
-    staged = CandidateStore(world["settings"].host)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_desired(REF, {"issue": "refused"})
     plan = txn.build_plan(world["ctx"], default_registry, staged)
 
@@ -419,8 +419,8 @@ def test_a_settled_transaction_does_not_block_anything(
     every test above and make the tool single-use."""
     from pyecsdwan.journal import TxnJournal, TxnState
 
-    TxnJournal.create(world["settings"].host, [REF]).set_state(TxnState.CONFIRMED)
-    staged = CandidateStore(world["settings"].host)
+    TxnJournal.create(world["settings"].origin, [REF]).set_state(TxnState.CONFIRMED)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_desired(REF, {"issue": "after a confirmed transaction"})
 
     result = _cli(world, "commit")
@@ -438,7 +438,7 @@ def test_another_host_does_not_block_this_one(
 
     other = TxnJournal.create("some-other-orchestrator.example.com", [REF])
     other.set_state(TxnState.APPLIED_UNCONFIRMED)
-    staged = CandidateStore(world["settings"].host)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_desired(REF, {"issue": "different fabric entirely"})
 
     result = _cli(world, "commit")
@@ -473,7 +473,7 @@ def test_a_raising_verify_reverts_instead_of_escaping(
             TimeoutError("read timed out confirming the write")
         ),
     )
-    staged = CandidateStore(world["settings"].host)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_desired(REF, {"issue": "written, then verify blew up"})
     plan = txn.build_plan(world["ctx"], default_registry, staged)
 
@@ -497,7 +497,7 @@ def test_the_verify_failure_journals_its_typed_cause(
         "verify",
         lambda self, ctx, ref, desired: (_ for _ in ()).throw(TimeoutError("read timed out")),
     )
-    staged = CandidateStore(world["settings"].host)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_desired(REF, {"issue": "x"})
     plan = txn.build_plan(world["ctx"], default_registry, staged)
 
@@ -516,7 +516,7 @@ def test_a_verify_that_returns_false_still_reverts(
     before = dict(_live_banners(world))
     resource = default_registry.get(KIND)
     monkeypatch.setattr(type(resource), "verify", lambda self, ctx, ref, desired: False)
-    staged = CandidateStore(world["settings"].host)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_desired(REF, {"issue": "verify says no"})
     plan = txn.build_plan(world["ctx"], default_registry, staged)
 
@@ -569,7 +569,7 @@ def test_a_rollback_that_restored_nothing_is_not_reported_as_restored(
         "rollback",
         lambda self, ctx, ref, snapshot: ApplyResult(ok=True, message="restored"),
     )
-    staged = CandidateStore(world["settings"].host)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_desired(REF, {"issue": "the change that should be undone"})
     plan = txn.build_plan(world["ctx"], default_registry, staged)
 
@@ -618,7 +618,7 @@ def test_a_real_rollback_still_reports_restored(
     REVERT_FAILED and send operators hunting for damage that is not there."""
     before = dict(_live_banners(world))
     _force_revert(monkeypatch, "applied, then reverted for real")
-    staged = CandidateStore(world["settings"].host)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_desired(REF, {"issue": "applied, then reverted for real"})
     plan = txn.build_plan(world["ctx"], default_registry, staged)
 
@@ -646,7 +646,7 @@ def test_a_deletion_rollback_says_it_is_unconfirmed(
 
 
 def _plan_item(world: dict[str, Any]) -> Any:
-    staged = CandidateStore(world["settings"].host)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_desired(REF, {"issue": "x"})
     return txn.build_plan(world["ctx"], default_registry, staged).items[0]
 
@@ -672,12 +672,12 @@ def test_a_ref_with_no_recorded_snapshot_is_refused_not_deleted(
     """
     from pyecsdwan.journal import TxnJournal
 
-    journal = TxnJournal.create(world["settings"].host, [REF])
+    journal = TxnJournal.create(world["settings"].origin, [REF])
     # APPLY_START without the SNAPSHOT that should precede it.
     journal.append("APPLY_START", ref=REF.key())
     before = dict(_live_banners(world))
 
-    staged = CandidateStore(world["settings"].host)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_desired(REF, {"issue": "x"})
     plan = txn.build_plan(world["ctx"], default_registry, staged)
     report = txn.CommitReport(ok=False, txn_id=journal.meta.txn_id)
@@ -703,7 +703,7 @@ def test_ownership_still_refuses_through_apply(
     reintroduced fail-open would drop first.
     """
     before = dict(_live_banners(world))
-    staged = CandidateStore(world["settings"].host)
+    staged = CandidateStore(world["settings"].origin)
     staged.set_desired(REF, {"issue": "should never land"})
 
     resource = default_registry.get(KIND)

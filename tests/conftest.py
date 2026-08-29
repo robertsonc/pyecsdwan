@@ -41,13 +41,16 @@ def lock_holder(state_home, tmp_path):
 
     procs = []
 
-    def _hold(host: str, scope: str = "commit", ready_timeout: float = 20.0):
-        ready = tmp_path / f"holder-{host}-{scope}.ready"
+    def _hold(origin: str, scope: str = "commit", ready_timeout: float = 20.0):
+        # The origin is a URL, so it cannot go into a file name unescaped —
+        # `https://` would silently make `holder-https:/` a directory (#63).
+        stem = config.origin_slug(config.as_origin(origin))
+        ready = tmp_path / f"holder-{stem}-{scope}.ready"
         body = f"""
 import time
 from pathlib import Path
 from pyecsdwan.locking import HostLock
-with HostLock({host!r}, {scope!r}, timeout=10.0):
+with HostLock({origin!r}, {scope!r}, timeout=10.0):
     Path({str(ready)!r}).write_text("ready")
     time.sleep(300)
 """

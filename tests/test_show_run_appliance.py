@@ -292,7 +292,7 @@ def test_the_report_is_read_only(fabric: dict[str, Any]) -> None:
     assert journal.list_txns() == []
     applianceconfig.fetch_running_configs(fabric["ctx"], ["BR1-EC", "BR2-EC"])
     assert journal.list_txns() == []
-    assert len(CandidateStore(settings.host)) == 0
+    assert len(CandidateStore(settings.origin)) == 0
     # The per-appliance CLI read starts no Orchestrator job at all — a
     # saveChanges (or any other write) would have registered an action key.
     assert mstate.actions == {}
@@ -485,7 +485,7 @@ def shell_state(fabric: dict[str, Any]) -> ShellState:
         registry=default_registry,
         settings=fabric["settings"],
         console=Console(record=True, width=200),
-        candidate=CandidateStore(fabric["settings"].host),
+        candidate=CandidateStore(fabric["settings"].origin),
     )
 
 

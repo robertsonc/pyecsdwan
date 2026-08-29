@@ -522,7 +522,7 @@ def test_commit_proceeds_normally_when_nothing_moved(world: dict[str, Any]) -> N
 def test_a_second_commit_cannot_interleave(world: dict[str, Any], lock_holder: Any) -> None:
     world["candidate"].set_path(Ref("alpha", "one"), ["speed"], 10)
     plan = _plan(world)
-    lock_holder(world["settings"].host, "commit")
+    lock_holder(world["settings"].origin, "commit")
     with pytest.raises(LockBusy) as excinfo:
         txn.commit(world["ctx"], world["registry"], plan, world["settings"], lock_timeout=0.2)
     assert "commit lock" in str(excinfo.value)
@@ -537,7 +537,7 @@ def test_confirm_takes_the_commit_lock(world: dict[str, Any], lock_holder: Any) 
         world["ctx"], world["registry"], _plan(world), world["settings"], confirm_minutes=5
     )
     assert report.state == TxnState.APPLIED_UNCONFIRMED
-    holder = lock_holder(world["settings"].host, "commit")
+    holder = lock_holder(world["settings"].origin, "commit")
     with pytest.raises(LockBusy):
         txn.confirm_pending(world["settings"], lock_timeout=0.2)
     holder.kill()
@@ -549,7 +549,7 @@ def test_confirm_takes_the_commit_lock(world: dict[str, Any], lock_holder: Any) 
 def test_rollback_takes_the_commit_lock(world: dict[str, Any], lock_holder: Any) -> None:
     world["candidate"].set_path(Ref("alpha", "one"), ["speed"], 10)
     assert txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"]).ok
-    holder = lock_holder(world["settings"].host, "commit")
+    holder = lock_holder(world["settings"].origin, "commit")
     with pytest.raises(LockBusy):
         txn.rollback_history_txn(
             world["ctx"], world["registry"], world["settings"], 1, lock_timeout=0.2
@@ -576,7 +576,7 @@ def test_watchdog_revert_takes_the_commit_lock(
     txn_dir = list_txns()[0].dir
     assert report.state == TxnState.APPLIED_UNCONFIRMED
 
-    holder = lock_holder(world["settings"].host, "commit")
+    holder = lock_holder(world["settings"].origin, "commit")
     with pytest.raises(LockBusy):
         txn.revert_txn_dir(
             txn_dir,

@@ -155,9 +155,9 @@ def _configure_logging(debug: bool) -> None:
     )
 
 
-def _startup_scan(host: str) -> None:
-    """Warn (never block) about orphaned unconfirmed transactions for HOST."""
-    orphans = txn.pending_rollbacks(host=host)
+def _startup_scan(origin: str) -> None:
+    """Warn (never block) about orphaned unconfirmed transactions for ORIGIN."""
+    orphans = txn.pending_rollbacks(origin=origin)
     if orphans:
         err_console.print(
             Text(
@@ -177,7 +177,7 @@ def _bootstrap(state: _State) -> tuple[Ctx, Registry, config.Settings]:
         except RuntimeError as exc:
             _fail(str(exc))
         state.booted = (ctx, registry, settings)
-        _startup_scan(settings.host)
+        _startup_scan(settings.origin)
     return state.booted
 
 
@@ -370,7 +370,7 @@ def set_(
     ref = _make_ref(registry, kind, name, appliance)
     path, raw_value = list(args[:-1]), args[-1]
     value = _coerce_value(raw_value)
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     candidate.set_path(ref, path, value)
     console.print(f"staged: {ref.key()} {'.'.join(path)} = {value!r}")
 
@@ -393,7 +393,7 @@ def delete(
     state = _state(ctx)
     _rt, registry, settings = _bootstrap(state)
     ref = _make_ref(registry, kind, name, appliance)
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     candidate.delete(ref, list(path) if path else None)
     suffix = f" {'.'.join(path)}" if path else ""
     console.print(f"staged delete: {ref.key()}{suffix}")
@@ -431,7 +431,7 @@ def load(
         _fail(f"invalid YAML in {file}: {exc}")
     if not isinstance(data, dict):
         _fail(f"{file}: top-level YAML value must be a mapping")
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     if merge:
         for key, value in data.items():
             candidate.set_path(ref, [str(key)], value)
@@ -466,7 +466,7 @@ def diff_(ctx: typer.Context) -> None:
     """Compare candidate against live state; exit 1 when changes exist (CI drift check)."""
     state = _state(ctx)
     rt_ctx, registry, settings = _bootstrap(state)
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     plan = txn.build_plan(rt_ctx, registry, candidate)
     render.render_plan(console, plan)
     raise typer.Exit(0 if plan.empty else 1)
@@ -579,7 +579,7 @@ def apply_(
     # apply would commit changes the directory never declared, and the operator
     # would have no way to see which came from where. Clearing it is their
     # call, not this command's.
-    staged = CandidateStore(settings.host)
+    staged = CandidateStore(settings.origin)
     if len(staged):
         _fail(
             f"refusing: {len(staged)} item(s) staged in the candidate. A declarative "
@@ -674,7 +674,7 @@ def drift_(
         )
         intent = declared
     else:
-        intent = CandidateStore(settings.host)
+        intent = CandidateStore(settings.origin)
 
     _gate_fanout(rt_ctx, assume_yes, calls_each=_drift_calls_each(registry, kind))
     report = drift.collect(
@@ -751,11 +751,12 @@ def commit(
     """Apply the candidate changeset (a bare commit inside a confirm window confirms)."""
     state = _state(ctx)
     rt_ctx, registry, settings = _bootstrap(state)
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     unconfirmed = [
         t
         for t in list_txns()
-        if t.meta.state == TxnState.APPLIED_UNCONFIRMED and t.meta.orch_host == settings.host
+        if t.meta.state == TxnState.APPLIED_UNCONFIRMED
+        and journal_mod.targets(t, settings.origin)
     ]
     if unconfirmed:
         # A bare commit confirms the pending window. But if the user also
@@ -828,7 +829,7 @@ def discard(ctx: typer.Context) -> None:
     """Drop the entire candidate changeset."""
     state = _state(ctx)
     _rt, _registry, settings = _bootstrap(state)
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     count = len(candidate)
     candidate.clear()
     console.print(f"discarded {count} candidate item(s)")
@@ -850,7 +851,7 @@ def rollback(
     state = _state(ctx)
     rt_ctx, registry, settings = _bootstrap(state)
     if pending:
-        orphans = txn.pending_rollbacks(host=settings.host)
+        orphans = txn.pending_rollbacks(origin=settings.origin)
         if not orphans:
             console.print("no orphaned transactions")
             return
@@ -1031,30 +1032,33 @@ def _warn_corrupt_journal(names: list[str]) -> None:
     )
 
 
-def render_locks_table(
-    out: Console, rows: list[tuple[str, locking.LockOwner | None, bool]]
-) -> None:
-    """Render host-scoped lock state (#63). Shared by the subcommand and the shell."""
+def render_locks_table(out: Console, rows: list[locking.LockState]) -> None:
+    """Render origin-scoped lock state (#63). Shared by the subcommand and the shell."""
     if not rows:
         out.print("no locks")
         return
     table = Table(title=f"locks ({len(rows)})")
-    table.add_column("lock")
+    table.add_column("orchestrator")
+    table.add_column("scope")
     table.add_column("state")
     table.add_column("holder")
     table.add_column("since")
-    for name, owner, held in rows:
-        state_cell = Text("HELD", style="bold yellow") if held else Text("free", style="dim")
+    for row in rows:
+        state_cell = Text("HELD", style="bold yellow") if row.held else Text("free", style="dim")
+        owner = row.owner
         if owner is None:
             holder = _ABSENT
-        elif held:
+        elif row.held:
             holder = Text(owner.describe(), style="dim")
         else:
             # The file outlives the lock, so this is the *last* holder, not a
             # current one. Labelled, because an unlabelled pid reads as truth.
             holder = Text(f"(last: {owner.describe()})", style="dim")
         since = Text(owner.acquired_utc, style="dim") if owner is not None else _ABSENT
-        table.add_row(name, state_cell, holder, since)
+        # The file name carries a one-way digest, so it cannot be read back as
+        # an identity. Shown only when no owner record says which target it is.
+        which = row.origin if row.origin else Text(row.name, style="dim")
+        table.add_row(which, row.scope, state_cell, holder, since)
     out.print(table)
 
 
@@ -1076,7 +1080,7 @@ def show_pending(ctx: typer.Context) -> None:
     # dangerous place for a corrupt directory to hide, because it is the one
     # answer an operator acts on by going home.
     corrupt = journal_mod.unreadable_txn_dirs()
-    orphans = txn.pending_rollbacks(host=settings.host)
+    orphans = txn.pending_rollbacks(origin=settings.origin)
     if not orphans:
         console.print("no pending transactions")
         _warn_corrupt_journal(corrupt)
@@ -1724,7 +1728,7 @@ def show_candidate(ctx: typer.Context) -> None:
     """Dump the staged candidate changeset (intent as YAML)."""
     state = _state(ctx)
     _rt, _registry, settings = _bootstrap(state)
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     items = candidate.ordered_items()
     if not items:
         console.print("candidate is empty")
@@ -2081,7 +2085,7 @@ def api(
     policy, reason = retry_mod.effective_policy(
         method_upper, path, retry_mod.Retry.NEVER, scope=scope
     )
-    journal = TxnJournal.create(settings.host, [Ref(kind="api", name=f"{method_upper} {path}")])
+    journal = TxnJournal.create(settings.origin, [Ref(kind="api", name=f"{method_upper} {path}")])
     journal.append(
         "RAW_API",
         method=method_upper,

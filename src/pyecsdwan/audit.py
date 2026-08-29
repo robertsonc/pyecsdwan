@@ -26,7 +26,8 @@ the config. That is the pattern ``ec-cli api`` already uses for request bodies
 by not thinking about it.
 
 Every record is self-contained. An NDJSON line lands in a SIEM with no
-surrounding context, so ``txn_id`` and ``orch_host`` are stamped onto each one
+surrounding context, so ``txn_id``, ``orch_host`` and ``orch_origin`` are
+stamped onto each one
 rather than left implied by the file it came from.
 
 Apart from that stamping and the redaction, a record is the journal's own event
@@ -91,6 +92,9 @@ class Summary:
 
     txn_id: str
     orch_host: str
+    #: Canonical identity of the target (#63). Empty on journals written
+    #: before origins were recorded, where `orch_host` is all there is.
+    orch_origin: str
     created_at: str
     state: str
     confirm_deadline: str | None
@@ -102,6 +106,7 @@ class Summary:
         return Summary(
             txn_id=meta.txn_id,
             orch_host=meta.orch_host,
+            orch_origin=meta.orch_origin,
             created_at=meta.created_at,
             state=meta.state,
             confirm_deadline=meta.confirm_deadline,
@@ -129,9 +134,14 @@ def events(
         for event in journal.events():
             record = event if include_snapshots else redact(event)
             # Stamped, not merged under a key, so a SIEM's flat field mapping
-            # sees them. `txn_id`/`orch_host` are not event field names, so
-            # there is nothing to collide with.
-            yield {"txn_id": meta.txn_id, "orch_host": meta.orch_host, **record}
+            # sees them. `txn_id`/`orch_host`/`orch_origin` are not event field
+            # names, so there is nothing to collide with.
+            yield {
+                "txn_id": meta.txn_id,
+                "orch_host": meta.orch_host,
+                "orch_origin": meta.orch_origin,
+                **record,
+            }
 
 
 def to_ndjson(records: Iterable[dict[str, Any]]) -> Iterator[str]:

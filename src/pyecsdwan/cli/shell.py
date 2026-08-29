@@ -167,7 +167,7 @@ def build_state(
         registry=registry,
         settings=settings,
         console=console if console is not None else Console(),
-        candidate=CandidateStore(settings.host),
+        candidate=CandidateStore(settings.origin),
     )
 
 
@@ -805,7 +805,7 @@ def _show_appliances(state: ShellState) -> None:
 
 
 def _show_pending(state: ShellState) -> None:
-    pending = txn.pending_rollbacks(host=state.settings.host)
+    pending = txn.pending_rollbacks(origin=state.settings.origin)
     if not pending:
         _info(state.console, "none")
         return
@@ -1136,7 +1136,7 @@ def _cmd_commit(tokens: list[str], state: ShellState) -> None:
         t
         for t in journal.list_txns()
         if t.meta.state == journal.TxnState.APPLIED_UNCONFIRMED
-        and t.meta.orch_host == state.settings.host
+        and journal.targets(t, state.settings.origin)
     ]
     if unconfirmed:
         options_passed = bool(
@@ -1204,7 +1204,7 @@ def _cmd_rollback(tokens: list[str], state: ShellState) -> None:
     if len(tokens) != 1:
         raise ValueError(_ROLLBACK_USAGE)
     if tokens[0] == "pending":
-        pending = txn.pending_rollbacks(host=state.settings.host)
+        pending = txn.pending_rollbacks(origin=state.settings.origin)
         if not pending:
             _info(state.console, "no pending transactions")
             return
@@ -1414,7 +1414,10 @@ def print_banner(state: ShellState) -> None:
         markup=False,
         highlight=False,
     )
-    _info(console, f"orchestrator: {state.settings.host}")
+    # The origin, not the short host: the banner is how an operator confirms
+    # which Orchestrator they are about to change, and two tenants under one
+    # hostname have the same short host (#63).
+    _info(console, f"orchestrator: {state.settings.origin}")
     try:
         pending = txn.pending_rollbacks()
     except Exception:  # noqa: BLE001 - a corrupt journal must not block shell startup

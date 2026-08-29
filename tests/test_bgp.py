@@ -96,7 +96,7 @@ def world(state_home: Any, mock_server: tuple[str, MockState]) -> dict[str, Any]
     )
     client = OrchClient(settings)
     ctx = Ctx(client=client, resolver=Resolver(client))
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     return {
         "ctx": ctx, "settings": settings, "state": state, "client": client,
         "candidate": candidate,

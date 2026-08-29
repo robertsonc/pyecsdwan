@@ -307,7 +307,7 @@ def world(state_home: Any, mock_server: tuple[str, MockState]) -> dict[str, Any]
     return {
         "ctx": ctx,
         "settings": settings,
-        "candidate": CandidateStore(settings.host),
+        "candidate": CandidateStore(settings.origin),
         "state": state,
     }
 

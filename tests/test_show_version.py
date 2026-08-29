@@ -493,14 +493,14 @@ def test_show_version_has_no_transactional_side_effects(
 ) -> None:
     """A report is not a transaction: no candidate item, no journal entry, no
     pending transaction, and nothing but GETs on the wire."""
-    candidate = CandidateStore(settings_for_mock.host)
+    candidate = CandidateStore(settings_for_mock.origin)
     assert candidate.ordered_items() == []
     assert journal.list_txns() == []
 
     result = _invoke(settings_for_mock, ["show", "fabric", "version"], monkeypatch)
     assert result.exit_code == 0, result.output
 
-    assert CandidateStore(settings_for_mock.host).ordered_items() == []
+    assert CandidateStore(settings_for_mock.origin).ordered_items() == []
     assert journal.list_txns() == []
 
 
@@ -527,7 +527,7 @@ def shell_state(settings_for_mock: config.Settings) -> ShellState:
         registry=default_registry,
         settings=settings_for_mock,
         console=Console(record=True, width=200),
-        candidate=CandidateStore(settings_for_mock.host),
+        candidate=CandidateStore(settings_for_mock.origin),
     )
 
 

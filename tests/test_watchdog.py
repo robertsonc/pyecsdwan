@@ -154,7 +154,7 @@ def test_detached_watchdog_reverts_real_commit(state_home: Any,
 
         from pyecsdwan.candidate import CandidateStore
 
-        candidate = CandidateStore(settings.host)
+        candidate = CandidateStore(settings.origin)
         candidate.set_path(
             Ref("interface-labels", "global"), ["wan", "3"],
             {"name": "LTE", "active": True, "topology": 2},
@@ -204,7 +204,7 @@ def test_detached_watchdog_honors_confirm(state_home: Any,
         ctx, registry, settings = bootstrap()
         from pyecsdwan.candidate import CandidateStore
 
-        candidate = CandidateStore(settings.host)
+        candidate = CandidateStore(settings.origin)
         candidate.set_path(
             Ref("interface-labels", "global"), ["wan", "6"],
             {"name": "INET2", "active": True, "topology": 0},
