@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from pyecsdwan import txn as txn_mod
 from pyecsdwan.candidate import CandidateItem, CandidateStore
 from pyecsdwan.contract import Ref
 
@@ -41,6 +42,25 @@ host, appliance, issue = sys.argv[1:4]
 store = CandidateStore(host)
 store.set_desired(Ref("appliance/banners", "global", appliance=appliance), {"issue": issue})
 """
+
+
+@pytest.fixture
+def mock_fabric(state_home: Any) -> Any:
+    """A live client against the bundled mock, for paths that really commit."""
+    pytest.importorskip("pyecsdwan.mock.server")
+    import pyecsdwan.resources  # noqa: F401 - registers the built-in plugins
+    from pyecsdwan import config
+    from pyecsdwan.client import OrchClient
+    from pyecsdwan.mock.server import run_in_thread
+
+    base_url, state, shutdown = run_in_thread()
+    state.reset()
+    settings = config.Settings(
+        orch_url=base_url, api_key="k", job_timeout=5.0,
+        job_poll_initial=0.01, job_poll_max=0.02,
+    )
+    yield settings, OrchClient(settings)
+    shutdown()
 
 
 @pytest.fixture
@@ -203,6 +223,57 @@ def test_the_commit_command_acknowledges_rather_than_wiping(
         )
     finally:
         shutdown()
+
+
+def test_the_shell_commit_also_acknowledges_rather_than_wiping(
+    state_home: Any, mock_fabric: Any
+) -> None:
+    """The interactive shell is the *primary* Junos-style interface, and it had
+    its own copy of this cycle: build a plan, commit, `state.candidate.clear()`.
+
+    Fixing the scriptable path left the shell destroying another shell's work,
+    and no test noticed, because the integration test drove `cli_main.app
+    commit` rather than `dispatch_config`. Both now run the same
+    `txn.commit_candidate`, and this drives the shell one so a third copy
+    cannot reappear unseen.
+    """
+    from rich.console import Console
+
+    from pyecsdwan.cli.shell import ShellState, dispatch_config
+    from pyecsdwan.contract import Ctx
+    from pyecsdwan.resolver import Resolver
+
+    settings, client = mock_fabric
+    host = settings.host
+    shell_a = CandidateStore(host)
+    shell_a.set_desired(Ref("appliance/banners", "global", appliance="BR1-EC"),
+                        {"issue": "A's change"})
+    state = ShellState(
+        ctx=Ctx(client=client, resolver=Resolver(client)),
+        registry=__import__("pyecsdwan.registry", fromlist=["x"]).default_registry,
+        settings=settings,
+        console=Console(record=True),
+        candidate=shell_a,
+    )
+
+    real_commit = txn_mod.commit
+
+    def commit_while_b_stages(*args: Any, **kwargs: Any) -> Any:
+        CandidateStore(host).set_desired(
+            Ref("appliance/banners", "global", appliance="BR2-EC"), {"issue": "B's change"}
+        )
+        return real_commit(*args, **kwargs)
+
+    txn_mod.commit = commit_while_b_stages  # type: ignore[assignment]
+    try:
+        dispatch_config("commit", state)
+    finally:
+        txn_mod.commit = real_commit  # type: ignore[assignment]
+
+    remaining = {i.ref_key for i in CandidateStore(host).ordered_items()}
+    assert remaining == {"appliance%2Fbanners:BR2-EC:global"}, (
+        "the shell wiped the candidate instead of acknowledging per item"
+    )
 
 
 def test_the_snapshot_is_compared_by_value_not_identity(state_home: Any) -> None:

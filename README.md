@@ -154,12 +154,20 @@ desired/
 ```
 
 Then `ec-cli drift --from desired/` to see what differs, and
-`ec-cli apply --from desired/` to commit it as one transaction —
-`--dry-run` writes nothing and exits 1 if it would change anything, which is
-the CI gate. Apply is the same planner, guards and journal as `commit`; only
-the intent comes from git. It refuses if you have staged work in the candidate,
-because one transaction carrying both intents would commit changes the
-directory never declared.
+`ec-cli apply --from desired/ --dry-run` to see the plan — it writes nothing
+and exits 1 if applying would change anything, which is the CI gate.
+
+**Writing from a directory is not enabled yet.** `apply --from` without
+`--dry-run` refuses. A declaration is *typed partial intent*, and the ratified
+spec requires each resource to prove it can build a complete target without
+erasing unknown, unmodeled or write-only fields before one is written — no
+resource has that proof yet. Until it does, applying a partial declaration
+would replace fields nobody declared, so the command says so rather than doing
+it. Staged changes through `set`/`commit` are unaffected.
+
+The preview refuses if you have staged work in the candidate, because one
+transaction carrying both intents would commit changes the directory never
+declared.
 
 Each file carries an explicit, versioned envelope:
 
@@ -195,7 +203,9 @@ nouns the commands take — never registry kinds, which is not cosmetic: the kin
 behind a per-appliance banner is `appliance/banners`, and a path separator in a
 directory name would silently become two levels.
 
-The semantics above are the ratified `specs/003-declarative-apply` (1.0.0).
+The declaration format above is the ratified `specs/003-declarative-apply`
+(1.0.0); the per-resource materialization it requires before any write is
+still being built.
 
 ## Tier-1 spec pipeline (`tools/`)
 

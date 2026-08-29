@@ -632,3 +632,142 @@ def test_a_changed_value_changes_the_digest(tmp_path: Path) -> None:
     _write(b, BANNERS, "issue: y\n")
 
     assert desired.load(default_registry, a).digest != desired.load(default_registry, b).digest
+
+
+# -- adversarial input (2026-08-29 review) ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "doc,what",
+    [
+        (
+            "apiVersion: pyecsdwan/v1\nstate: present\nspec:\n  issue: REVIEWED\n"
+            "spec:\n  issue: SILENTLY WINS\n",
+            "duplicate spec",
+        ),
+        (
+            "apiVersion: pyecsdwan/v1\napiVersion: pyecsdwan/v99\n"
+            "state: present\nspec:\n  issue: x\n",
+            "duplicate apiVersion",
+        ),
+        (
+            "apiVersion: pyecsdwan/v1\nstate: present\nstate: absent\nspec:\n  issue: x\n",
+            "duplicate state",
+        ),
+        (
+            "apiVersion: pyecsdwan/v1\nstate: present\nspec:\n  issue: a\n  issue: b\n",
+            "duplicate nested key",
+        ),
+        (
+            "apiVersion: pyecsdwan/v1\nstate: present\nname: global\nname: motd\n"
+            "spec:\n  issue: x\n",
+            "duplicate identity key",
+        ),
+    ],
+    ids=["spec", "apiVersion", "state", "nested", "identity"],
+)
+def test_duplicate_keys_are_refused(tmp_path: Path, doc: str, what: str) -> None:
+    """`yaml.safe_load` is last-key-wins, so two `spec:` blocks parse cleanly
+    and the *second* is applied.
+
+    That defeats every other check in this module: the unknown-key guard, the
+    identity reconciliation, and the human review all inspect a document that
+    is not the one that would be written. A duplicate key is never intentional
+    in a reviewed declaration, and silently picking one is the worst available
+    answer — so the loader rejects duplicates at every mapping level.
+    """
+    _raw(tmp_path, BANNERS, doc)
+
+    with pytest.raises(desired.DesiredError) as caught:
+        desired.load(default_registry, tmp_path)
+
+    assert "duplicate key" in str(caught.value), what
+
+
+def test_an_ordinary_document_is_not_mistaken_for_a_duplicate(tmp_path: Path) -> None:
+    """Guards the guard: the same key under *different* parents is normal, and
+    a check that flagged it would reject most real declarations."""
+    _raw(
+        tmp_path, "fabric/interface-labels/global.yaml",
+        f"apiVersion: {desired.API_VERSION}\nstate: present\nspec:\n"
+        f"  wan:\n    '3':\n      name: LTE\n  lan:\n    '4':\n      name: DMZ\n",
+    )
+
+    assert len(desired.load(default_registry, tmp_path)) == 1
+
+
+def test_an_unquoted_date_is_refused(tmp_path: Path) -> None:
+    """YAML infers `2026-08-29` as a `datetime.date`. Stringified for the
+    digest it becomes `"2026-08-29"` — identical to the quoted string, which
+    is a different declaration. Two distinct inputs must not share one
+    identity, so the inferred type is refused rather than coerced."""
+    _raw(
+        tmp_path, BANNERS,
+        f"apiVersion: {desired.API_VERSION}\nstate: present\nspec:\n  expires: 2026-08-29\n",
+    )
+
+    with pytest.raises(desired.DesiredError) as caught:
+        desired.load(default_registry, tmp_path)
+
+    assert "Quote it" in str(caught.value)
+
+
+def test_the_quoted_form_is_accepted(tmp_path: Path) -> None:
+    """Guards the guard, and shows the fix the message asks for."""
+    _raw(
+        tmp_path, BANNERS,
+        f'apiVersion: {desired.API_VERSION}\nstate: present\nspec:\n  expires: "2026-08-29"\n',
+    )
+
+    assert len(desired.load(default_registry, tmp_path)) == 1
+
+
+def test_a_non_string_key_is_refused_at_load_not_at_digest(tmp_path: Path) -> None:
+    """A YAML integer key used to survive `load()` and then raise `TypeError`
+    from `digest()` — after the caller had been told the directory was fine.
+    Failing at the boundary is the difference between an input error and a
+    crash somewhere downstream."""
+    _raw(
+        tmp_path, BANNERS,
+        f"apiVersion: {desired.API_VERSION}\nstate: present\nspec:\n  1: int key\n",
+    )
+
+    with pytest.raises(desired.DesiredError) as caught:
+        desired.load(default_registry, tmp_path)
+
+    assert "non-string key" in str(caught.value)
+
+
+def test_nested_values_are_validated_too(tmp_path: Path) -> None:
+    """The check is recursive: an inferred type three levels down is exactly as
+    ambiguous as one at the top."""
+    _raw(
+        tmp_path, "fabric/interface-labels/global.yaml",
+        f"apiVersion: {desired.API_VERSION}\nstate: present\nspec:\n"
+        f"  wan:\n    '3':\n      renewed: 2026-08-29\n",
+    )
+
+    with pytest.raises(desired.DesiredError) as caught:
+        desired.load(default_registry, tmp_path)
+
+    assert "wan.3.renewed" in str(caught.value)
+
+
+def test_the_schema_version_is_inside_the_digest_domain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same values under a different envelope version are a different
+    contract. If the version were outside the digest, a future v2 that
+    reinterpreted the same YAML would produce an identical identity — and
+    "this is the plan that was approved" would stop being true."""
+    _write(tmp_path, BANNERS, "issue: x\n")
+    first = desired.load(default_registry, tmp_path).digest
+
+    monkeypatch.setattr(desired, "API_VERSION", "pyecsdwan/v2")
+    _raw(
+        tmp_path, BANNERS,
+        "apiVersion: pyecsdwan/v2\nstate: present\nspec:\n  issue: x\n",
+    )
+    second = desired.load(default_registry, tmp_path).digest
+
+    assert first != second

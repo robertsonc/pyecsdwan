@@ -124,6 +124,79 @@ class DesiredError(Exception):
     """The directory could not be read as desired state. Always fatal."""
 
 
+class _StrictLoader(yaml.SafeLoader):
+    """A SafeLoader that refuses duplicate mapping keys, at every level.
+
+    ``yaml.safe_load`` is last-key-wins, so a file with two ``spec:`` blocks
+    parses cleanly and applies the second. That defeats every other check in
+    this module: the unknown-key guard, the identity reconciliation and the
+    review itself all inspect a document that is not the one that would be
+    written. A duplicate key is never intentional in a reviewed declaration,
+    and silently picking one of them is the worst available answer.
+    """
+
+
+def _no_duplicate_keys(loader: _StrictLoader, node: Any) -> dict[Any, Any]:
+    seen: set[Any] = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        try:
+            duplicate = key in seen
+        except TypeError:  # unhashable key; construct_mapping will report it
+            duplicate = False
+        if duplicate:
+            raise yaml.MarkedYAMLError(
+                context="while parsing a mapping",
+                problem=f"duplicate key {key!r}; the reviewed value would be "
+                f"silently replaced",
+                problem_mark=key_node.start_mark,
+            )
+        seen.add(key)
+    return loader.construct_mapping(node, deep=True)
+
+
+_StrictLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicate_keys
+)
+
+#: Scalars a declaration may contain. Deliberately the JSON set: an unquoted
+#: YAML date parses to ``datetime.date``, which would then be stringified for
+#: the digest and collide with the quoted string that means something else.
+#: Anything outside this set must be quoted, which is also how it will be sent.
+JSON_SCALARS = (str, int, float, bool, type(None))
+
+
+def _ensure_jsonable(value: Any, where: Any, path: str) -> None:
+    """Reject anything that is not already a JSON value, key or scalar.
+
+    Two failures this prevents, both of which used to surface late or not at
+    all: a non-string mapping key raised ``TypeError`` from ``digest()``
+    *after* ``load()`` had returned successfully, and a YAML date hashed
+    identically to the quoted string of the same characters — so two different
+    declarations shared one identity.
+    """
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise DesiredError(
+                    f"{where}: {path or 'spec'} has non-string key {key!r} "
+                    f"({type(key).__name__}); declaration keys must be strings"
+                )
+            _ensure_jsonable(child, where, f"{path}.{key}" if path else key)
+        return
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            _ensure_jsonable(child, where, f"{path}[{index}]")
+        return
+    if not isinstance(value, JSON_SCALARS):
+        raise DesiredError(
+            f"{where}: {path or 'spec'} is a {type(value).__name__}, which YAML "
+            f"inferred from an unquoted value. Quote it: an inferred date and "
+            f"the string of the same characters are different declarations and "
+            f"must not share one identity"
+        )
+
+
 @dataclasses.dataclass(frozen=True)
 class Declaration:
     """One parsed file: what it addresses, and what it says about it."""
@@ -181,10 +254,15 @@ class Declared:
         a single changed value produces a different one.
         """
         canonical = json.dumps(
-            [d.as_canonical() for d in self.declarations],
+            {
+                # The schema version is inside the digest domain: the same
+                # values under a different envelope version are a different
+                # contract, and two contracts must not share one identity.
+                "apiVersion": API_VERSION,
+                "declarations": [d.as_canonical() for d in self.declarations],
+            },
             sort_keys=True,
             separators=(",", ":"),
-            default=str,
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -251,7 +329,7 @@ def _parse(registry: Registry, root: Path, path: Path) -> Declaration:
     except OSError as exc:
         raise DesiredError(f"{where}: cannot read ({exc})") from exc
     try:
-        data = yaml.safe_load(text)
+        data = yaml.load(text, Loader=_StrictLoader)  # noqa: S506 - _StrictLoader derives from SafeLoader
     except yaml.YAMLError as exc:
         raise DesiredError(f"{where}: invalid YAML ({exc})") from exc
     if not isinstance(data, dict):
@@ -309,6 +387,7 @@ def _parse(registry: Registry, root: Path, path: Path) -> Declaration:
         )
     if not isinstance(spec, dict):
         raise DesiredError(f"{where}: spec must be a mapping, got {type(spec).__name__}")
+    _ensure_jsonable(spec, where, "")
 
     return Declaration(ref=ref, state=state, spec=spec, origin=path)
 

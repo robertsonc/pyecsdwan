@@ -1160,15 +1160,17 @@ def _cmd_commit(tokens: list[str], state: ShellState) -> None:
             state.exit_code = 2
         return
 
-    plan = txn.build_plan(state.ctx, state.registry, state.candidate)
-    if plan.empty:
-        _info(state.console, "no changes")
-        return
     try:
-        report = txn.commit(
+        # The same cycle the scriptable CLI runs, from the same function.
+        # This path used to build its own plan and finish with
+        # `state.candidate.clear()`, which deletes work another shell staged
+        # while this commit was running (#63) — and it kept doing so after the
+        # scriptable path was fixed, because the fix lived at that call site
+        # instead of in one shared place.
+        outcome = txn.commit_candidate(
             state.ctx,
             state.registry,
-            plan,
+            state.candidate,
             state.settings,
             confirm_minutes=confirm_minutes,
             force=flags["force"],
@@ -1179,10 +1181,18 @@ def _cmd_commit(tokens: list[str], state: ShellState) -> None:
         _error(state.console, str(exc))
         state.exit_code = 2
         return
-    if report.ok:
-        state.candidate.clear()
-    else:
+    if outcome.report is None:
+        _info(state.console, "no changes")
+        return
+    report = outcome.report
+    if not report.ok:
         state.exit_code = 2
+    if outcome.kept:
+        _warn(
+            state.console,
+            f"kept {len(outcome.kept)} candidate item(s) changed since this commit "
+            f"was planned: {', '.join(sorted(outcome.kept))}",
+        )
     render_report(state.console, report)
     if report.ok and confirm_minutes is not None:
         _warn(state.console, f"commit within {confirm_minutes} minute(s) to keep changes")
