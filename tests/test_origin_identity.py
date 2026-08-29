@@ -815,3 +815,125 @@ def _spawn_legacy_holder(state_home, host, scope, ready):
         time.sleep(0.02)
     proc.kill()
     raise AssertionError("legacy holder never took the lock")
+
+
+def test_the_under_lock_recheck_refuses_an_unproven_journal(state_home):
+    """`revert_txn_dir` refuses a legacy journal before it takes the lock, so
+    the inner guard is unreachable through that door. It is still the one that
+    matters: the inner function re-reads the journal *inside* the lock, and
+    everything past that point acts on what was read there, not on what was
+    true when the outer check ran. Tested against the inner function directly,
+    which is where that invariant lives."""
+    from pyecsdwan import txn as txn_mod
+    from pyecsdwan.registry import default_registry
+
+    staged_txn = _unconfirmed("https://orch.example.com")
+    meta = json.loads((staged_txn.dir / "meta.json").read_text())
+    del meta["orch_origin"]
+    meta["format"] = 1
+    (staged_txn.dir / "meta.json").write_text(json.dumps(meta))
+
+    report = txn_mod._revert_txn_dir_locked(
+        journal.TxnJournal.open(staged_txn.dir),
+        reason="test",
+        ctx=_ctx_for("https://orch.example.com"),
+        registry=default_registry,
+    )
+    assert not report.ok
+    assert "refusing to restore" in report.messages[0]
+
+
+def test_the_under_lock_recheck_still_refuses_a_different_origin(state_home):
+    """The other half of the same guard: a bound journal from another target."""
+    from pyecsdwan import txn as txn_mod
+    from pyecsdwan.registry import default_registry
+
+    staged_txn = _unconfirmed("https://orch.example.com/tenant-a")
+    report = txn_mod._revert_txn_dir_locked(
+        journal.TxnJournal.open(staged_txn.dir),
+        reason="test",
+        ctx=_ctx_for("https://orch.example.com/tenant-b"),
+        registry=default_registry,
+    )
+    assert not report.ok
+    assert "refusing: transaction targets" in report.messages[0]
+
+
+def test_the_legacy_claim_is_serialized_on_the_shared_namespace(state_home):
+    """Sequential adoption proves the unlink, not the lock. The race is between
+    two *different* origins that compute the same legacy path, so a lock keyed
+    by either origin would not exclude the other — and both would copy the same
+    staging into their own store. Held from another process, since a lock is
+    re-entrant within one."""
+    from pyecsdwan.locking import LockBusy
+
+    root = config.candidate_root()
+    root.mkdir(parents=True, exist_ok=True)
+    _legacy_candidate(root)
+
+    holder = _spawn_claim_holder(state_home, "orch.example.com", state_home / "claim.ready")
+    try:
+        other = CandidateStore(
+            "https://orch.example.com/tenant-b", root=root, lock_timeout=0.5
+        )
+        assert other.unadopted_legacy is not None
+        with pytest.raises(LockBusy):
+            other.adopt_legacy()
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
+
+
+_CLAIM_HOLDER = """
+import sys, time
+from pathlib import Path
+from pyecsdwan.locking import HostLock
+with HostLock(sys.argv[1], "candidate-legacy", timeout=10.0):
+    Path(sys.argv[2]).write_text("ready")
+    time.sleep(120)
+"""
+
+
+def _spawn_claim_holder(state_home, host, ready):
+    import os
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _CLAIM_HOLDER, host, str(ready)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=dict(os.environ, ECSDWAN_HOME=str(state_home)),
+    )
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        if ready.exists():
+            return proc
+        if proc.poll() is not None:
+            raise AssertionError(f"claim holder died: {proc.communicate()[1]}")
+        time.sleep(0.02)
+    proc.kill()
+    raise AssertionError("claim holder never took the lock")
+
+
+def test_the_real_commit_path_refuses_rather_than_saying_no_changes(state_home):
+    """Testing the guard is not testing that anything calls it — the exact
+    failure that let `clear()` survive on the shell path (#100). Driven through
+    `commit_candidate`, which is the one cycle both interfaces use."""
+    from pyecsdwan import txn as txn_mod
+
+    root = config.candidate_root()
+    root.mkdir(parents=True, exist_ok=True)
+    _legacy_candidate(root)
+    store = CandidateStore("https://orch.example.com", root=root)
+    assert store.items == {}
+
+    with pytest.raises(txn_mod.CommitError) as excinfo:
+        txn_mod.commit_candidate(
+            _ctx_for("https://orch.example.com"),
+            __import__("pyecsdwan.registry", fromlist=["x"]).default_registry,
+            store,
+            config.Settings(orch_url="https://orch.example.com", api_key="k"),
+        )
+    assert "adopt --candidate" in str(excinfo.value)

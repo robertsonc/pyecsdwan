@@ -213,6 +213,8 @@ class CandidateStore:
         self.unadopted_legacy: Path | None = None
         self.items: dict[str, CandidateItem] = {}
         self.lock = HostLock(self.origin, "candidate", root=lock_root, timeout=lock_timeout)
+        self._lock_root = lock_root
+        self._lock_timeout = lock_timeout
         self._load()
 
     # -- mutation ------------------------------------------------------------
@@ -265,7 +267,12 @@ class CandidateStore:
         """
         if self.unadopted_legacy is None:
             return []
-        claim = HostLock(config.display_host(self.origin), "candidate-legacy")
+        claim = HostLock(
+            config.display_host(self.origin),
+            "candidate-legacy",
+            root=self._lock_root,
+            timeout=self._lock_timeout,
+        )
         with claim, self._mutate():
             if not self._legacy_path.exists():
                 # Won by another origin between the scan and the claim.
