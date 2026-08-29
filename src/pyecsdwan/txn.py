@@ -275,6 +275,51 @@ def commit(
         )
 
 
+#: Transaction states that own the fabric until they resolve. A new commit
+#: during either would be reverted out from under the operator: an
+#: APPLIED_UNCONFIRMED window ends by restoring a snapshot taken *before* the
+#: new commit, and a REVERTING transaction is mid-restore.
+BLOCKING_STATES = frozenset({TxnState.APPLIED_UNCONFIRMED, TxnState.REVERTING})
+
+
+def _guard_no_pending_confirm(
+    settings: config.Settings, journal_root: Path | None
+) -> None:
+    """Refuse a new transaction while one still owns the fabric (#100).
+
+    This check used to live in the ``commit`` CLI command only, which made it
+    a property of one entry point rather than of the engine. ``apply --from``
+    called ``txn.commit`` directly and so did not have it, and neither would
+    any library caller: a declarative apply during an active confirm window
+    was accepted, wrote to the fabric, and was then silently erased when the
+    first window expired and its watchdog restored a snapshot taken before the
+    second write ever happened. No error, no journal entry saying why — the
+    change is simply gone.
+
+    Inside the commit lock and before ``TxnJournal.create``, so nothing is
+    journaled and no API call is made for a transaction that cannot proceed.
+
+    Deliberately not applied to ``revert_txn_dir`` / ``rollback_history_txn``:
+    recovery is precisely what an operator needs *during* one of these states,
+    and neither goes through ``commit()``.
+    """
+    from pyecsdwan.journal import list_txns
+
+    blocking = [
+        t
+        for t in list_txns(journal_root)
+        if t.meta.orch_host == settings.host and t.meta.state in BLOCKING_STATES
+    ]
+    if not blocking:
+        return
+    first = blocking[0]
+    raise CommitError(
+        f"transaction {first.meta.txn_id} is {first.meta.state} on {settings.host}; "
+        f"refusing to start another that it would revert away. Run 'ec-cli confirm' "
+        f"or 'ec-cli rollback --pending' first."
+    )
+
+
 def _commit_locked(
     ctx: Ctx,
     changed: list[PlanItem],
@@ -284,6 +329,7 @@ def _commit_locked(
     rebase: bool,
     override_template: bool,
 ) -> CommitReport:
+    _guard_no_pending_confirm(settings, journal_root)
     journal = TxnJournal.create(
         settings.host, [i.ref for i in changed], root=journal_root
     )

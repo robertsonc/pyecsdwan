@@ -332,12 +332,18 @@ def render_drift(console: Console, report: drift_report.Report) -> None:
     )
     for note in report.notes:
         console.print(Text(note, style="dim"))
+    for gap in report.gaps:
+        # Named individually rather than counted. A gap is a piece of the
+        # fabric this run never looked at, and "3 gaps" does not tell an
+        # operator which kind to go and check by hand.
+        console.print(Text(f"not compared — {gap.scope} {gap.name}: {gap.reason}", style="yellow"))
     if not report.complete:
         # Said outright, not left to be inferred from a count: the whole
         # difference between this and a report that lies is this line.
+        missed = len(report.inconclusive) + len(report.gaps)
         console.print(
             Text(
-                f"incomplete: {len(report.inconclusive)} instance(s) could not be compared, "
+                f"incomplete: {missed} instance(s)/scope(s) could not be compared, "
                 f"so \"no drift\" is not a claim this run can make",
                 style="bold red",
             )

@@ -228,6 +228,111 @@ def test_the_named_escape_hatches_are_real_commands() -> None:
     assert "discard" in names
 
 
+# -- one transaction owns the fabric at a time (#100) -------------------------
+
+
+def _pending_window(world: dict[str, Any]) -> Any:
+    """A transaction that has written and is waiting to be confirmed."""
+    from pyecsdwan.journal import TxnJournal, TxnState
+
+    journal = TxnJournal.create(world["settings"].host, [REF])
+    journal.set_state(TxnState.APPLIED_UNCONFIRMED)
+    return journal
+
+
+def test_apply_refuses_during_an_active_confirm_window(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    """Issue #100, and the most serious thing in this PR.
+
+    An APPLIED_UNCONFIRMED transaction ends by restoring the snapshot it took
+    *before* it wrote. A second transaction that lands inside that window is
+    therefore not merely racing — it is guaranteed to be erased when the
+    window expires, with no error and no journal entry explaining where the
+    change went.
+
+    The `commit` command had this guard. `apply --from` called `txn.commit`
+    directly, so it did not: the check was a property of one entry point
+    rather than of the engine, which is exactly the kind of guard a new entry
+    point walks around. It lives in `_commit_locked` now, so every caller —
+    apply, `commit`, the shell, any library user — gets it.
+    """
+    before = dict(_live_banners(world))
+    _pending_window(world)
+    _write(tmp_path, DECLARED, "issue: would be erased when the window expires\n")
+
+    result = _cli(world, "apply", "--from", str(tmp_path))
+
+    assert result.exit_code != 0
+    assert _live_banners(world) == before, "wrote inside another transaction's window"
+
+
+def test_the_refusal_is_the_engine_not_the_command(world: dict[str, Any]) -> None:
+    """Stated against `txn.commit` directly, because a test that only drove
+    the CLI would pass again the moment someone adds a third entry point."""
+    _pending_window(world)
+    staged = CandidateStore(world["settings"].host)
+    staged.set_desired(REF, {"issue": "from a library caller"})
+    plan = txn.build_plan(world["ctx"], default_registry, staged)
+
+    with pytest.raises(txn.CommitError) as caught:
+        txn.commit(world["ctx"], default_registry, plan, world["settings"])
+
+    assert "APPLIED_UNCONFIRMED" in str(caught.value)
+    # ... and it names both ways out, which is what the operator does next.
+    assert "confirm" in str(caught.value)
+    assert "rollback --pending" in str(caught.value)
+
+
+def test_nothing_is_journaled_for_a_refused_commit(world: dict[str, Any]) -> None:
+    """The guard sits before `TxnJournal.create`, so a refused commit leaves
+    no half-transaction behind for the orphan scan to puzzle over."""
+    from pyecsdwan.journal import list_txns
+
+    _pending_window(world)
+    before = {t.meta.txn_id for t in list_txns()}
+    staged = CandidateStore(world["settings"].host)
+    staged.set_desired(REF, {"issue": "refused"})
+    plan = txn.build_plan(world["ctx"], default_registry, staged)
+
+    with pytest.raises(txn.CommitError):
+        txn.commit(world["ctx"], default_registry, plan, world["settings"])
+
+    assert {t.meta.txn_id for t in list_txns()} == before
+
+
+def test_a_settled_transaction_does_not_block_anything(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    """Guards the guard. Refusing whenever *any* transaction exists would pass
+    every test above and make the tool single-use."""
+    from pyecsdwan.journal import TxnJournal, TxnState
+
+    TxnJournal.create(world["settings"].host, [REF]).set_state(TxnState.CONFIRMED)
+    _write(tmp_path, DECLARED, "issue: after a confirmed transaction\n")
+
+    result = _cli(world, "apply", "--from", str(tmp_path))
+
+    assert result.exit_code == 0, result.output
+    assert _live_banners(world)["issue"] == "after a confirmed transaction"
+
+
+def test_another_host_does_not_block_this_one(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    """The journal is shared across Orchestrators; the constraint is not.
+    An unconfirmed window on one fabric says nothing about another."""
+    from pyecsdwan.journal import TxnJournal, TxnState
+
+    other = TxnJournal.create("some-other-orchestrator.example.com", [REF])
+    other.set_state(TxnState.APPLIED_UNCONFIRMED)
+    _write(tmp_path, DECLARED, "issue: different fabric entirely\n")
+
+    result = _cli(world, "apply", "--from", str(tmp_path))
+
+    assert result.exit_code == 0, result.output
+
+
 # -- the guards are still on the path ----------------------------------------
 
 
