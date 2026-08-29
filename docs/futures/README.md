@@ -508,6 +508,26 @@ orchestrator-scope path is ever wanted, the mock needs the route first.
   says so; if the API ever grows a per-overlay summary, the counting can go.
 - The mock's `overlays` filter on `GET /flow` splits names on `,` while the
   spec says IDs split on `|`. Nothing uses it. Reconcile if anything starts to.
+- **Resolved by #94: `ipEitherFlag` is directional when true.** This file
+  carried it as "name versus description, unverified live". The live run in
+  #94 settled it in favour of the description — `true` matches `ip1` as the
+  *source only*, so `show fabric flow <ip>` was searching one direction and
+  answering "no flows found" for any host that mostly receives traffic. The
+  client now sends `false`, and the mock implements the documented semantics
+  rather than the name it had been agreeing with.
+- **Still unexplained from #94: two appliances answer `GET /flow` with a hard
+  500.** `S3-ecv-01` and `S3-ecv-02` returned 500 in 42-48ms on every attempt
+  while four siblings answered 200 in 300-1500ms. A fast deterministic 500
+  looks like rejection rather than a failure during work, so a parameter those
+  two do not accept is one candidate and an appliance-side fault is another.
+  Worth checking whether `show fabric flows summary` — same endpoint, no
+  address parameters — succeeds on the same two appliances: if it does, the
+  filter arguments are implicated; if it does not, they are unhealthy.
+- The flow report labels any failed fan-out item "unreachable", including an
+  API error like that 500. The appliance may be perfectly reachable and the
+  *query* at fault, so the word sends an operator to check the wrong thing.
+  Renaming it touches the `--json` payload's `unreachable` key, so it wants
+  its own change rather than riding along with a P0 fix.
 - Zone and VRF ids in flow rows are rendered as integers; no name lookup.
 - `--section` on `show configuration appliance --format native` takes one name,
   not a repeatable list.

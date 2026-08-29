@@ -7,10 +7,13 @@ parser, so they share one test module.
 The load-bearing tests here are the two that would let a plausible-looking
 implementation ship a lie:
 
-* :func:`test_matching_is_server_side_via_ip_either_flag` — the mock only
-  filters when the flag is sent, so a client that pulled every flow and
-  filtered locally would return the *same rows* and pass a naive assertion.
-  This one asserts on the request.
+* :func:`test_matching_is_server_side_and_sends_the_flag_undirected` — the
+  client could pull every flow and filter locally and return the *same rows*,
+  passing a naive assertion. This one asserts on the request. It also carries
+  #94's lesson: it used to assert ``ipEitherFlag is True`` and pass, because
+  the mock implemented the flag's *name* rather than the vendored spec's
+  description of it, so fixture and code agreed on the same wrong belief while
+  a live fabric returned nothing.
 * :func:`test_one_conversation_seen_from_both_ends_is_reported_once` — the
   fixture seeds ``10.1.1.5`` on two appliances as the two ends of one
   conversation. Reporting it twice is the failure mode #59 exists to prevent.
@@ -18,6 +21,7 @@ implementation ship a lie:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Iterator
 from typing import Any
@@ -275,36 +279,57 @@ def test_summary_table_flags_a_bounded_run(world: dict[str, Any]) -> None:
 # -- #59: one address, fabric-wide -------------------------------------------
 
 
-def test_matching_is_server_side_via_ip_either_flag(world: dict[str, Any]) -> None:
-    """The whole of #59. The mock only applies the address filter when
-    ``ipEitherFlag`` is sent, so an implementation that pulled every flow and
-    filtered in Python would produce the same rows — this asserts on the
-    request instead of the result."""
+def test_matching_is_server_side_and_sends_the_flag_undirected(
+    world: dict[str, Any],
+) -> None:
+    """The whole of #59, with the flag the right way round (#94).
+
+    This test used to assert ``ipEitherFlag is True`` and pass, because the
+    mock implemented the flag's *name*. The vendored baseline documents the
+    opposite — "If true, ip1 will be treated as the source IP" — so ``true``
+    searches one direction, and a live fabric duly answered "no flows found"
+    for an address that had them.
+
+    Asserted as the string ``"false"`` because that is what goes on the wire:
+    the encoding is this module's decision, not a library's.
+    """
     flows_report.find_flows(world["ctx"], "10.1.1.5")
     calls = world["client"].flow_calls()
     assert len(calls) == 3
     for params in calls:
         assert params["ip1"] == "10.1.1.5"
-        assert params["ipEitherFlag"] is True
+        assert params["ipEitherFlag"] == "false", params
     # ...and nothing was fetched unfiltered alongside it, which is how a
     # "filter locally, then also query the server" implementation would look.
     assert all("ip1" in params for params in calls)
 
 
-def test_the_flag_is_what_makes_either_end_match(world: dict[str, Any]) -> None:
-    """Guards the test above. Without the flag the mock matches ``ip1`` only,
-    so 1.NE — which sees 10.1.1.5 as ``ip2`` — returns nothing."""
+def test_the_flag_is_directional_the_way_the_spec_says(world: dict[str, Any]) -> None:
+    """Guards the test above, and is the whole bug in four lines.
+
+    1.NE sees 10.1.1.5 as ``ip2`` — the *destination*. With the flag true the
+    server matches sources only and returns nothing; with it false the address
+    matches at either end. Get this backwards and every search for a host that
+    receives traffic answers "no flows found".
+    """
     client = world["client"]
-    without = client.get(
-        flows_report.FLOWS_ENDPOINT,
-        params={"nePk": "1.NE", "maxFlows": 100, "ip1": "10.1.1.5"},
-    )
-    with_flag = client.get(
-        flows_report.FLOWS_ENDPOINT,
-        params={"nePk": "1.NE", "maxFlows": 100, "ip1": "10.1.1.5", "ipEitherFlag": True},
-    )
-    assert without["flows"] == []
-    assert len(with_flag["flows"]) == 1
+    base = {"nePk": "1.NE", "maxFlows": 100, "ip1": "10.1.1.5"}
+    directional = client.get(flows_report.FLOWS_ENDPOINT, params={**base, "ipEitherFlag": "true"})
+    either_end = client.get(flows_report.FLOWS_ENDPOINT, params={**base, "ipEitherFlag": "false"})
+    assert directional["flows"] == [], "true is directional: ip1 is the source end"
+    assert len(either_end["flows"]) == 1, "false matches the address at either end"
+
+
+def test_the_report_asks_for_the_undirected_match(world: dict[str, Any]) -> None:
+    """End to end: the command finds the flow it could not find before.
+
+    The regression #94 reported is not "a wrong parameter" — it is that
+    `show fabric flow <ip>` returned nothing for a real address. This asserts
+    the outcome, so a future refactor that gets the flag right in `fetch_flows`
+    but drops it somewhere else still fails.
+    """
+    search = flows_report.find_flows(world["ctx"], "10.1.1.5")
+    assert search.match_count == 1, "the address is a destination on 1.NE and must still match"
 
 
 def test_one_conversation_seen_from_both_ends_is_reported_once(
@@ -446,6 +471,65 @@ def test_flow_search_reports_a_max_flows_ceiling(world: dict[str, Any]) -> None:
     assert set(search.bounded_appliances) == {"BR1-EC", "HUB1-EC"}
     result = _cli(world, "show", "fabric", "flow", "10.1.1.0/24", "--max-flows", "1")
     assert "ceiling, not a total" in result.output
+
+
+def test_a_filtered_search_is_not_called_bounded_by_the_whole_census(
+    world: dict[str, Any],
+) -> None:
+    """#94's second bug: every flow search claimed it had been truncated.
+
+    `bounded` compared the returned row count against `active.total_flows` —
+    the appliance's *entire* flow census, which takes no notice of `ip1`. On a
+    filtered read those are different populations, so a search matching one
+    flow on an appliance carrying several reported itself truncated and told
+    the operator to re-run with a higher `--max-flows`. That cannot change a
+    server-side filtered result; the advice was unactionable as well as wrong.
+
+    The live report in #94 shows it at its worst — four appliances flagged
+    bounded on a search that matched *nothing at all*.
+    """
+    search = flows_report.find_flows(world["ctx"], "10.1.1.5", max_flows=1000)
+    assert search.match_count == 1
+    assert not search.bounded, search.bounded_appliances
+    assert not search.bounded_appliances
+
+    result = _cli(world, "show", "fabric", "flow", "10.1.1.5")
+    assert "ceiling, not a total" not in result.output
+
+
+def test_the_census_signal_still_works_where_it_belongs() -> None:
+    """Guards the fix from over-reach: dropping the census comparison
+    altogether would also disarm the *unfiltered* truncation warning, where
+    comparing against `total_flows` is exactly right because the rows and the
+    census are the same population.
+
+    Asserted on the dataclass rather than through the mock, deliberately. The
+    census branch only ever fires alone when the server returns fewer rows than
+    we asked for while reporting more — i.e. a server-side cap below ours. I
+    cannot make the bundled mock do that without inventing a behaviour no
+    primary source documents, and a fixture invented to make a branch reachable
+    proves nothing about the branch. Testing the logic directly is honest about
+    what is being checked: the rule, not a round trip.
+
+    The first version of this test used `max_flows=1` through the mock and
+    passed via the *cap* branch, so the mutation that deleted the census branch
+    entirely went unnoticed.
+    """
+    census = {"total_flows": 5}
+    unfiltered = flows_report.FlowFetch(
+        target=flows_report.Target(name="A", ne_pk="1.NE"),
+        rows=(),
+        active=census,
+        max_flows=1000,
+        filtered=False,
+    )
+    assert unfiltered.bounded, "an unfiltered read returning less than the census is truncated"
+
+    filtered = dataclasses.replace(unfiltered, filtered=True)
+    assert not filtered.bounded, "the same numbers mean nothing once a filter narrowed the rows"
+
+    at_the_cap = dataclasses.replace(unfiltered, rows=(), max_flows=0)
+    assert at_the_cap.bounded, "returning the cap is bounded whether or not a filter was sent"
 
 
 def test_an_unreachable_appliance_degrades_the_flow_search(
