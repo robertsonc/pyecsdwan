@@ -418,19 +418,52 @@ def committed_history(root: Path | None = None, host: str | None = None) -> list
     )
 
 
+def _driven_now(txn: TxnJournal, cache: dict[str, Any]) -> bool:
+    """Whether a live process currently holds the commit lock *for this txn*.
+
+    The watchdog is armed only for confirm windows, so an ordinary APPLYING
+    transaction — a commit running right now, in another process — has no
+    watchdog pid and read as an orphan (#100). Recovery would then wait on the
+    commit lock the live commit is holding, acquire it the moment that commit
+    finished, and restore snapshots over work that had just succeeded.
+
+    The commit lock is the thing actually held for a commit's duration, and its
+    owner record names the transaction it was taken for. Matching on that
+    ``txn_id`` rather than on "the lock is busy" matters: during recovery the
+    lock is held for the transaction *being recovered*, and a lock held for
+    some other transaction says nothing about this one.
+    """
+    from pyecsdwan.locking import HostLock
+
+    host = txn.meta.orch_host
+    if host not in cache:
+        # read_owner() only reads the record; probing by acquisition would
+        # contend with the very commit this is trying to detect.
+        cache[host] = HostLock(host, "commit", timeout=0.0).read_owner()
+    owner = cache[host]
+    return owner is not None and owner.txn_id == txn.meta.txn_id and owner.is_alive()
+
+
 def orphaned_txns(root: Path | None = None, host: str | None = None) -> list[TxnJournal]:
     """Unconfirmed/interrupted transactions for ``host`` needing attention.
 
-    A transaction is orphaned when it is non-terminal and no live watchdog or
-    CLI process is driving it: an APPLYING txn whose CLI died mid-commit, or
-    an APPLIED_UNCONFIRMED txn whose watchdog is gone. A confirm deadline more
-    than a grace period in the past counts as orphaned even if some unrelated
-    process now holds the recorded pid (pid recycling / reboot)."""
+    A transaction is orphaned when it is non-terminal and nothing is driving
+    it: an APPLYING txn whose CLI died mid-commit, or an APPLIED_UNCONFIRMED
+    txn whose watchdog is gone. "Driving" means a live watchdog *or* a live
+    holder of the commit lock — see :func:`_driven_now`.
+
+    A confirm deadline more than a grace period in the past counts as orphaned
+    even if some unrelated process now holds the recorded pid (pid recycling /
+    reboot) — but not while the commit lock says someone is still working on
+    it, because that is a revert already in progress."""
     out: list[TxnJournal] = []
+    owners: dict[str, Any] = {}
     for txn in _for_host(list_txns(root), host):
         if txn.meta.state in TxnState.TERMINAL:
             continue
         if txn.confirm_marker.exists():
+            continue
+        if _driven_now(txn, owners):
             continue
         if _deadline_passed(txn, grace_s=120):
             out.append(txn)
