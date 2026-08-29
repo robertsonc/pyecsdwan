@@ -529,12 +529,50 @@ def apply_(
     change anything.
     """
     state = _state(ctx)
-    rt_ctx, registry, settings = _bootstrap(state)
-
+    # Read and validate the directory *before* a client exists (R2). Invalid
+    # or empty input is an offline error: it should cost no credentials, no
+    # resolver call, and no round trip to an Orchestrator to find out that a
+    # path was mistyped.
     try:
-        declared = desired.load(registry, from_dir)
+        declared = desired.load(_registry_only(), from_dir)
     except desired.DesiredError as exc:
         _fail(str(exc))
+
+    # The loader is done (T7); safe materialization is not (T8). A declaration
+    # is *typed partial intent* under the ratified spec (D7), and no resource
+    # has yet proved it can build a complete target without erasing unknown,
+    # unmodeled or write-only fields (D8/R12). Until it has, this path would
+    # send the declaration as a full replacement — so it refuses rather than
+    # writing under semantics the spec does not sanction. `--dry-run` is left
+    # open: it writes nothing, and seeing the plan is how you find out whether
+    # the directory says what you meant.
+    if not dry_run:
+        _fail(
+            "apply --from is not enabled yet: the declaration format is ratified "
+            "(T7) but per-resource safe materialization is not (T8), so writing a "
+            "partial declaration would replace fields nobody declared. Use "
+            "`--dry-run` to see the plan, or `ec-cli drift --from` to compare"
+        )
+    commit_only = [
+        name
+        for name, given in (
+            ("--confirm-minutes", confirm_minutes is not None),
+            ("--force", force),
+            ("--override-template", override_template),
+            ("--allow-untransactional", allow_untransactional),
+            ("--rebase", rebase),
+        )
+        if given
+    ]
+    if commit_only:
+        # Accepting a flag that cannot do anything is the lie this project
+        # keeps removing: an operator who passed --confirm-minutes and saw a
+        # plan would reasonably believe a confirm window was armed.
+        _fail(
+            f"{', '.join(commit_only)} only affect committing, and this command "
+            f"can only preview until T8 lands"
+        )
+    rt_ctx, registry, settings = _bootstrap(state)
 
     # Refuse to mix two sources of intent in one transaction. A non-empty
     # candidate is someone's in-progress work; folding it into a declarative
@@ -551,32 +589,22 @@ def apply_(
         )
 
     console.print(
-        Text(f"declared: {len(declared)} instance(s) from {from_dir}", style="dim")
+        Text(
+            f"declared: {len(declared)} instance(s) from {from_dir} "
+            f"({declared.digest[:12]})",
+            style="dim",
+        )
     )
     plan = txn.build_plan(rt_ctx, registry, declared)
     render.render_plan(console, plan)
-
-    if dry_run:
-        # Same convention as `diff`: nonzero means "this would change things",
-        # which is what a CI gate keys on.
-        raise typer.Exit(0 if plan.empty else 1)
-    if plan.empty:
-        console.print("no changes")
-        raise typer.Exit(0)
-
-    report = txn.commit(
-        rt_ctx,
-        registry,
-        plan,
-        settings,
-        confirm_minutes=confirm_minutes,
-        force=force,
-        override_template=override_template,
-        allow_untransactional=allow_untransactional,
-        rebase=rebase,
-    )
-    render.render_report(console, report)
-    raise typer.Exit(0 if report.ok else 2)
+    # Only the preview exists today. The commit half was removed rather than
+    # left unreachable behind the T8 guard above: dead code that looks like a
+    # working write path is how someone re-enables it without the per-resource
+    # materialization proof it is waiting for. T13 restores it.
+    #
+    # Same exit convention as `diff`: nonzero means "this would change things",
+    # which is what a CI gate keys on.
+    raise typer.Exit(0 if plan.empty else 1)
 
 
 @app.command("drift")
@@ -620,21 +648,29 @@ def drift_(
     it has not earned.
     """
     state = _state(ctx)
-    rt_ctx, registry, settings = _bootstrap(state)
-    # Every kind, every instance: the heaviest read this CLI has. `list_refs`
-    # for most appliance-scope kinds is itself a per-appliance call, so the
-    # estimate counts the curated kinds rather than pretending it is one.
-    intent: IntentSource
+    # Same ordering as `apply` (R2): the directory is validated offline, so a
+    # wrong path fails before any credential or connection is needed.
+    declared: desired.Declared | None = None
     if from_dir is not None:
         try:
-            declared = desired.load(registry, from_dir)
+            declared = desired.load(_registry_only(), from_dir)
         except desired.DesiredError as exc:
             # Fatal, never a warning: a partially-read declaration would report
             # the rest of the fabric as `undeclared` and look like a smaller
             # fabric rather than a broken input.
             _fail(str(exc))
+    rt_ctx, registry, settings = _bootstrap(state)
+    # Every kind, every instance: the heaviest read this CLI has. `list_refs`
+    # for most appliance-scope kinds is itself a per-appliance call, so the
+    # estimate counts the curated kinds rather than pretending it is one.
+    intent: IntentSource
+    if declared is not None:
         console.print(
-            Text(f"declared: {len(declared)} instance(s) from {from_dir}", style="dim")
+            Text(
+                f"declared: {len(declared)} instance(s) from {from_dir} "
+                f"({declared.digest[:12]})",
+                style="dim",
+            )
         )
         intent = declared
     else:
@@ -737,26 +773,44 @@ def commit(
         report = txn.confirm_pending(settings)
         render.render_report(console, report)
         raise typer.Exit(0 if report.ok else 2)
-    plan = txn.build_plan(rt_ctx, registry, candidate)
-    if plan.empty:
-        console.print("no changes")
-        raise typer.Exit(0)
-    render.render_plan(console, plan)
-    report = txn.commit(
+    # One shared cycle with the shell: snapshot before planning, acknowledge
+    # per item afterwards. Duplicating it is what left the shell deleting
+    # another writer's staged work after this path was fixed (#63).
+    outcome = txn.commit_candidate(
         rt_ctx,
         registry,
-        plan,
+        candidate,
         settings,
+        on_plan=lambda plan: render.render_plan(console, plan),
         confirm_minutes=confirm_minutes,
         force=force,
         override_template=override_template,
         allow_untransactional=allow_untransactional,
         rebase=rebase,
     )
-    if report.ok:
-        candidate.clear()
-    render.render_report(console, report)
-    raise typer.Exit(0 if report.ok else 2)
+    if outcome.report is None:
+        console.print("no changes")
+        raise typer.Exit(0)
+    _report_kept(outcome.kept)
+    render.render_report(console, outcome.report)
+    raise typer.Exit(0 if outcome.report.ok else 2)
+
+
+def _report_kept(kept: Sequence[str]) -> None:
+    """Name items another writer changed while this commit ran.
+
+    Kept rather than acknowledged, and said out loud: an operator who expects
+    a clean candidate after a successful commit needs to know why it is not.
+    """
+    if not kept:
+        return
+    console.print(
+        Text(
+            f"kept {len(kept)} candidate item(s) changed since this commit was "
+            f"planned: {', '.join(sorted(kept))}",
+            style="yellow",
+        )
+    )
 
 
 @app.command()

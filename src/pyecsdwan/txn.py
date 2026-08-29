@@ -32,12 +32,13 @@ import datetime as _dt
 import os
 import signal
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from pyecsdwan import config
 from pyecsdwan import watchdog as _watchdog
-from pyecsdwan.candidate import CandidateItem, IntentSource, materialize_desired
+from pyecsdwan.candidate import CandidateItem, CandidateStore, IntentSource, materialize_desired
 from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
@@ -280,6 +281,76 @@ def commit(
 #: APPLIED_UNCONFIRMED window ends by restoring a snapshot taken *before* the
 #: new commit, and a REVERTING transaction is mid-restore.
 BLOCKING_STATES = frozenset({TxnState.APPLIED_UNCONFIRMED, TxnState.REVERTING})
+
+
+@dataclasses.dataclass(frozen=True)
+class StagedCommit:
+    """What happened when the candidate was committed."""
+
+    plan: Plan
+    #: None when the plan was empty — nothing was attempted.
+    report: CommitReport | None = None
+    #: Ref keys another writer changed after this commit was planned, kept
+    #: rather than acknowledged. The caller reports them.
+    kept: tuple[str, ...] = ()
+
+
+def commit_candidate(
+    ctx: Ctx,
+    registry: Registry,
+    candidate: CandidateStore,
+    settings: config.Settings,
+    *,
+    on_plan: Callable[[Plan], None] | None = None,
+    confirm_minutes: float | None = None,
+    force: bool = False,
+    override_template: bool = False,
+    allow_untransactional: bool = False,
+    rebase: bool = False,
+) -> StagedCommit:
+    """Snapshot, plan, commit and acknowledge — the whole cycle, once.
+
+    Exists because the two halves of this were duplicated across the
+    scriptable CLI and the interactive shell, and only one of them was fixed
+    when `clear()` was replaced by an acknowledgement (#63). The shell kept
+    calling `clear()`, so the *primary* Junos-style interface went on deleting
+    another shell's staged work while the scriptable path's tests stayed
+    green.
+
+    The snapshot has to be taken before the plan is built, and the
+    acknowledgement has to use that snapshot. Leaving both to the caller means
+    a third entry point gets one of them wrong; taking them together means it
+    cannot.
+
+    ``on_plan`` renders the plan between building and committing, because the
+    two surfaces present it differently and neither should have to reimplement
+    the ordering to do so.
+    """
+    # Before the plan, though `build_plan` neither reloads nor mutates the
+    # store, so no test can currently tell the two orderings apart — the
+    # mutation sweep confirmed that. Kept in this order because the snapshot
+    # is what the acknowledgement is compared against, and the day something
+    # here does re-read from disk, the correct order is already the one
+    # written.
+    staged = candidate.ordered_items()
+    plan = build_plan(ctx, registry, candidate)
+    if plan.empty:
+        return StagedCommit(plan=plan)
+    if on_plan is not None:
+        on_plan(plan)
+    report = commit(
+        ctx,
+        registry,
+        plan,
+        settings,
+        confirm_minutes=confirm_minutes,
+        force=force,
+        override_template=override_template,
+        allow_untransactional=allow_untransactional,
+        rebase=rebase,
+    )
+    kept = tuple(candidate.clear_committed(staged)) if report.ok else ()
+    return StagedCommit(plan=plan, report=report, kept=kept)
 
 
 def _guard_no_pending_confirm(

@@ -1,19 +1,30 @@
 """`ec-cli apply --from <dir>` — declarative apply as one transaction (epic #8).
 
-The whole design claim is that this needed *no second transaction engine*. A
-declared change and a hand-staged one differ only in where the intent came
-from; from `build_plan` onward they are the same objects going through the same
-guards into the same journal. So the tests that matter here are not "does it
-write" — it is `txn.commit`, which is covered elsewhere — but:
+The design claim is that this needs *no second transaction engine*: a declared
+change and a hand-staged one differ only in where the intent came from, and
+from `build_plan` onward they are the same objects going through the same
+guards into the same journal.
+
+**The write half is currently disabled.** Under the ratified spec a
+declaration is typed *partial* intent, and a resource must prove it can build a
+complete target without erasing unknown, unmodeled or write-only fields before
+one is written (D7/D8) — no resource has that proof yet (T8). So `apply --from`
+previews and refuses to write, and the engine guards it shares are exercised
+here through `commit`, which is the surface that actually writes today. Testing
+them through a path that cannot reach them would be theatre.
+
+What this file covers:
 
 * the two intent sources really do produce the same plan;
-* the guards are still on the path, not bypassed by the new entry point;
 * `--dry-run` writes nothing and exits the way a CI gate expects;
-* two sources of intent cannot be silently merged into one transaction.
+* the write path refuses, and its commit-only flags refuse rather than being
+  ignored;
+* invalid input costs no connection at all;
+* the engine guards — ownership, confirm windows, lost snapshots — still fire.
 
-That last one is a decision, not a mechanism. A non-empty candidate is someone's
-in-progress work, and folding it into a declarative apply would commit changes
-the directory never declared with no way to see which came from where.
+Two sources of intent are never silently merged: a non-empty candidate is
+someone's in-progress work, and folding it in would commit changes the
+directory never declared with no way to see which came from where.
 """
 
 from __future__ import annotations
@@ -72,10 +83,23 @@ def world(state_home: Any, mock_server: tuple[str, MockState]) -> dict[str, Any]
     }
 
 
+def _envelope(body: str, state: str = "present") -> str:
+    """Wrap a bare spec body in the ratified declaration envelope (T7).
+
+    The tests read better naming only the values they care about, and the
+    envelope is fixed boilerplate that would otherwise be repeated in every
+    fixture. Malformed bodies stay malformed once indented, which is what the
+    invalid-input tests rely on.
+    """
+    lines = body.strip("\n").splitlines()
+    spec = "".join(f"  {line}\n" for line in lines) if lines else "  {}\n"
+    return f"apiVersion: {desired.API_VERSION}\nstate: {state}\nspec:\n{spec}"
+
+
 def _write(root: Path, rel: str, body: str) -> Path:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    path.write_text(_envelope(body), encoding="utf-8")
     return path
 
 
@@ -146,24 +170,46 @@ def test_dry_run_exits_zero_when_already_in_sync(
 # -- the real thing ----------------------------------------------------------
 
 
-def test_apply_commits_the_declared_state(world: dict[str, Any], tmp_path: Path) -> None:
+def test_apply_refuses_to_write_until_materialization_is_proven(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    """The ratified spec calls a declaration *typed partial intent* (D7), and
+    requires a resource to prove it can build a complete target without
+    erasing unknown, unmodeled or write-only fields before one is written
+    (D8/R12). No resource has that proof yet — T8.
+
+    Until it does, this path would send a partial declaration as a full
+    replacement. It refuses rather than writing under semantics the spec does
+    not sanction; `--dry-run` stays open because a preview writes nothing.
+    """
+    before = dict(_live_banners(world))
     _write(tmp_path, DECLARED, "issue: applied from git\n")
 
     result = _cli(world, "apply", "--from", str(tmp_path))
 
-    assert result.exit_code == 0, result.output
-    assert _live_banners(world)["issue"] == "applied from git"
+    assert result.exit_code != 0
+    assert "not enabled yet" in result.output
+    assert _live_banners(world) == before
 
 
-def test_applying_twice_is_a_no_op(world: dict[str, Any], tmp_path: Path) -> None:
-    """The idempotency the whole contract rests on, exercised through the new
-    entry point rather than assumed from `commit`'s own tests."""
-    _write(tmp_path, DECLARED, "issue: applied from git\n")
-    assert _cli(world, "apply", "--from", str(tmp_path)).exit_code == 0
+@pytest.mark.parametrize(
+    "flag", ["--confirm-minutes", "--force", "--override-template", "--rebase"]
+)
+def test_commit_only_flags_are_refused_not_ignored(
+    world: dict[str, Any], tmp_path: Path, flag: str
+) -> None:
+    """A flag that cannot do anything is the lie this project keeps removing:
+    an operator who passed `--confirm-minutes` and saw a plan would reasonably
+    believe a confirm window had been armed."""
+    _write(tmp_path, DECLARED, "issue: x\n")
+    args = ["apply", "--from", str(tmp_path), "--dry-run", flag]
+    if flag == "--confirm-minutes":
+        args.append("10")
 
-    again = _cli(world, "apply", "--from", str(tmp_path))
-    assert again.exit_code == 0, again.output
-    assert "no changes" in again.output
+    result = _cli(world, *args)
+
+    assert result.exit_code != 0
+    assert "only affect committing" in result.output
 
 
 def test_a_malformed_directory_is_fatal_and_writes_nothing(
@@ -188,10 +234,11 @@ def test_a_failed_apply_exits_nonzero(world: dict[str, Any], tmp_path: Path) -> 
     failure this project keeps finding. The mutation sweep caught this: hard-
     coding `Exit(0)` left every other test here green.
     """
-    _write(tmp_path, DECLARED, "issue: this write will be rejected\n")
-    world["state"].fail_next_action = True  # the apply's own save-changes fails
+    staged = CandidateStore(world["settings"].host)
+    staged.set_desired(REF, {"issue": "this write will be rejected"})
+    world["state"].fail_next_action = True  # the commit's own save-changes fails
 
-    result = _cli(world, "apply", "--from", str(tmp_path))
+    result = _cli(world, "commit")
 
     assert result.exit_code != 0, result.output
 
@@ -211,7 +258,7 @@ def test_a_non_empty_candidate_refuses_the_apply(
     staged = CandidateStore(world["settings"].host)
     staged.set_path(Ref(KIND, "global", appliance="BR2-EC"), ["issue"], "hand-staged")
 
-    result = _cli(world, "apply", "--from", str(tmp_path))
+    result = _cli(world, "apply", "--from", str(tmp_path), "--dry-run")
 
     assert result.exit_code != 0
     assert "staged in the candidate" in result.output
@@ -226,6 +273,69 @@ def test_the_named_escape_hatches_are_real_commands() -> None:
     names = {c.name or c.callback.__name__ for c in cli_main.app.registered_commands}
     assert "commit" in names
     assert "discard" in names
+
+
+# -- invalid input costs no connection (R2) -----------------------------------
+
+
+def test_an_empty_directory_never_builds_a_client(
+    world: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2/D6. A mistyped `--from` path should cost nothing: no credentials, no
+    resolver call, no round trip to an Orchestrator to be told the directory
+    was wrong. Asserted by making bootstrap explode — if the command reaches
+    it, this fails with the wrong error.
+    """
+    from pyecsdwan import runtime
+
+    monkeypatch.setattr(
+        runtime, "bootstrap",
+        lambda **kw: pytest.fail("a client was constructed for an invalid directory"),
+    )
+
+    result = _cli(world, "apply", "--from", str(tmp_path))
+
+    assert result.exit_code != 0
+    assert "no declarations" in result.output
+
+
+def test_a_malformed_directory_never_builds_a_client(
+    world: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guards the guard's other half: the check must fire on invalid content,
+    not only on emptiness."""
+    from pyecsdwan import runtime
+
+    _write(tmp_path, DECLARED, "issue: fine\n")
+    (tmp_path / "appliances" / "BR2-EC" / "banners").mkdir(parents=True)
+    (tmp_path / "appliances" / "BR2-EC" / "banners" / "global.yaml").write_text(
+        "issue: [\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        runtime, "bootstrap",
+        lambda **kw: pytest.fail("a client was constructed for an invalid directory"),
+    )
+
+    result = _cli(world, "apply", "--from", str(tmp_path))
+
+    assert result.exit_code != 0
+
+
+def test_drift_from_a_bad_directory_never_builds_a_client(
+    world: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`drift --from` is the CI entry point, so it is the one most likely to be
+    pointed at a path that does not exist yet."""
+    from pyecsdwan import runtime
+
+    monkeypatch.setattr(
+        runtime, "bootstrap",
+        lambda **kw: pytest.fail("a client was constructed for an invalid directory"),
+    )
+
+    result = _cli(world, "drift", "--from", str(tmp_path), "--yes")
+
+    assert result.exit_code != 0
 
 
 # -- one transaction owns the fabric at a time (#100) -------------------------
@@ -259,9 +369,10 @@ def test_apply_refuses_during_an_active_confirm_window(
     """
     before = dict(_live_banners(world))
     _pending_window(world)
-    _write(tmp_path, DECLARED, "issue: would be erased when the window expires\n")
+    staged = CandidateStore(world["settings"].host)
+    staged.set_desired(REF, {"issue": "would be erased when the window expires"})
 
-    result = _cli(world, "apply", "--from", str(tmp_path))
+    result = _cli(world, "commit")
 
     assert result.exit_code != 0
     assert _live_banners(world) == before, "wrote inside another transaction's window"
@@ -309,9 +420,10 @@ def test_a_settled_transaction_does_not_block_anything(
     from pyecsdwan.journal import TxnJournal, TxnState
 
     TxnJournal.create(world["settings"].host, [REF]).set_state(TxnState.CONFIRMED)
-    _write(tmp_path, DECLARED, "issue: after a confirmed transaction\n")
+    staged = CandidateStore(world["settings"].host)
+    staged.set_desired(REF, {"issue": "after a confirmed transaction"})
 
-    result = _cli(world, "apply", "--from", str(tmp_path))
+    result = _cli(world, "commit")
 
     assert result.exit_code == 0, result.output
     assert _live_banners(world)["issue"] == "after a confirmed transaction"
@@ -326,9 +438,10 @@ def test_another_host_does_not_block_this_one(
 
     other = TxnJournal.create("some-other-orchestrator.example.com", [REF])
     other.set_state(TxnState.APPLIED_UNCONFIRMED)
-    _write(tmp_path, DECLARED, "issue: different fabric entirely\n")
+    staged = CandidateStore(world["settings"].host)
+    staged.set_desired(REF, {"issue": "different fabric entirely"})
 
-    result = _cli(world, "apply", "--from", str(tmp_path))
+    result = _cli(world, "commit")
 
     assert result.exit_code == 0, result.output
 
@@ -589,8 +702,9 @@ def test_ownership_still_refuses_through_apply(
     OWNED: UNKNOWN is the state the tri-state added, so it is the one a
     reintroduced fail-open would drop first.
     """
-    _write(tmp_path, DECLARED, "issue: should never land\n")
     before = dict(_live_banners(world))
+    staged = CandidateStore(world["settings"].host)
+    staged.set_desired(REF, {"issue": "should never land"})
 
     resource = default_registry.get(KIND)
     monkeypatch.setattr(
@@ -599,13 +713,13 @@ def test_ownership_still_refuses_through_apply(
         lambda self, ctx, ref: Ownership.unknown("template selection unreadable (403)"),
     )
 
-    result = _cli(world, "apply", "--from", str(tmp_path))
+    result = _cli(world, "commit")
 
     assert result.exit_code != 0, result.output
     assert _live_banners(world) == before, "wrote despite unknown ownership"
 
     # ... and the documented break-glass still works, so the refusal is the
     # guard firing rather than the command being broken.
-    ok = _cli(world, "apply", "--from", str(tmp_path), "--override-template")
+    ok = _cli(world, "commit", "--override-template")
     assert ok.exit_code == 0, ok.output
     assert _live_banners(world)["issue"] == "should never land"

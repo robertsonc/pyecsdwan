@@ -246,11 +246,17 @@ def test_the_failed_kind_is_named_not_just_counted(world: dict[str, Any]) -> Non
 
 
 def _declaring(tmp_path: Any, rel: str, body: str) -> Any:
+    """Write one declaration in the ratified envelope (T7) and load it."""
     from pyecsdwan import desired
 
+    lines = body.strip("\n").splitlines()
+    spec = "".join(f"  {line}\n" for line in lines) if lines else "  {}\n"
     path = tmp_path / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    path.write_text(
+        f"apiVersion: {desired.API_VERSION}\nstate: present\nspec:\n{spec}",
+        encoding="utf-8",
+    )
     return desired.load(default_registry, tmp_path)
 
 
