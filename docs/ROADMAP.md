@@ -128,6 +128,16 @@ a row — "differs from declared intent" and "differs from what is on flash" are
 two axes, and folding them together is the collapsing the whole command exists
 to avoid.
 
+`--from <dir>` swaps the intent source for a desired-state directory in git —
+`fabric/<noun>/<instance>.yaml` and `appliances/<name>/<noun>/<instance>.yaml`,
+keyed on user-facing nouns because a registry kind like `appliance/banners`
+contains a path separator and would silently split into two directory levels.
+That is the GitOps *read* half, and only that: it reads, it never writes.
+Landing it before declarative apply is deliberate — a layout mistake here costs
+a rename, and the same mistake underneath a write path costs a fabric. Both
+intent sources materialize through one `materialize_desired`, so `drift` can
+never report something `commit` would not do.
+
 *MCP trust boundary (#62).* `mcp_server/` reflectively exposed every public
 method of the vendored `pyedgeconnect` SDK — 641 on `Orchestrator`, ~250 of
 them writes — with no transaction, TLS verification off, and credentials as

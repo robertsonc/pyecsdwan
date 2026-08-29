@@ -23,10 +23,14 @@ also found drift, because "no drift" from a report that skipped half the
 appliances is a claim it has not earned. Both are non-zero, so a CI job fails
 either way; the code says which problem to look at first.
 
-Where "desired" comes from is deliberately one line
-(:func:`_desired_for`). Today it is the candidate store. When epic #8's
-declarative apply lands, a directory of YAML becomes another source and the
-enumeration, the status taxonomy and the exit codes below do not change.
+Where "desired" comes from is one narrow interface, :class:`IntentSource`.
+Two things implement it: the candidate store (what the operator typed since
+the last commit) and :class:`pyecsdwan.desired.Declared` (a directory of YAML
+in git, which is what a CI drift check actually wants). Both materialize
+desired state through the *same*
+:func:`~pyecsdwan.candidate.materialize_desired`, so this report can never say
+something ``commit`` would not do — and the enumeration, the status taxonomy
+and the exit codes below are the same for either.
 """
 
 from __future__ import annotations
@@ -34,11 +38,11 @@ from __future__ import annotations
 import dataclasses
 import enum
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
 
-from pyecsdwan.candidate import CandidateStore
+from pyecsdwan.candidate import CandidateItem, CandidateStore
 from pyecsdwan.contract import Ctx, NotCurated, Ref, Resource, Tier
 from pyecsdwan.jobs import UNSAVED_FIELD
 from pyecsdwan.registry import Registry
@@ -179,14 +183,38 @@ def _instances(ctx: Ctx, registry: Registry, kind: str) -> tuple[list[Ref], str]
         return [], reason
 
 
-def _desired_for(candidate: CandidateStore, ref: Ref) -> Any:
-    """The staged intent for one ref, or a sentinel meaning "nothing staged".
+class IntentSource(Protocol):
+    """Where "what this instance should be" comes from.
 
-    The single seam between this report and where intent comes from. A
-    desired-state directory (epic #8) plugs in here without touching anything
-    else in this module.
+    The seam, and the only thing this module knows about intent. Two
+    implementations today: the candidate store (what the operator typed) and
+    :class:`pyecsdwan.desired.Declared` (a directory of YAML in git). Both
+    materialize through the *same*
+    :func:`~pyecsdwan.candidate.materialize_desired`, so `drift` can never
+    report something `commit` would not do.
     """
-    return candidate.items.get(ref.key())
+
+    def item_for(self, ref: Ref) -> CandidateItem | None: ...
+
+    def desired_for(self, item: CandidateItem, current: Any) -> Any: ...
+
+
+@dataclasses.dataclass(frozen=True)
+class CandidateIntent:
+    """The candidate store as an :class:`IntentSource`.
+
+    An adapter rather than a method on ``CandidateStore``: the store is
+    transaction machinery with a file lock, and it should not grow an interface
+    that exists for a read-only report.
+    """
+
+    store: CandidateStore
+
+    def item_for(self, ref: Ref) -> CandidateItem | None:
+        return self.store.items.get(ref.key())
+
+    def desired_for(self, item: CandidateItem, current: Any) -> Any:
+        return self.store.desired_for(item, current)
 
 
 # -- one row -----------------------------------------------------------------
@@ -195,7 +223,7 @@ def _desired_for(candidate: CandidateStore, ref: Ref) -> Any:
 def _row(
     ctx: Ctx,
     registry: Registry,
-    candidate: CandidateStore,
+    intent: IntentSource,
     ref: Ref,
 ) -> Row:
     resource: Resource = registry.get(ref.kind)
@@ -224,7 +252,7 @@ def _row(
             status=Status.UNREADABLE, detail=f"{type(exc).__name__}: {exc}",
         )
 
-    item = _desired_for(candidate, ref)
+    item = intent.item_for(ref)
     if item is None:
         return Row(
             noun=noun, kind=ref.kind, name=ref.name, appliance=appliance,
@@ -233,7 +261,7 @@ def _row(
         )
 
     try:
-        desired_input = candidate.desired_for(item, current)
+        desired_input = intent.desired_for(item, current)
         desired = (
             None
             if desired_input is None
@@ -293,13 +321,18 @@ def _unsaved_note(ctx: Ctx) -> str:
 def collect(
     ctx: Ctx,
     registry: Registry,
-    candidate: CandidateStore,
+    intent: IntentSource,
     *,
     kinds: Sequence[str] | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     timeout: float | None = None,
 ) -> Report:
-    """Compare every enumerable instance against staged intent."""
+    """Compare every enumerable instance against declared intent.
+
+    ``intent`` is the candidate store (:class:`CandidateIntent`) or a
+    desired-state directory (:class:`pyecsdwan.desired.Declared`). The report
+    is identical either way — only where "should be" comes from differs.
+    """
     wanted = list(kinds) if kinds is not None else _enumerable(registry)
     refs: list[Ref] = []
     notes: list[str] = []
@@ -313,7 +346,7 @@ def collect(
 
     outcomes = fan_out(
         refs,
-        lambda ref: _row(ctx, registry, candidate, ref),
+        lambda ref: _row(ctx, registry, intent, ref),
         concurrency=concurrency,
         timeout=timeout,
     )
