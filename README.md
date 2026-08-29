@@ -140,8 +140,21 @@ operation; `gen_plugin` wraps those in a Tier-1 `Resource` stub whose
 | Tier | Meaning | In transactions? |
 |---|---|---|
 | 0 | raw `api` passthrough | never — audit journal only |
-| 1 | generated from spec | plain commit; confirm only with `--allow-untransactional` |
+| 1 | generated from spec | never — `normalize()` raises `NotCurated`, so a stub cannot be planned |
 | 2 | curated plugin | full commit-confirm |
+
+**Tier 1 is developer scaffolding, not operator coverage (#68).** This table
+used to say "plain commit; confirm only with `--allow-untransactional`", which
+was wrong in the direction that matters: `txn.build_plan()` calls `normalize()`
+on every candidate, and a generated stub's raises — so a Tier-1 kind is stopped
+before a plan exists, and never reaches the `--allow-untransactional` guard at
+all. A stub is the *starting point for curation*, wired far enough that
+finishing it is a small edit against working code. It is not something to point
+at a fabric today.
+
+That is deliberate, and the alternative was considered: if best-effort writes
+are ever wanted they get their own explicit surface, rather than being bought
+by weakening the normalization contract every curated resource depends on.
 
 Partial failure mid-changeset auto-reverts the already-applied steps from the
 journal and reports exactly what state the fabric is in. Orphaned unconfirmed
