@@ -388,7 +388,7 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   vendored spec documents `overlays` as *overlay IDs* joined by `|`
   (`"1|2"`); `mock/server.py` matches *overlay names* split on `,`. Sending
   the spec's form returns nothing from the mock, and vice versa. Nothing
-  today uses the filter — `show flows summary` (#58) counts rows from one
+  today uses the filter — `show fabric flows summary` (#58) counts rows from one
   read per appliance instead, for reasons documented in
   `reports/flows.py` — so this is latent rather than broken. Whoever adds an
   `--overlay` filter must resolve it against live gear first, and will also
@@ -419,12 +419,14 @@ Still UNVERIFIED and worth one pass against a group that selects them:
   OpenAPI (`/broadcastCli` -> `text/plain` string) nor the payload examples
   document any endpoint that returns the per-appliance command output, and
   `docs/research/appliance-config.md` records the same ("Text response, no
-  per-appliance status from broadcastCli"). So `show run appliance A B` reads
+  per-appliance status from broadcastCli"). So `show configuration appliance A B
+  --format native` reads
   text per appliance through the proxy `cli` path via the bounded fan-out, and
   `--broadcast` is the opt-in "run this read across these appliances and
   confirm it ran" form. If a later Orchestrator release exposes broadcast
   output retrieval, `broadcast_read_command` is the one function that changes.
-- **`show run`'s security section derives its segment pairs instead of listing
+- **`show configuration appliance --format native`'s security section derives its
+  segment pairs instead of listing
   them, and reads deployment through the appliance proxy rather than the
   Orchestrator-scope endpoint** (issue #55). Two endpoint findings, both
   recorded here because a later Orchestrator release could make either moot:
@@ -501,10 +503,11 @@ orchestrator-scope path is ever wanted, the mock needs the route first.
 
 ### Smaller items
 
-- `show flows summary` counts rows because `active` carries no per-overlay
+- `show fabric flows summary` counts rows because `active` carries no per-overlay
   breakdown. A cell bounded by `--max-flows` renders as `2+` and the footer
   says so; if the API ever grows a per-overlay summary, the counting can go.
 - The mock's `overlays` filter on `GET /flow` splits names on `,` while the
   spec says IDs split on `|`. Nothing uses it. Reconcile if anything starts to.
 - Zone and VRF ids in flow rows are rendered as integers; no name lookup.
-- `--section` on `show run` takes one name, not a repeatable list.
+- `--section` on `show configuration appliance --format native` takes one name,
+  not a repeatable list.

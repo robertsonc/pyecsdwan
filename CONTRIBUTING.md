@@ -1,114 +1,93 @@
-# Contribution Guidelines
+# Contributing to pyecsdwan
 
-If you're reading this, you're probably thinking about contributing to this repository. We really appreciate that--thank you!
+This file used to be the vendored `pyedgeconnect` SDK's, describing `black`,
+`flake8` and PyCharm — none of which this project uses (#68). What follows is
+this repository's actual workflow.
 
-This document provides guidelines on contributing to this repository. Please follow these guidelines when creating issues, making commits, and submitting pull requests. The repository maintainers review all pull requests and verify that they conform to these guidelines before approving and merging.
+## The gate
 
-#### Table Of Contents
-[How Can I Contribute?](#how-can-i-contribute)
-  * [Contribution Ideas](#contribution-ideas)
-  * [What should I know before I get started?](#what-should-i-know-before-i-get-started)
+```
+make install     # venv + editable install + ./ec-cli symlink, no sudo
+make check       # ruff + mypy --strict + pytest — all green or bust
+```
 
-[Licensing](#licensing)
-  * [Developer's Certificate of Origin](#developers-certificate-of-origin)
-  * [Sign Your Work](#sign-your-work)
+`make check` is exactly what CI runs, on Python 3.10, 3.11 and 3.12
+(`.github/workflows/ci.yml`), plus a wheel-install job that `make smoke`
+mirrors locally. If `make check` is green and `make smoke` passes, CI will
+agree.
 
-[Coding Conventions](#coding-conventions)
+- **`ruff`** — lint and import sorting, line length 100. `ruff format` is *not*
+  part of the gate and has never been run over this repository; running it
+  would produce a diff touching nearly every file. Don't.
+- **`mypy --strict`** — the whole package. The vendored SDK, `examples/` and
+  `docs/` are excluded (`pyproject.toml`), because they are reference material
+  rather than product code.
+- **`pytest`** — no network. Everything runs against the bundled mock
+  Orchestrator (`pyecsdwan.mock.server`).
 
-[Additional Notes](#additional-notes)
-  * [Resources](#resources)
+`make smoke` catches the one class of bug `make check` cannot see: a file that
+exists in the repository and never reaches the wheel. It builds, installs into
+a throwaway environment, and exercises the CLI from outside the source tree.
 
-## How Can I Contribute?
+## What a change is expected to carry
 
-### Contribution Ideas
+**Prove the guard bites.** A test that passes against correct code has not
+shown it would fail against broken code. Delete the guard, confirm a test
+fails, restore it. Several tests in this suite exist because that sweep
+reported a guard as unprotected — and at least three tests were found to be
+asserting the wrong thing entirely by exactly this method.
 
-1. Raise issues for bugs, features, and enhancements.
-1. Submit updates and improvements to the documentation.
-1. Submit articles and guides, which are also part of the documentation.
+**Derive claims, don't assert them.** Where a document says what the tool does,
+prefer a test that *runs* the tool and checks the document against the result:
+`tests/test_docs_examples.py` executes every README command,
+`tests/test_tier_claims.py` plans a stub and checks the tier tables against
+where it actually stops, `tests/test_retry.py` re-derives the mutating-GET
+classification from the vendored specs. A claim nobody runs is a claim that
+drifts.
 
-### What should I know before I get started?
+**Verify the brief against the code.** Issue text and prior notes have been
+wrong here more than once. Read the source, run it against the mock, and say so
+in the change if the brief turns out to be inaccurate.
 
-The best way to directly collaborate with the project contributors is through GitHub.
+**Say why, not what.** Comments and commit messages carry the reasoning and the
+counterexample considered. `git blame` recovers what changed; nothing recovers
+why the obvious alternative was rejected.
 
-* If you want to raise an issue such as a defect, an enhancement request, feature request, or a general issue, please open a GitHub issue.
-* If you want to contribute to our code by either fixing a problem, enhancing some code, or creating a new feature, please open a GitHub pull request against the development branch.
-> **Note:** All pull requests require an associated issue number, must be made against the **development** branch, and require acknowledgement of the DCO. See the [Licensing](#licensing) section below.
+## Adding a resource plugin
 
-Before you start to code, we recommend discussing your plans through a GitHub issue, especially for more ambitious contributions. This gives other contributors a chance to point you in the right direction, give you feedback on your design, and help you find out if someone else is working on the same thing.
+Read `src/pyecsdwan/contract.py` first — it is the frozen contract every
+resource implements — then `docs/plugin-promotion.md` for the Tier 0 → 1 → 2
+checklist. Two independent axes govern a resource:
 
-It is your responsibility to test and verify, prior to submitting a pull request, that your updated code doesn't introduce any bugs. Please write a clear commit message for each commit. Brief messages are fine for small changes, but bigger changes warrant a little more detail (at least a few sentences).
-Note that all patches from all contributors get reviewed.
-After a pull request is made, other contributors will offer feedback. If the patch passes review, a maintainer will accept it with a comment.
-When a pull request fails review, the author is expected to update the pull request to address the issue until it passes review and the pull request merges successfully.
+- **Tier** — how carefully it was written; a code-review decision, capped at
+  Tier 2. `ec-cli plugin promote <noun>` runs the machine-checkable boxes.
+- **Evidence** — what anyone has seen it do on real gear
+  (`docs/live-validation.md`, `ec-cli show coverage --evidence`). Nothing in
+  this repository can raise a resource above `mock-verified`; that needs a
+  fabric and a recorded version.
 
-At least one review from a maintainer is required for all patches.
+Never invent a payload. Where the spec is silent and no primary source has the
+shape, the resource stays a stub with a TODO naming the missing data.
 
-### Contribution Guidelines
-This repo is maintained on a best-effort basis. The burden is on the submitter and not the repo maintainers to ensure the following criteria are met when code is submitted.
-1. All code submissions must adhere to the structure of the repo:
-    * Lower-level functions and API calls must be saved in the /pyedgeconnect folder.
-    * Do not create new separate folders for submitted projects.
-    * Do not make copies of existing files to be saved in different folders.
-    * The objective is that all submissions build on the repo as a whole, rather than creating multiple sub-projects housed in the repo.
-1. All Python code should conform to PEP-8 standards. The maintainers use black & flake8 to perform this check. That does not require submitters to use these tools, but regardless of the code editor used, the PEP-8 check must be successful.
-1. All functions should have explanatory docstrings using the reStructuredText format.
-1. All git commits should have clear, concise messages which explain the changes made in the commit. All Pull Requests (PRs) should contain a title and comments that explain the impact of the PR.
-1. All code submitted for merge consideration must be tested by the submitter.
+## Feature work
 
-## Licensing
+Larger changes go through the Spec Kit workflow in `.specify/`, with the
+constitution at `.specify/memory/constitution.md` and feature specs under
+`specs/`. The constitution is ratified and binding: intent separation, safety
+truth, one grammar across interfaces, evidence-gated claims.
 
-All contributions must include acceptance of the DCO:
+## Primary sources
 
-### Developer’s Certificate of Origin
+`pyedgeconnect/` (the vendored upstream SDK), `examples/`, and
+`src/pyecsdwan/_specs/` (the OpenAPI baselines and Postman payload examples)
+are kept as the endpoint reference the plugins are built from — several
+research notes in `docs/research/` cite them directly. They are excluded from
+lint and type-checking; do not edit them to make a check pass.
 
-> Developer Certificate of Origin Version 1.1
->
-> Copyright (C) 2004, 2006 The Linux Foundation and its contributors. 660
-> York Street, Suite 102, San Francisco, CA 94110 USA
->
-> Everyone is permitted to copy and distribute verbatim copies of this
-> license document, but changing it is not allowed.
->
-> Developer's Certificate of Origin 1.1
->
-> By making a contribution to this project, I certify that:
->
-> \(a) The contribution was created in whole or in part by me and I have
-> the right to submit it under the open source license indicated in the
-> file; or
->
-> \(b) The contribution is based upon previous work that, to the best of my
-> knowledge, is covered under an appropriate open source license and I
-> have the right under that license to submit that work with
-> modifications, whether created in whole or in part by me, under the same
-> open source license (unless I am permitted to submit under a different
-> license), as indicated in the file; or
->
-> \(c) The contribution was provided directly to me by some other person
-> who certified (a), (b) or (c) and I have not modified it.
->
-> \(d) I understand and agree that this project and the contribution are
-> public and that a record of the contribution (including all personal
-> information I submit with it, including my sign-off) is maintained
-> indefinitely and may be redistributed consistent with this project or
-> the open source license(s) involved.
+## Reporting an unrecognised job shape
 
-### Sign Your Work
-
-To accept the DCO, simply add this line to each commit message with your
-name and email address (`git commit -s` will do this for you):
-
-    Signed-off-by: Jane Example <jane@example.com>
-
-For legal reasons, no anonymous or pseudonymous contributions are
-accepted.
-
-## Coding Conventions
-
-1. Python code should conform to PEP-8. PyCharm editor has a built-in PEP-8 checker.
-1. Since this is a collaborative project, document your code with comments that will help other contributors understand the code you write.
-1. When in doubt, follow conventions you see used in the source already.
-
-## Additional Notes
-
-> **Note:** Please don't file an issue to ask a question. Please reach out to us via email or disucssion forums.
+Since #64 the async-job poller allowlists success. If a real fabric returns a
+terminal shape it does not recognise, the failure detail quotes the exact
+`taskStatus` and `result`. That text belongs in `docs/research/job-shapes.md`
+with the Orchestrator version it came from — that table only grows from
+observation.

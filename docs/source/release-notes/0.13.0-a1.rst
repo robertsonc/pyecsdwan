@@ -1,9 +1,0 @@
-0.13.0-a1 -- 2021-06-23
------------------------
-
-
-🚀 Features
-~~~~~~~~~~~~~
-
-Prepared for first public release on GitHub:
-github.com/aruba/pyedgeconnect
