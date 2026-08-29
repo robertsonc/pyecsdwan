@@ -26,9 +26,12 @@ URL-escape guard, confirm-vs-revert atomicity, default-fill idempotency, …).
 against a spec-confirmed appliance-proxy endpoint but not yet live-write-
 tested); `appliance/loopback` (#18, read+diff) + `loopback-orch`
 (#18, fabric-wide pool, full read-modify-write); `appliance/zones` +
-`appliance/security-maps` (#19). Template-ownership detection (#20) partially
-grounded — `dns`/`routes`/`shaper` section names confirmed live, the rest
-stay unverified placeholders.
+`appliance/security-maps` (#19). Template-ownership detection (#20) now
+fails closed: ownership is `owned`/`unowned`/`unknown`, anything unreadable or
+unverified refuses the write, and the check is repeated immediately before the
+write phase. Seven kinds carry live-confirmed section names; the remaining
+sixteen answer `unknown` on a non-match until someone verifies them against a
+real template group (`docs/live-validation.md`).
 
 **Phase 3 — orchestrator-scope breadth (#4), 8 of 9 issues.** Orchestrator
 firewall zones (#30); ACLs + IP objects + AppExpress groups (#31); NAT maps,

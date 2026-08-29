@@ -16,7 +16,7 @@ import pyecsdwan.resources  # noqa: F401 - registers the built-in plugins
 from pyecsdwan import config, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.client import OrchClient
-from pyecsdwan.contract import Ctx, Ref, Reversibility, Scope, Tier
+from pyecsdwan.contract import Ctx, Owned, Ref, Reversibility, Scope, Tier
 from pyecsdwan.registry import default_registry
 from pyecsdwan.resolver import Resolver
 from pyecsdwan.resources.ospf import Ospf
@@ -217,9 +217,9 @@ def test_normalize_rejects_non_mapping_interface_entry():
 # -- managed_by ----------------------------------------------------------------
 
 
-def test_managed_by_none_when_no_template_group_selects_ospf(world: dict[str, Any]) -> None:
+def test_managed_by_unowned_when_no_group_is_associated(world: dict[str, Any]) -> None:
     ctx = world["ctx"]
-    assert Ospf().managed_by(ctx, REF) is None
+    assert Ospf().managed_by(ctx, REF).state is Owned.UNOWNED
 
 
 def test_managed_by_reports_owning_template_group(world: dict[str, Any]) -> None:
@@ -228,8 +228,9 @@ def test_managed_by_reports_owning_template_group(world: dict[str, Any]) -> None
     state.template_selection["Default Template Group"] = ["ospf"]
     state.template_association[NE_PK] = ["Default Template Group"]
 
-    owner = Ospf().managed_by(ctx, REF)
-    assert owner == "template-group Default Template Group"
+    owns = Ospf().managed_by(ctx, REF)
+    assert owns.state is Owned.OWNED
+    assert owns.owner == "template-group Default Template Group"
 
 
 # -- apply/rollback: real writes through the transaction engine ---------------

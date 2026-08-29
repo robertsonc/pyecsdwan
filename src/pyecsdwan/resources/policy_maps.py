@@ -117,6 +117,7 @@ from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
     Diff,
+    Ownership,
     RawState,
     Ref,
     Resource,
@@ -391,13 +392,15 @@ class _PolicyMaps(Resource):
 
     # -- ownership -------------------------------------------------------------
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:
+    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
         ne_pk = self._ne_pk(ctx, ref)
         # Per-object precision first (routes.py #15 pattern): anything the
         # fabric itself flagged gms_marked is server-owned regardless of what
         # any template selects.
         if _has_gms_marked(self.fetch(ctx, ref)):
-            return f"gms (gms_marked entry present in {self.ecos_path} on this appliance)"
+            return Ownership.owned(
+                f"gms (gms_marked entry present in {self.ecos_path} on this appliance)"
+            )
         return ownership.owning_group(ctx, self.kind, ne_pk)
 
 

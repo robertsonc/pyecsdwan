@@ -23,7 +23,7 @@ import pyecsdwan.resources  # noqa: F401 - registers the built-in plugins
 from pyecsdwan import config, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.client import OrchClient
-from pyecsdwan.contract import Ctx, Ref, Reversibility, Tier
+from pyecsdwan.contract import Ctx, Owned, Ref, Reversibility, Tier
 from pyecsdwan.registry import default_registry
 from pyecsdwan.resources.shapers import InboundShapers, Shapers
 
@@ -428,24 +428,22 @@ def test_e2e_shaper_managed_by_uses_the_confirmed_shaper_section(
     state.template_association["3.NE"] = ["WanStd"]
 
     ctx = world["ctx"]
-    assert (
-        Shapers().managed_by(
-            ctx, Ref(kind="appliance/shaper", name="global", appliance="BR1-EC")
-        )
-        == "template-group WanStd"
+    owns = Shapers().managed_by(
+        ctx, Ref(kind="appliance/shaper", name="global", appliance="BR1-EC")
     )
+    assert owns.state is Owned.OWNED
+    assert owns.owner == "template-group WanStd"
     # The inbound resource claims the same confirmed section.
-    assert (
-        InboundShapers().managed_by(
-            ctx, Ref(kind="appliance/inbound-shaper", name="global", appliance="BR1-EC")
-        )
-        == "template-group WanStd"
+    inbound = InboundShapers().managed_by(
+        ctx, Ref(kind="appliance/inbound-shaper", name="global", appliance="BR1-EC")
     )
+    assert inbound.state is Owned.OWNED
+    assert inbound.owner == "template-group WanStd"
     assert (
-        Shapers().managed_by(
-            ctx, Ref(kind="appliance/shaper", name="global", appliance="BR2-EC")
-        )
-        is None
+        Shapers()
+        .managed_by(ctx, Ref(kind="appliance/shaper", name="global", appliance="BR2-EC"))
+        .state
+        is Owned.UNOWNED
     )
 
 
@@ -455,11 +453,11 @@ def test_e2e_shaper_managed_by_prefers_gms_marked(world: dict[str, Any]) -> None
         "wan": {"gms_marked": True, "max_bw": 100000, "traffic-class": {}}
     }
     ctx = world["ctx"]
-    owner = Shapers().managed_by(
+    owns = Shapers().managed_by(
         ctx, Ref(kind="appliance/shaper", name="global", appliance="BR2-EC")
     )
-    assert owner is not None
-    assert "gms_marked" in owner
+    assert owns.state is Owned.OWNED
+    assert "gms_marked" in owns.owner
 
 
 def test_e2e_list_refs_covers_every_appliance(world: dict[str, Any]) -> None:

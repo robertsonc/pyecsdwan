@@ -39,6 +39,7 @@ from pyecsdwan.contract import (
     Ctx,
     Diff,
     NotCurated,
+    Ownership,
     RawState,
     Ref,
     Resource,
@@ -146,17 +147,19 @@ class AppliancePostVirtualifVtiByVtiName(Resource):
             "diff or commit can use it. See docs/plugin-promotion.md for the promotion checklist."
         )
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:
+    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
         """Template ownership for this appliance-scope section.
 
-        TODO(curation): pyecsdwan.ownership.KIND_TO_TEMPLATE_SECTIONS carries no entry for this
-        kind, so this returns None -- which reads as 'no template owns it' and is an assumption, not
-        a finding. Before promoting, add the template section name(s) covering
-        /virtualif/vti/{vtiName} to that map; the next template push would otherwise silently revert
-        a direct write here.
+        TODO(curation): pyecsdwan.ownership.SECTION_MAP carries no entry for this kind, so
+        owning_group() answers UNKNOWN and the commit guard refuses a direct write without
+        --override-template. That is the intended state for an uncurated stub: before promoting, add
+        the template section name(s) covering /virtualif/vti/{vtiName} to that map, verified against
+        a live template group, or the next template push silently reverts a direct write here.
+        (Until #20 this returned None, which read as 'no template owns it' -- an assumption wearing
+        a finding's clothes.)
         """
         if ref.appliance is None:
-            return None
+            return Ownership.unknown(f"{KIND} needs an appliance on the ref for a nePk")
         return owning_group(ctx, self.kind, ctx.resolver.ne_pk_for(ref.appliance))
 
     def _write(

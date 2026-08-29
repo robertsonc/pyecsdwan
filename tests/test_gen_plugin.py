@@ -50,6 +50,7 @@ from pyecsdwan.contract import (
     DiffEntry,
     DiffOp,
     NotCurated,
+    Ownership,
     Ref,
     Reversibility,
     Scope,
@@ -435,6 +436,10 @@ def _plan_item(kind: str) -> txn.PlanItem:
         current=None,
         desired=desired,
         diff=diff,
+        # Explicit, because PlanItem now defaults to UNKNOWN and UNKNOWN is
+        # refused (#20). These tests are about the *tier* guard; leaving the
+        # default would make them pass on the wrong refusal.
+        ownership=Ownership.unowned("not what this test is about"),
     )
 
 

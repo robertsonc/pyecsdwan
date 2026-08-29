@@ -68,6 +68,78 @@ class Tier(enum.IntEnum):
     CURATED = 2
 
 
+class Owned(str, enum.Enum):
+    """Whether a template owns a config section, as a **tri-state** (#20).
+
+    The two-state version of this — an owner string or ``None`` — was fail
+    open, because ``None`` answered two different questions with one word:
+    "nothing owns this" and "I could not find out". An unreadable template
+    selection, a kind missing from the section map, a section name nobody has
+    confirmed: all of them produced the same confident "unowned" that lets a
+    direct write through, and a direct write to a template-owned section is
+    silently reverted by the next template push.
+    """
+
+    #: A template group associated with this appliance selects a section that
+    #: covers this kind, or the object itself carries an ownership marker.
+    OWNED = "owned"
+    #: Positively established: nothing owns it. The *only* state that permits
+    #: a direct write without a break-glass flag.
+    UNOWNED = "unowned"
+    #: Could not be established. Never silently treated as UNOWNED.
+    UNKNOWN = "unknown"
+
+
+@dataclasses.dataclass(frozen=True)
+class Ownership:
+    """The answer to "would a template push revert this write?", with its
+    reason. Build one through the three constructors, never by hand, so the
+    reason is never left empty on the states that need it."""
+
+    state: Owned
+    #: Who owns it, e.g. ``"template-group Branch-Std"``. OWNED only.
+    owner: str = ""
+    #: Operator-readable justification. Required for OWNED and UNKNOWN;
+    #: carried for UNOWNED too, because "nothing owns it *because* no group is
+    #: associated" and "... *because* no associated group selects it" are
+    #: different facts and the second one is the one that goes stale.
+    reason: str = ""
+
+    @classmethod
+    def owned(cls, owner: str, reason: str = "") -> Ownership:
+        return cls(Owned.OWNED, owner=owner, reason=reason or owner)
+
+    @classmethod
+    def unowned(cls, reason: str) -> Ownership:
+        return cls(Owned.UNOWNED, reason=reason)
+
+    @classmethod
+    def unknown(cls, reason: str) -> Ownership:
+        return cls(Owned.UNKNOWN, reason=reason)
+
+    @property
+    def blocks_write(self) -> bool:
+        """True unless we positively established that nothing owns this.
+
+        The whole point of the tri-state: UNKNOWN blocks exactly as OWNED
+        does. Anything that reads ``state is Owned.OWNED`` to decide whether
+        to refuse has reintroduced the bug.
+        """
+        return self.state is not Owned.UNOWNED
+
+    @property
+    def label(self) -> str:
+        """What ``show``/``compare``/``--json`` print for this instance."""
+        if self.state is Owned.OWNED:
+            return f"managed-by: {self.owner}"
+        if self.state is Owned.UNKNOWN:
+            return f"ownership-unknown: {self.reason}"
+        return ""
+
+    def __str__(self) -> str:
+        return self.label or "unowned"
+
+
 @dataclasses.dataclass(frozen=True)
 class Ref:
     """Reference to one resource instance.
@@ -322,11 +394,21 @@ class Resource:
         current = self.normalize(self.fetch(ctx, ref))
         return self.diff(ref, current, desired).empty
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:
-        """Return e.g. ``"template-group X"`` when a template owns this
-        config section on this appliance, else ``None``. Appliance-scope
-        plugins must override; orchestrator-scope config has no owner."""
-        return None
+    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+        """Would a template push revert a direct write to this instance?
+
+        Appliance-scope plugins must override, normally by delegating to
+        :func:`pyecsdwan.ownership.owning_group` (after any per-object
+        ``gms_marked`` check). The default is the orchestrator-scope answer,
+        and it is a *positive* UNOWNED rather than a shrug: template groups
+        push appliance configuration, so nothing template-owned can exist on
+        an Orchestrator-scope object.
+
+        Returning UNOWNED means "I checked, and nothing owns it". An override
+        that cannot check must return :meth:`Ownership.unknown`, which the
+        commit guard refuses just as it refuses OWNED (#20).
+        """
+        return Ownership.unowned("orchestrator-scope config; no template group pushes it")
 
     def canonicalize_desired(
         self, ctx: Ctx, ref: Ref, desired: Mapping[str, Any]

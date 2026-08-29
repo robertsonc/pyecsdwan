@@ -74,6 +74,7 @@ from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
     Diff,
+    Ownership,
     RawState,
     Ref,
     Resource,
@@ -255,12 +256,12 @@ class Routes(Resource):
         ordered = {cidr: prefixes[cidr] for cidr in sorted(prefixes, key=_sort_key)}
         return {"prefix": ordered}
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:
+    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
         ne_pk = self._ne_pk(ctx, ref)
         # Per-object precision first: a route the fabric itself flagged
         # gms_marked is server-owned regardless of what any template selects.
         if _has_gms_marked(self.fetch(ctx, ref)):
-            return "gms (gms_marked route entry present on this appliance)"
+            return Ownership.owned("gms (gms_marked route entry present on this appliance)")
         return ownership.owning_group(ctx, self.kind, ne_pk)
 
     # -- write side -------------------------------------------------------------

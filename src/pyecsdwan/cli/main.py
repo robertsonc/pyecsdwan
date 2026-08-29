@@ -2196,10 +2196,30 @@ def _render_resource(
         ref = Ref(kind=kind, name=instance, appliance=appliance)
 
     canonical = resource.normalize(resource.fetch(rt_ctx, ref))
+    # Reading config without knowing whether a template owns it is how an
+    # operator ends up making a direct change that the next push reverts (#20).
+    # Costs two round trips for one instance, and only the two states that
+    # matter are printed — UNOWNED says nothing an operator needs to act on.
+    owns = resource.managed_by(rt_ctx, ref)
     if as_json:
-        console.print_json(json.dumps({"ref": str(ref), "config": canonical}, default=str))
+        console.print_json(
+            json.dumps(
+                {
+                    "ref": str(ref),
+                    "config": canonical,
+                    "ownership": {
+                        "state": owns.state.value,
+                        "owner": owns.owner,
+                        "reason": owns.reason,
+                    },
+                },
+                default=str,
+            )
+        )
         return
     console.print(Text(f"# {ref}", style="dim"))
+    if owns.blocks_write:
+        console.print(Text(f"# {owns.label}", style="bold yellow"))
     if canonical is None:
         console.print("(not present)")
         return

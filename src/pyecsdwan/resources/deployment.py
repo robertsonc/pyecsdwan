@@ -79,6 +79,7 @@ from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
     Diff,
+    Ownership,
     RawState,
     Ref,
     Resource,
@@ -253,7 +254,7 @@ class Deployment(Resource):
 
     # -- ownership ------------------------------------------------------------
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:
+    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
         return ownership.owning_group(ctx, self.kind, self._ne_pk(ctx, ref))
 
     # -- enumeration ------------------------------------------------------------

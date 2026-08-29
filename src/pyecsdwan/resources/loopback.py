@@ -101,6 +101,7 @@ from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
     Diff,
+    Ownership,
     RawState,
     Ref,
     Resource,
@@ -253,15 +254,27 @@ class Loopback(Resource):
         }
         return {name: interfaces[name] for name in sorted(interfaces)}
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:
+    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
         if ref.appliance is None:
-            return None
+            return Ownership.unknown(
+                f"{ref.kind} is appliance-scope but the ref names no appliance, "
+                f"so no nePk resolves and ownership cannot be checked"
+            )
         # Per-object precision only (see module docstring): no confirmed
         # template-section name exists for this kind, so gms_marked alone
         # is the ownership signal, same shape as appliance/routes' check.
         if _has_gms_marked(self.fetch(ctx, ref)):
-            return "gms (gms_marked loopback interface present on this appliance)"
-        return None
+            return Ownership.owned("gms (gms_marked loopback interface present on this appliance)")
+        # Absence of the flag is not proof of absence of an owner: a template
+        # group may select a loopback section this project has never seen the
+        # name of, and would push over a direct write. There is no
+        # SECTION_MAP entry to fall back to, so the honest answer is that
+        # nobody here knows (#20).
+        return Ownership.unknown(
+            "no gms_marked loopback interface on this appliance, and no confirmed "
+            "template-section name exists for appliance/loopback, so a template "
+            "owner cannot be ruled out"
+        )
 
     # -- write side (no documented endpoint) -----------------------------------
 

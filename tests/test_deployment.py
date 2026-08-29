@@ -19,7 +19,7 @@ import respx
 from pyecsdwan import config, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.client import OrchClient
-from pyecsdwan.contract import Ctx, Ref
+from pyecsdwan.contract import Ctx, Owned, Ref
 from pyecsdwan.registry import default_registry
 from pyecsdwan.resolver import Resolver
 from pyecsdwan.resources.deployment import Deployment
@@ -248,19 +248,26 @@ def test_managed_by_delegates_to_ownership_with_resolved_ne_pk(settings):
     respx.get(BASE + "/template/templateSelection", params={"templateGroup": "Branch-Std"}).mock(
         return_value=httpx.Response(200, json=["deployment"])
     )
-    owner = Deployment().managed_by(_ctx(settings), REF)
-    assert owner == "template-group Branch-Std"
+    owns = Deployment().managed_by(_ctx(settings), REF)
+    assert owns.state is Owned.OWNED
+    assert owns.owner == "template-group Branch-Std"
 
 
 @respx.mock
-def test_managed_by_none_when_no_group_selects_the_section(settings):
+def test_managed_by_unknown_when_the_group_selects_something_else(settings):
     respx.get(BASE + "/template/applianceAssociation", params={"nePk": "3.NE"}).mock(
         return_value=httpx.Response(200, json={"templateIds": ["Branch-Std"]})
     )
     respx.get(BASE + "/template/templateSelection", params={"templateGroup": "Branch-Std"}).mock(
         return_value=httpx.Response(200, json=["securityMaps"])
     )
-    assert Deployment().managed_by(_ctx(settings), REF) is None
+    # "deployment"/"interfaces" are UI-grouping candidates nobody has seen in a
+    # live selected-section list, so a group selecting neither has not ruled
+    # them out — it may select the real section under a name we never compare
+    # against. UNKNOWN, and the commit guard refuses (#20).
+    owns = Deployment().managed_by(_ctx(settings), REF)
+    assert owns.state is Owned.UNKNOWN
+    assert owns.blocks_write
 
 
 # -- e2e: through txn against the bundled mock -------------------------------------

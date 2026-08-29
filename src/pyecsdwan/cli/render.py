@@ -40,8 +40,11 @@ def render_plan(console: Console, plan: txn.Plan) -> None:
         console.print(Text(f"[edit {item.ref.key()}]", style="bold"))
         for marker, text in render_diff_lines(item.diff):
             console.print(Text(f"{marker} {text}", style=_MARKER_STYLES.get(marker, "")))
-        if item.owner:
-            console.print(Text(f"  managed-by: {item.owner}", style="bold yellow"))
+        # Both blocking states are shown, and in the same place: an operator
+        # who sees nothing under a diff should be able to read that as "nothing
+        # owns this", which is only true if UNKNOWN prints too (#20).
+        if item.ownership.blocks_write:
+            console.print(Text(f"  {item.ownership.label}", style="bold yellow"))
     for warning in plan.warnings:
         console.print(Text(warning, style="dim"))
     if plan.empty:

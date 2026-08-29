@@ -15,6 +15,9 @@ from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
     Diff,
+    DiffEntry,
+    DiffOp,
+    Ownership,
     RawState,
     Ref,
     Resource,
@@ -184,10 +187,167 @@ def test_low_tier_refused_in_confirm_changeset(world: dict[str, Any],
     assert report.ok and report.state == TxnState.APPLIED_UNCONFIRMED
 
 
+def test_unknown_ownership_is_refused_just_as_owned_is(world: dict[str, Any]) -> None:
+    """#20's whole point at the guard. Before this, a resource that could not
+    determine ownership returned None and committed as freely as one that had
+    checked and found nothing — so the two situations an operator most needs
+    told apart were the same situation."""
+
+    class OpaqueResource(FakeResource):
+        def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+            return Ownership.unknown("template selection unreadable (403)")
+
+    world["registry"].register(OpaqueResource(world["server"], kind="opaque"))
+    world["candidate"].set_path(Ref("opaque", "x"), ["a"], 1)
+    plan = _plan(world)
+    assert any("ownership-unknown" in w for w in plan.warnings)
+
+    with pytest.raises(txn.CommitError, match="ownership unknown"):
+        txn.commit(world["ctx"], world["registry"], plan, world["settings"])
+    # The reason travels to the operator: "refusing" without "403" leaves them
+    # nothing to fix.
+    with pytest.raises(txn.CommitError, match="403"):
+        txn.commit(world["ctx"], world["registry"], plan, world["settings"])
+
+    report = txn.commit(
+        world["ctx"], world["registry"], plan, world["settings"], override_template=True
+    )
+    assert report.ok
+
+
+def test_a_plan_item_built_without_an_ownership_check_is_refused(
+    world: dict[str, Any],
+) -> None:
+    """The default on the dataclass is a guard in its own right, and the
+    mutation sweep found nothing testing it: flipping it to UNOWNED left every
+    other test green.
+
+    `build_plan` always sets the field, so this is about the next caller —
+    another code path, a test helper, a future bulk-change entry point — that
+    constructs a PlanItem directly. Forgetting to check ownership must land on
+    "refuse", never on "proceed".
+    """
+    ref = Ref("alpha", "x")
+    item = txn.PlanItem(
+        ref=ref,
+        resource=world["registry"].get("alpha"),
+        delete=False,
+        current_raw=None,
+        current=None,
+        desired={"a": 1},
+        diff=Diff(
+            ref=ref,
+            entries=[DiffEntry(DiffOp.ADD, ("a",), None, 1)],
+            desired={"a": 1},
+            current=None,
+        ),
+        # ownership deliberately not passed
+    )
+    assert item.ownership.blocks_write
+    with pytest.raises(txn.CommitError, match="ownership unknown"):
+        txn._guard([item], world["settings"], None, False, False, False)
+
+
+def test_an_item_with_no_diff_does_not_trip_the_guard(world: dict[str, Any]) -> None:
+    """Guards the guard above from being too eager. `managed_by()` is skipped
+    for unchanged items — two round trips each — and the PlanItem default is
+    UNKNOWN, so a careless skip would refuse commits over instances nobody
+    asked to change."""
+
+    class OpaqueResource(FakeResource):
+        def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:  # pragma: no cover
+            raise AssertionError("managed_by must not be called for an unchanged item")
+
+    world["registry"].register(OpaqueResource(world["server"], kind="opaque2"))
+    world["server"].store["opaque2:x"] = {"a": 1}
+    world["candidate"].set_path(Ref("opaque2", "x"), ["a"], 1)  # already the server value
+    plan = _plan(world)
+    assert plan.empty
+    for item in plan.items:
+        assert not item.ownership.blocks_write
+
+
+def test_ownership_is_rechecked_before_the_write(world: dict[str, Any]) -> None:
+    """A plan-time answer is a fact about a moment that has passed (#20).
+
+    Between compare and commit an operator can select a template section, and
+    the plan would carry a stale "unowned" straight into a write the next push
+    reverts. The re-read happens inside the commit lock, before the first
+    apply — asserted here by counting writes, because a guard that fires after
+    a partial apply is not a guard.
+    """
+    flips: dict[str, bool] = {"owned": False}
+
+    class FlipResource(FakeResource):
+        def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+            if flips["owned"]:
+                return Ownership.owned("template-group Late-Arrival")
+            flips["owned"] = True  # ... owned from the second call onward
+            return Ownership.unowned("nothing selects it (yet)")
+
+    world["registry"].register(FlipResource(world["server"], kind="flip"))
+    world["candidate"].set_path(Ref("flip", "x"), ["a"], 1)
+    plan = _plan(world)
+    assert not plan.items[0].ownership.blocks_write  # the plan was clean
+
+    writes = world["server"].write_count
+    report = txn.commit(world["ctx"], world["registry"], plan, world["settings"])
+    assert not report.ok
+    assert report.state == "OWNERSHIP"
+    assert "Late-Arrival" in " ".join(report.messages)
+    assert world["server"].write_count == writes, "refused after writing"
+
+
+def test_the_recheck_is_skipped_when_overriding(world: dict[str, Any]) -> None:
+    """Guards the guard: the re-read costs two round trips per item, and an
+    operator who passed --override-template has already accepted the risk, so
+    paying for it again would be pure latency."""
+    calls: list[str] = []
+
+    class CountingResource(FakeResource):
+        def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+            calls.append(ref.key())
+            return Ownership.owned("template-group Branch-Std")
+
+    world["registry"].register(CountingResource(world["server"], kind="counted"))
+    world["candidate"].set_path(Ref("counted", "x"), ["a"], 1)
+    plan = _plan(world)
+    assert len(calls) == 1  # build_plan
+
+    report = txn.commit(
+        world["ctx"], world["registry"], plan, world["settings"], override_template=True
+    )
+    assert report.ok
+    assert len(calls) == 1, "re-checked despite the override"
+
+
+def test_the_journal_records_which_ownership_the_write_went_ahead_under(
+    world: dict[str, Any],
+) -> None:
+    """An override is a decision, and a decision that leaves no trace cannot be
+    audited afterwards — "why did this change get pushed over a template?" has
+    to be answerable from the journal alone (#20)."""
+
+    class OwnedResource(FakeResource):
+        def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+            return Ownership.owned("template-group Branch-Std")
+
+    world["registry"].register(OwnedResource(world["server"], kind="journaled"))
+    world["candidate"].set_path(Ref("journaled", "x"), ["a"], 1)
+    report = txn.commit(
+        world["ctx"], world["registry"], _plan(world), world["settings"], override_template=True
+    )
+    assert report.ok
+    journal = TxnJournal.open(list_txns()[0].dir)
+    starts = [e for e in journal.events() if e.get("event") == "APPLY_START"]
+    assert starts and starts[0]["ownership"] == "owned"
+    assert starts[0]["owner"] == "template-group Branch-Std"
+
+
 def test_ownership_refused_without_override(world: dict[str, Any]) -> None:
     class OwnedResource(FakeResource):
-        def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:
-            return "template-group Branch-Std"
+        def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+            return Ownership.owned("template-group Branch-Std")
 
     owned = OwnedResource(world["server"], kind="owned")
     world["registry"].register(owned)

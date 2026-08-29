@@ -138,18 +138,40 @@ Associate a template group that selects this resource's section, then attempt a
 direct change. `managed_by()` must refuse it, naming the owning group. Then
 re-run with `--override-template` and confirm it proceeds.
 
-Worth doing carefully: `ownership.KIND_TO_TEMPLATE_SECTIONS` is placeholder
-data for most kinds, and this test is the only thing that turns a guessed
-section name into a known one. Of its 24 section names across 23 kinds, **six
-are live-confirmed** — `dns`, `logging`, `mgmtServices`, `routes`, `shaper`,
-`snmp`, all read off one real Default Template Group's selected-section list on
-2026-08-26. The other 18 follow the convention that a section name matches its
-ECOS path, which held for the six but is still a convention. A wrong section
-name means ownership detection silently never fires: the resource writes
-happily, and the next template push reverts it.
+Worth doing carefully: this test is the only thing that turns a guessed
+section name into a known one, and since #20 the difference is load-bearing
+rather than advisory. `ownership.SECTION_MAP` marks each kind `verified` or
+not, and the flag decides what a *non-match* means:
 
-This is issue #20, and it closes by evidence — one live group per section name
-— not by anyone re-reading the code.
+* **verified** — the name came back from a live `GET /template/templateSelection`.
+  A group that does not select it genuinely does not own the section: `unowned`,
+  and the write proceeds.
+* **unverified** — the name is spelled after the ECOS path and has never been
+  observed. A group that does not select it has established nothing, because
+  "not selected" and "wrong name" are indistinguishable: `unknown`, and the
+  commit is refused without `--override-template`.
+
+A *match* is conclusive either way — a guess that matched was a correct guess —
+so verification only ever affects the negative answer.
+
+Seven kinds are verified today, from the eleven names one real Default Template
+Group returned on 2026-08-26 (`adminDistance`, `cli`, `dns`, `datetime`,
+`logging`, `mgmtServices`, `routes`, `secureWebServicesConfig`, `shaper`,
+`snmp`, `webconfig`). Sixteen kinds are still guesses. Three of those were
+previously commented "CONFIRMED real (matches the ECOS path itself)" — that is
+the guess restated, not confirmation, and #20 recorded them as what they are.
+
+**How to promote one.** Find or build a template group that selects the section
+in question, associate it with a lab appliance, and run
+`ec-cli show configuration appliance <name> <noun>`: the header must read
+`managed-by: template-group <group>`. Then add the observed name to
+`ownership.LIVE_CONFIRMED_SECTIONS`, switch the kind's entry from `_guess` to
+`_verified`, and record the Orchestrator version. `tests/test_ownership_fail_closed.py`
+refuses a `verified` entry that names nothing in that list, so the two cannot
+drift apart.
+
+This is issue #20's remaining half, and it closes by evidence — one live group
+per section name — not by anyone re-reading the code.
 
 ### `injected-job-failure` — level 6
 

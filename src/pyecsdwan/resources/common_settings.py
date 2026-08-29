@@ -157,6 +157,7 @@ from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
     Diff,
+    Ownership,
     RawState,
     Ref,
     Resource,
@@ -377,7 +378,7 @@ class _ApplianceSetting(Resource):
 
     # -- ownership ------------------------------------------------------------
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:
+    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
         ne_pk = self._ne_pk(ctx, ref)
         return ownership.owning_group(ctx, self.kind, ne_pk)
 

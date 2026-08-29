@@ -21,7 +21,7 @@ import pyecsdwan.resources  # noqa: F401 - registers the built-in plugins
 from pyecsdwan import config, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.client import OrchClient
-from pyecsdwan.contract import Ctx, Ref, Reversibility
+from pyecsdwan.contract import Ctx, Owned, Ref, Reversibility
 from pyecsdwan.registry import default_registry
 from pyecsdwan.resources.vrrp import Vrrp
 
@@ -417,7 +417,9 @@ def test_e2e_managed_by_ownership_join(world: dict[str, Any]) -> None:
 
     ctx = world["ctx"]
     ref = Ref(kind="appliance/vrrp", name="global", appliance="BR1-EC")
-    assert Vrrp().managed_by(ctx, ref) == "template-group NetStd"
+    owns = Vrrp().managed_by(ctx, ref)
+    assert owns.state is Owned.OWNED
+    assert owns.owner == "template-group NetStd"
 
     other_ref = Ref(kind="appliance/vrrp", name="global", appliance="BR2-EC")  # 5.NE, unassociated
-    assert Vrrp().managed_by(ctx, other_ref) is None
+    assert Vrrp().managed_by(ctx, other_ref).state is Owned.UNOWNED

@@ -20,7 +20,7 @@ import pyecsdwan.resources  # noqa: F401 - registers the built-in plugins
 from pyecsdwan import config, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.client import OrchClient
-from pyecsdwan.contract import Ctx, Ref, Reversibility, Scope, Tier
+from pyecsdwan.contract import Ctx, Owned, Ref, Reversibility, Scope, Tier
 from pyecsdwan.registry import default_registry
 from pyecsdwan.resolver import Resolver
 from pyecsdwan.resources.loopback import Loopback, LoopbackOrch
@@ -146,10 +146,15 @@ def test_loopback_diff_empty_when_desired_matches_fetched(world: dict[str, Any])
 # -- managed_by: per-entry gms_marked only, no template-section join ---------
 
 
-def test_loopback_managed_by_none_when_no_gms_marked_entry(world: dict[str, Any]) -> None:
-    ctx = world["ctx"]
-    # The live sample has gms_marked: false.
-    assert Loopback().managed_by(ctx, LOOPBACK_REF) is None
+def test_loopback_managed_by_unknown_when_no_gms_marked_entry(world: dict[str, Any]) -> None:
+    """The live sample has gms_marked: false — and that is not proof of no
+    owner (#20). appliance/loopback has no SECTION_MAP entry at all, so there
+    is no template join to fall back to and nothing has ruled out a template
+    group selecting a loopback section under a name this project has never
+    seen. Answering None here was an assumption dressed as a finding."""
+    owns = Loopback().managed_by(world["ctx"], LOOPBACK_REF)
+    assert owns.state is Owned.UNKNOWN
+    assert owns.blocks_write
 
 
 def test_loopback_managed_by_reports_gms_when_marked(world: dict[str, Any]) -> None:
@@ -158,9 +163,9 @@ def test_loopback_managed_by_reports_gms_when_marked(world: dict[str, Any]) -> N
         "lo0": {**_LIVE_LO0_SAMPLE, "gms_marked": True}
     }
     ref = Ref(kind="appliance/loopback", name="loopback", appliance="BR1-EC")
-    owner = Loopback().managed_by(ctx, ref)
-    assert owner is not None
-    assert "gms_marked" in owner
+    owns = Loopback().managed_by(ctx, ref)
+    assert owns.state is Owned.OWNED
+    assert "gms_marked" in owns.owner
 
 
 # -- apply/rollback: no documented write endpoint -----------------------------

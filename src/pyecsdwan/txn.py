@@ -43,6 +43,8 @@ from pyecsdwan.contract import (
     Ctx,
     Diff,
     JobOutcome,
+    Owned,
+    Ownership,
     RawState,
     Ref,
     Resource,
@@ -75,8 +77,13 @@ class PlanItem:
     current: CanonicalState
     desired: CanonicalState
     diff: Diff
-    #: e.g. "template-group Branch-Std" when a template owns this section.
-    owner: str | None = None
+    #: Whether a template push would revert this write, as a tri-state (#20).
+    #: Defaults to UNKNOWN rather than "unowned" so an item built without a
+    #: check is refused rather than waved through — the guard's job is to be
+    #: told, not to assume.
+    ownership: Ownership = dataclasses.field(
+        default_factory=lambda: Ownership.unknown("ownership was never checked")
+    )
     #: The staged intent this item came from. ``--rebase`` needs it to
     #: re-materialize desired state against what the server holds *now*;
     #: without it a rebase would re-apply a desired state computed from the
@@ -144,10 +151,19 @@ def build_plan(ctx: Ctx, registry: Registry, candidate: CandidateStore) -> Plan:
         else:
             desired = resource.canonicalize_desired(ctx, ref, desired_input)
         diff = resource.diff(ref, current, desired)
-        owner = resource.managed_by(ctx, ref) if diff.entries else None
-        if owner:
+        # Only for items that actually change something: managed_by() costs two
+        # API round trips per item, and a no-op item cannot be reverted by a
+        # template push because there is nothing to revert. An unchanged item
+        # keeps the UNOWNED default rather than the UNKNOWN one, so it never
+        # trips the guard on a check that was deliberately skipped.
+        ownership = (
+            resource.managed_by(ctx, ref)
+            if diff.entries
+            else Ownership.unowned("no change staged for this instance")
+        )
+        if ownership.blocks_write:
             warnings.append(
-                f"{ref}: managed-by: {owner} — direct change requires --override-template"
+                f"{ref}: {ownership.label} — direct change requires --override-template"
             )
         if resource.tier < Tier.CURATED:
             warnings.append(
@@ -163,7 +179,7 @@ def build_plan(ctx: Ctx, registry: Registry, candidate: CandidateStore) -> Plan:
                 current=current,
                 desired=desired,
                 diff=diff,
-                owner=owner,
+                ownership=ownership,
                 candidate_item=cand,
             )
         )
@@ -203,6 +219,7 @@ def commit(
             confirm_minutes,
             journal_root,
             rebase,
+            override_template,
         )
 
 
@@ -213,6 +230,7 @@ def _commit_locked(
     confirm_minutes: float | None,
     journal_root: Path | None,
     rebase: bool,
+    override_template: bool,
 ) -> CommitReport:
     journal = TxnJournal.create(
         settings.host, [i.ref for i in changed], root=journal_root
@@ -223,6 +241,7 @@ def _commit_locked(
     # journal holds true pre-change state, then recompute each diff against
     # that fresh state so we apply exactly what we snapshot.
     stale: list[str] = []
+    newly_blocked: list[tuple[str, Ownership]] = []
     work: list[PlanItem] = []
     for item in changed:
         fresh_raw = item.resource.fetch(ctx, item.ref)
@@ -247,6 +266,18 @@ def _commit_locked(
             stale.append(item.ref.key())
         if fresh_diff.empty:
             continue
+        # Ownership is re-read here, not reused from the plan, because the
+        # plan-time answer is a fact about a moment that has passed. Between
+        # compare and commit an operator can associate a template group, or
+        # select a section in one already associated, and the plan would carry
+        # a stale "unowned" straight through the guard into a write the next
+        # push reverts. Skipped when overriding: the operator already said they
+        # accept the risk, and this costs two round trips per item.
+        fresh_ownership = item.ownership
+        if not override_template:
+            fresh_ownership = item.resource.managed_by(ctx, item.ref)
+            if fresh_ownership.blocks_write:
+                newly_blocked.append((item.ref.key(), fresh_ownership))
         work.append(
             dataclasses.replace(
                 item,
@@ -254,8 +285,22 @@ def _commit_locked(
                 current=fresh_current,
                 desired=fresh_desired,
                 diff=fresh_diff,
+                ownership=fresh_ownership,
             )
         )
+    if newly_blocked:
+        # Before the first write, like the drift abort below it, and for the
+        # same reason: a guard that fires after a partial apply is not a guard.
+        journal.append("OWNERSHIP_ABORT", refs=[key for key, _ in newly_blocked])
+        journal.set_state(TxnState.AUDIT_ONLY, note="template ownership changed since compare")
+        report.state = "OWNERSHIP"
+        report.messages.append(
+            "refusing: template ownership changed since compare for: "
+            + "; ".join(f"{key} — {own.label}" for key, own in newly_blocked)
+            + ". A template push would now revert these changes (or may — see above). "
+            "Re-run `compare`, or `commit --override-template` to proceed anyway."
+        )
+        return report
     if stale and not rebase:
         # Before the first write, and it stays that way: this block must not
         # move below the apply loop.
@@ -295,6 +340,9 @@ def _commit_locked(
             delete=item.delete,
             entries=len(item.diff),
             reversibility=item.resource.reversibility.value,
+            ownership=item.ownership.state.value,
+            owner=item.ownership.owner,
+            ownership_reason=item.ownership.reason,
         )
         try:
             result = item.resource.apply(ctx, item.diff)
@@ -369,13 +417,28 @@ def _guard(
     override_template: bool,
     allow_untransactional: bool,
 ) -> None:
-    owned = [i for i in changed if i.owner]
-    if owned and not override_template:
-        lines = ", ".join(f"{i.ref} (managed-by: {i.owner})" for i in owned)
+    # `blocks_write`, not `state is OWNED`: UNKNOWN refuses on exactly the same
+    # footing (#20). Reading the state directly here is how the fail-open comes
+    # back, so the two lists below are split only to word the message.
+    blocked = [i for i in changed if i.ownership.blocks_write]
+    if blocked and not override_template:
+        owned = [i for i in blocked if i.ownership.state is Owned.OWNED]
+        unknown = [i for i in blocked if i.ownership.state is Owned.UNKNOWN]
+        parts: list[str] = []
+        if owned:
+            parts.append(
+                "template-managed: "
+                + ", ".join(f"{i.ref} ({i.ownership.owner})" for i in owned)
+                + ". The next template push would silently revert these changes"
+            )
+        if unknown:
+            parts.append(
+                "ownership unknown: "
+                + "; ".join(f"{i.ref} — {i.ownership.reason}" for i in unknown)
+                + ". Refusing rather than assuming nothing owns them"
+            )
         raise CommitError(
-            f"refusing: template-managed sections in changeset: {lines}. "
-            f"The next template push would silently revert these changes. "
-            f"Use --override-template to proceed anyway."
+            "refusing: " + ". ".join(parts) + ". Use --override-template to proceed anyway."
         )
     irreversible = [i for i in changed if i.resource.reversibility is Reversibility.IRREVERSIBLE]
     if irreversible:

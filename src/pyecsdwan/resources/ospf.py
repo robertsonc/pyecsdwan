@@ -70,6 +70,7 @@ from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
     Diff,
+    Ownership,
     RawState,
     Ref,
     Resource,
@@ -191,9 +192,12 @@ class Ospf(Resource):
         interfaces = _interface_table(raw.get("interfaces") or {})
         return {"system": system, "interfaces": interfaces}
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:
+    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
         if ref.appliance is None:
-            return None
+            return Ownership.unknown(
+                f"{ref.kind} is appliance-scope but the ref names no appliance, "
+                f"so no nePk resolves and ownership cannot be checked"
+            )
         ne_pk = ctx.resolver.ne_pk_for(ref.appliance)
         return owning_group(ctx, self.kind, ne_pk)
 

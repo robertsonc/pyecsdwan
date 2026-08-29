@@ -161,6 +161,7 @@ from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
     Diff,
+    Ownership,
     RawState,
     Ref,
     Resource,
@@ -480,13 +481,13 @@ class NatMaps(Resource):
 
     # -- ownership ------------------------------------------------------------
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:
+    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
         ne_pk = _ne_pk_for(ctx, ref)
         # Per-rule precision first (routes.py's pattern): a rule the fabric
         # itself flagged gms_marked is server-owned regardless of what any
         # template happens to select.
         if _has_gms_marked(self.fetch(ctx, ref)):
-            return "gms (gms_marked NAT rule present on this appliance)"
+            return Ownership.owned("gms (gms_marked NAT rule present on this appliance)")
         return ownership.owning_group(ctx, self.kind, ne_pk)
 
 
@@ -629,7 +630,7 @@ class NatPools(Resource):
 
     # -- ownership ------------------------------------------------------------
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> str | None:
+    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
         # NATPool declares no gms_marked flag (unlike BrNatPriority /
         # natmapspolicy rules), so the template join is all there is.
         return ownership.owning_group(ctx, self.kind, _ne_pk_for(ctx, ref))
