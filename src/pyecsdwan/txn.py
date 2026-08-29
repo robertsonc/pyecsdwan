@@ -626,6 +626,42 @@ def _guard_confirm_auth(settings: config.Settings, confirm_minutes: float | None
     )
 
 
+def _confirm_restored(
+    ctx: Ctx, item: PlanItem, snap: RawState, detail: str
+) -> tuple[bool, str]:
+    """Re-read the resource and compare it to the snapshot it was restored from.
+
+    Rollback used to be believed on its own word: ``result.ok`` from the
+    resource plugin was the whole evidence, and a plugin that returned success
+    without restoring anything produced "fabric restored to pre-commit
+    snapshot" over a fabric that still held the change (#103). The report a
+    transaction hands back is the operator's only account of what state the
+    network is in — it cannot be a restatement of what the write path claimed.
+
+    A snapshot of ``None`` means the resource did not exist before, so rollback
+    deleted it. That case is left unconfirmed *and says so*: confirming a
+    deletion means reading an absence, and a fetch that raises is not proof of
+    absence — it is equally a timeout. Guessing there would be the same
+    absence-of-evidence inference this function exists to remove.
+    """
+    if snap is None:
+        note = "deletion not independently confirmed (absence is not readable)"
+        return True, f"{detail}; {note}" if detail else note
+    try:
+        restored = item.resource.verify(ctx, item.ref, item.resource.normalize(snap))
+    except Exception as exc:  # noqa: BLE001 - an unreadable resource is an unconfirmed restore, not a failed one to hide
+        return False, (
+            f"rollback reported success but the restore could not be confirmed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    if not restored:
+        return False, (
+            "rollback reported success but the resource does not match its "
+            "pre-change snapshot"
+        )
+    return True, detail
+
+
 def _revert_items(
     ctx: Ctx, journal: TxnJournal, items: list[PlanItem], report: CommitReport
 ) -> None:
@@ -658,6 +694,8 @@ def _revert_items(
         except Exception as exc:  # noqa: BLE001 - collect every revert failure; the report must state exactly what is left un-reverted
             ok = False
             detail = f"{type(exc).__name__}: {exc}"
+        if ok:
+            ok, detail = _confirm_restored(ctx, item, snap, detail)
         journal.append("REVERT_RESULT", ref=item.ref.key(), ok=ok, message=detail)
         if ok:
             report.reverted.append(item.ref.key())

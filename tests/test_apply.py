@@ -413,6 +413,131 @@ def test_a_verify_that_returns_false_still_reverts(
     assert _live_banners(world) == before
 
 
+# -- a rollback is not believed on its own word (#103) ------------------------
+
+
+def _force_revert(monkeypatch: pytest.MonkeyPatch, marker: str) -> None:
+    """Fail the post-apply verify for the forward change only.
+
+    Deliberately selective. `_confirm_restored` calls `verify` too — with the
+    *snapshot* as desired rather than the staged intent — so a blanket `False`
+    would fail the restore confirmation as well, and a fixture that sabotages
+    the thing it is setting up proves nothing. This first version did exactly
+    that and made a passing implementation look broken.
+    """
+    resource = default_registry.get(KIND)
+    real = type(resource).verify
+
+    def selective(self: Any, ctx: Any, ref: Any, desired: Any) -> bool:
+        if isinstance(desired, dict) and desired.get("issue") == marker:
+            return False
+        return bool(real(self, ctx, ref, desired))
+
+    monkeypatch.setattr(type(resource), "verify", selective)
+
+
+def test_a_rollback_that_restored_nothing_is_not_reported_as_restored(
+    world: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#103's second criterion. `rollback()`'s own `ok` was the whole evidence.
+
+    A plugin returning success without restoring anything produced "fabric
+    restored to pre-commit snapshot" over a fabric that still held the change.
+    The report a transaction hands back is the operator's only account of what
+    state the network is in — it cannot be a restatement of what the write
+    path claimed about itself.
+    """
+    from pyecsdwan.contract import ApplyResult
+
+    _force_revert(monkeypatch, "the change that should be undone")
+    resource = default_registry.get(KIND)
+    monkeypatch.setattr(
+        type(resource),
+        "rollback",
+        lambda self, ctx, ref, snapshot: ApplyResult(ok=True, message="restored"),
+    )
+    staged = CandidateStore(world["settings"].host)
+    staged.set_desired(REF, {"issue": "the change that should be undone"})
+    plan = txn.build_plan(world["ctx"], default_registry, staged)
+
+    report = txn.commit(world["ctx"], default_registry, plan, world["settings"])
+
+    assert report.state == "REVERT_FAILED"
+    assert not report.reverted
+    assert any("does not match its pre-change snapshot" in m for m in report.messages)
+    assert not any("fabric restored" in m for m in report.messages)
+
+
+def test_an_unreadable_resource_after_rollback_is_not_a_restore(
+    world: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"I could not check" is not "it worked" — the same inference #64 removed
+    from the job poller, applied to the last place a transaction speaks.
+
+    Asserted on `_confirm_restored` rather than through a whole commit: making
+    `fetch` raise globally breaks the snapshot-before-write long before any
+    rollback happens, so the commit would fail for the wrong reason and the
+    test would pass without exercising this at all.
+    """
+    resource = default_registry.get(KIND)
+    monkeypatch.setattr(
+        type(resource),
+        "verify",
+        lambda self, ctx, ref, desired: (_ for _ in ()).throw(
+            TimeoutError("appliance unreachable")
+        ),
+    )
+
+    ok, detail = txn._confirm_restored(
+        world["ctx"], _plan_item(world), {"issue": "before"}, "restored"
+    )
+
+    assert not ok
+    assert "could not be confirmed" in detail
+    assert "TimeoutError" in detail
+
+
+def test_a_real_rollback_still_reports_restored(
+    world: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guards the guard, and it is the one that matters here: a confirmation
+    step that could never pass would turn every auto-revert into
+    REVERT_FAILED and send operators hunting for damage that is not there."""
+    before = dict(_live_banners(world))
+    _force_revert(monkeypatch, "applied, then reverted for real")
+    staged = CandidateStore(world["settings"].host)
+    staged.set_desired(REF, {"issue": "applied, then reverted for real"})
+    plan = txn.build_plan(world["ctx"], default_registry, staged)
+
+    report = txn.commit(world["ctx"], default_registry, plan, world["settings"])
+
+    assert report.state == "REVERTED", report.messages
+    assert report.reverted == [REF.key()]
+    assert _live_banners(world) == before
+
+
+def test_a_deletion_rollback_says_it_is_unconfirmed(
+    world: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The honest gap. A snapshot of None means the resource did not exist, so
+    rollback deleted it — and confirming a deletion means reading an absence,
+    which a raising fetch does not prove (it is equally a timeout). Allowed
+    through, but the message says it was not confirmed rather than implying it
+    was."""
+    ok, detail = txn._confirm_restored(
+        world["ctx"], _plan_item(world), None, "deleted"
+    )
+
+    assert ok
+    assert "not independently confirmed" in detail
+
+
+def _plan_item(world: dict[str, Any]) -> Any:
+    staged = CandidateStore(world["settings"].host)
+    staged.set_desired(REF, {"issue": "x"})
+    return txn.build_plan(world["ctx"], default_registry, staged).items[0]
+
+
 # -- a lost snapshot must not become a delete (#110) --------------------------
 
 
