@@ -33,7 +33,7 @@ from typer.core import TyperGroup
 from pyecsdwan import config, desired, evidence, locking, runtime, specs, txn
 from pyecsdwan import registry as registry_mod
 from pyecsdwan import retry as retry_mod
-from pyecsdwan.candidate import CandidateCorruptError, CandidateStore
+from pyecsdwan.candidate import CandidateCorruptError, CandidateStore, IntentSource
 from pyecsdwan.cli import fanout, outcomes, reference, render
 from pyecsdwan.cli.outcomes import Outcome
 from pyecsdwan.client import OrchApiError
@@ -469,6 +469,110 @@ def diff_(ctx: typer.Context) -> None:
 app.command("compare", help="Alias for 'diff'.")(diff_)
 
 
+@app.command("apply")
+def apply_(
+    ctx: typer.Context,
+    from_dir: Annotated[
+        Path,
+        typer.Option("--from", help="Desired-state directory to apply."),
+    ],
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Show the plan and exit 1 if it would change anything. Writes nothing.",
+        ),
+    ] = False,
+    confirm_minutes: Annotated[
+        float | None,
+        typer.Option(
+            "--confirm-minutes",
+            min=0.02,
+            help="Auto-rollback unless confirmed within this many minutes (fractions allowed).",
+        ),
+    ] = None,
+    force: Annotated[bool, typer.Option("--force", help="Allow IRREVERSIBLE changes.")] = False,
+    override_template: Annotated[
+        bool,
+        typer.Option("--override-template", help="Allow changes to template-managed sections."),
+    ] = False,
+    allow_untransactional: Annotated[
+        bool,
+        typer.Option(
+            "--allow-untransactional",
+            help="Allow sub-curated resources inside a commit-confirm window.",
+        ),
+    ] = False,
+    rebase: Annotated[
+        bool,
+        typer.Option(
+            "--rebase",
+            help="Re-merge declared intent over current state when it moved, instead of refusing.",
+        ),
+    ] = False,
+) -> None:
+    """Apply a desired-state directory as one transaction (epic #8).
+
+    The same planner, the same guards and the same journal as `commit` — only
+    the intent comes from git instead of the candidate. Ownership, shared
+    write targets, drift-since-compare and reversibility are all enforced
+    exactly as they are for a hand-staged change, because it is literally the
+    same code path.
+
+    `--dry-run` is the CI form: it writes nothing and exits 1 if applying would
+    change anything.
+    """
+    state = _state(ctx)
+    rt_ctx, registry, settings = _bootstrap(state)
+
+    try:
+        declared = desired.load(registry, from_dir)
+    except desired.DesiredError as exc:
+        _fail(str(exc))
+
+    # Refuse to mix two sources of intent in one transaction. A non-empty
+    # candidate is someone's in-progress work; folding it into a declarative
+    # apply would commit changes the directory never declared, and the operator
+    # would have no way to see which came from where. Clearing it is their
+    # call, not this command's.
+    staged = CandidateStore(settings.host)
+    if len(staged):
+        _fail(
+            f"refusing: {len(staged)} item(s) staged in the candidate. A declarative "
+            f"apply commits the directory, not your staged work, and mixing the two "
+            f"in one transaction would hide which change came from where. "
+            f"Run `ec-cli commit` first, or `ec-cli discard` to drop them."
+        )
+
+    console.print(
+        Text(f"declared: {len(declared)} instance(s) from {from_dir}", style="dim")
+    )
+    plan = txn.build_plan(rt_ctx, registry, declared)
+    render.render_plan(console, plan)
+
+    if dry_run:
+        # Same convention as `diff`: nonzero means "this would change things",
+        # which is what a CI gate keys on.
+        raise typer.Exit(0 if plan.empty else 1)
+    if plan.empty:
+        console.print("no changes")
+        raise typer.Exit(0)
+
+    report = txn.commit(
+        rt_ctx,
+        registry,
+        plan,
+        settings,
+        confirm_minutes=confirm_minutes,
+        force=force,
+        override_template=override_template,
+        allow_untransactional=allow_untransactional,
+        rebase=rebase,
+    )
+    render.render_report(console, report)
+    raise typer.Exit(0 if report.ok else 2)
+
+
 @app.command("drift")
 def drift_(
     ctx: typer.Context,
@@ -514,7 +618,7 @@ def drift_(
     # Every kind, every instance: the heaviest read this CLI has. `list_refs`
     # for most appliance-scope kinds is itself a per-appliance call, so the
     # estimate counts the curated kinds rather than pretending it is one.
-    intent: drift.IntentSource
+    intent: IntentSource
     if from_dir is not None:
         try:
             declared = desired.load(registry, from_dir)
@@ -528,7 +632,7 @@ def drift_(
         )
         intent = declared
     else:
-        intent = drift.CandidateIntent(CandidateStore(settings.host))
+        intent = CandidateStore(settings.host)
 
     _gate_fanout(rt_ctx, assume_yes, calls_each=_drift_calls_each(registry, kind))
     report = drift.collect(

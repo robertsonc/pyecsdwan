@@ -136,7 +136,15 @@ desired/
       bgp/config.yaml
 ```
 
-Then `ec-cli drift --from desired/`. The directories are the same user-facing
+Then `ec-cli drift --from desired/` to see what differs, and
+`ec-cli apply --from desired/` to commit it as one transaction —
+`--dry-run` writes nothing and exits 1 if it would change anything, which is
+the CI gate. Apply is the same planner, guards and journal as `commit`; only
+the intent comes from git. It refuses if you have staged work in the candidate,
+because one transaction carrying both intents would commit changes the
+directory never declared.
+
+The directories are the same user-facing
 nouns the commands take — never registry kinds, which is not cosmetic: the kind
 behind a per-appliance banner is `appliance/banners`, and a path separator in a
 directory name would silently become two levels. Each file *is* that instance's

@@ -257,7 +257,7 @@ def test_the_directory_and_the_candidate_agree_on_the_same_intent(
         ctx, default_registry, desired.load(default_registry, tmp_path), kinds=[KIND]
     )
     from_candidate = drift.collect(
-        ctx, default_registry, drift.CandidateIntent(candidate), kinds=[KIND]
+        ctx, default_registry, candidate, kinds=[KIND]
     )
     assert from_dir.counts == from_candidate.counts
     assert [r.status for r in from_dir.rows] == [r.status for r in from_candidate.rows]
@@ -345,3 +345,19 @@ def test_materialized_intent_does_not_alias_the_declaration(tmp_path: Path) -> N
 
     # And a second read is unaffected by the first consumer.
     assert declared.desired_for(item, None)["nested"]["inner"] == "original"
+
+
+def test_the_same_directory_always_builds_the_same_order(tmp_path: Path) -> None:
+    """Deterministic, because the files are read in sorted order — a plan built
+    from a directory must not depend on filesystem iteration order."""
+    for rel in (
+        "appliances/BR2-EC/banners/global.yaml",
+        "fabric/interface-labels/global.yaml",
+        "appliances/BR1-EC/banners/global.yaml",
+    ):
+        _write(tmp_path, rel, "login: x\n" if "banners" in rel else "wan: {}\n")
+
+    first = [i.ref_key for i in desired.load(default_registry, tmp_path).ordered_items()]
+    second = [i.ref_key for i in desired.load(default_registry, tmp_path).ordered_items()]
+    assert first == second
+    assert len(first) == 3

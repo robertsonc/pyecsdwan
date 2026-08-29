@@ -138,6 +138,15 @@ a rename, and the same mistake underneath a write path costs a fabric. Both
 intent sources materialize through one `materialize_desired`, so `drift` can
 never report something `commit` would not do.
 
+`ec-cli apply --from <dir>` is the write half, and it needed no second
+transaction engine: `candidate.IntentSource` is the one interface both the
+candidate store and a desired-state directory implement, so `build_plan` takes
+either and everything downstream — ownership, shared write targets,
+drift-since-compare, reversibility, the journal — is literally the same code.
+`--dry-run` writes nothing and exits 1 if applying would change anything.
+A non-empty candidate refuses the apply rather than merging two intents into
+one transaction.
+
 *MCP trust boundary (#62).* `mcp_server/` reflectively exposed every public
 method of the vendored `pyedgeconnect` SDK — 641 on `Orchestrator`, ~250 of
 them writes — with no transaction, TLS verification off, and credentials as

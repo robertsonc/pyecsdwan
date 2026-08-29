@@ -103,6 +103,18 @@ class Declared:
     #: Where each ref was declared, for error messages that name a file.
     origins: dict[str, Path] = dataclasses.field(default_factory=dict)
 
+    def ordered_items(self) -> list[CandidateItem]:
+        """Insertion order, which is deterministic because :func:`_yaml_files`
+        sorts the paths — so the same directory always builds the same plan.
+
+        An earlier version re-sorted by ref key "for reproducibility". The
+        mutation sweep showed that claim was already satisfied by the sorted
+        read, and no test could distinguish the two, so the sort was doing
+        nothing but looking careful. Dependency ordering is
+        ``registry.order_refs``'s job either way.
+        """
+        return list(self.items.values())
+
     def item_for(self, ref: Ref) -> CandidateItem | None:
         return self.items.get(ref.key())
 

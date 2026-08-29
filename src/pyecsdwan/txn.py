@@ -37,7 +37,7 @@ from typing import Any
 
 from pyecsdwan import config
 from pyecsdwan import watchdog as _watchdog
-from pyecsdwan.candidate import CandidateItem, CandidateStore, materialize_desired
+from pyecsdwan.candidate import CandidateItem, IntentSource, materialize_desired
 from pyecsdwan.contract import (
     CanonicalState,
     Ctx,
@@ -144,8 +144,15 @@ class CommitReport:
     jobs: list[JobOutcome] = dataclasses.field(default_factory=list)
 
 
-def build_plan(ctx: Ctx, registry: Registry, candidate: CandidateStore) -> Plan:
-    """Fetch + normalize + diff every candidate item; detect ownership."""
+def build_plan(ctx: Ctx, registry: Registry, candidate: IntentSource) -> Plan:
+    """Fetch + normalize + diff every staged item; detect ownership.
+
+    ``candidate`` is any :class:`~pyecsdwan.candidate.IntentSource`: the
+    candidate store, or a desired-state directory (epic #8). The plan, its
+    guards and the commit that follows are identical either way — only where
+    the intent came from differs, which is the whole reason declarative apply
+    needs no second transaction engine.
+    """
     warnings: list[str] = []
     refs = [item.ref for item in candidate.ordered_items()]
     deletes = {i.ref_key for i in candidate.ordered_items() if i.mode == "delete"}
