@@ -55,9 +55,9 @@ from pyecsdwan.contract import (
 from pyecsdwan.journal import (
     TxnJournal,
     TxnState,
+    authorizes,
     committed_history,
     is_legacy,
-    lock_origin,
     orphaned_txns,
     prune_history,
     targets,
@@ -302,6 +302,31 @@ class StagedCommit:
     kept: tuple[str, ...] = ()
 
 
+def _guard_unadopted_staging(candidate: CandidateStore) -> None:
+    """Refuse "no changes" when there is staged work this build will not claim.
+
+    An operator who staged twelve changes, upgraded, and is told there is
+    nothing to commit concludes the work was lost and does it again. The
+    staging is right there — it is only its *target* that is unknown, and that
+    is a question with an answer the operator has and the file does not.
+
+    Raised here rather than at each interface: the scriptable CLI and the
+    shell both print "no changes" from their own code, and putting the check
+    on the shared path is the same lesson as the acknowledgement above.
+    """
+    pending = candidate.legacy_pending()
+    if not pending:
+        return
+    raise CommitError(
+        f"nothing staged for {candidate.origin}, but {len(pending)} change(s) staged by "
+        f"an older build are in {candidate.unadopted_legacy}. That file is keyed by a "
+        f"hostname, which this Orchestrator's http:// and https:// endpoints — and every "
+        f"tenant path under it — share, so this build will not assume the changes are "
+        f"yours. If they are, run 'ec-cli adopt --candidate'; 'ec-cli adopt' on its own "
+        f"lists them first."
+    )
+
+
 def commit_candidate(
     ctx: Ctx,
     registry: Registry,
@@ -342,6 +367,7 @@ def commit_candidate(
     staged = candidate.ordered_items()
     plan = build_plan(ctx, registry, candidate)
     if plan.empty:
+        _guard_unadopted_staging(candidate)
         return StagedCommit(plan=plan)
     if on_plan is not None:
         on_plan(plan)
@@ -817,14 +843,29 @@ def _confirm_locked(
 ) -> CommitReport:
     from pyecsdwan.journal import list_txns
 
-    candidates = [
+    unconfirmed = [
         t
         for t in list_txns(journal_root)
         if t.meta.state == TxnState.APPLIED_UNCONFIRMED
         and targets(t, settings.origin)
         and (txn_id is None or t.meta.txn_id == txn_id)
     ]
+    # Confirming writes a marker, kills the watchdog and marks the transaction
+    # CONFIRMED — it is what stops the fabric being put back. A hostname match
+    # is not enough to authorize that against a journal that might belong to
+    # another Orchestrator on the same name (#63).
+    candidates = [t for t in unconfirmed if authorizes(t, settings.origin)]
     if not candidates:
+        unproven = [t for t in unconfirmed if is_legacy(t)]
+        if unproven:
+            # Named rather than reported as "none found": an operator who can
+            # see the transaction in `show journal` and is told it does not
+            # exist goes looking in the wrong place.
+            return CommitReport(
+                ok=False,
+                state="NONE",
+                messages=[_unproven(unproven[0], "confirm")],
+            )
         return CommitReport(ok=False, state="NONE", messages=["no unconfirmed transaction found"])
     txn = candidates[0]
     # Win the decision atomically; if the watchdog already claimed 'revert',
@@ -864,6 +905,23 @@ def _confirm_locked(
     )
 
 
+#: What to tell an operator holding a journal whose target cannot be proven.
+ADOPT_HINT = (
+    "Its target cannot be established from the file, and a hostname is not "
+    "proof: the http:// and https:// endpoints on one name, and every tenant "
+    "path under it, share it. If you know which Orchestrator it belongs to, "
+    "connect to that one and run 'ec-cli adopt --txn {txn_id}'."
+)
+
+
+def _unproven(txn: TxnJournal, action: str) -> str:
+    return (
+        f"refusing to {action} transaction {txn.meta.txn_id}: it was written before "
+        f"this build recorded which Orchestrator a transaction targets, and records "
+        f"only the hostname {txn.meta.orch_host!r}. "
+    ) + ADOPT_HINT.format(txn_id=txn.meta.txn_id)
+
+
 def revert_txn_dir(
     txn_dir: Path,
     reason: str,
@@ -884,7 +942,18 @@ def revert_txn_dir(
     applied.
     """
     journal = TxnJournal.open(txn_dir)
-    origin = lock_origin(journal)
+    if is_legacy(journal):
+        # Refused before any lock is taken, because none can be named: the
+        # journal records no origin, and a guessed one is a *different* lock
+        # from the one a live commit against the actual target holds — so the
+        # guess would not even serialize against the thing it must (#63).
+        return CommitReport(
+            ok=False,
+            txn_id=journal.meta.txn_id,
+            state="NONE",
+            messages=[_unproven(journal, "restore")],
+        )
+    origin = journal.meta.orch_origin
     with HostLock(
         origin, "commit", root=lock_root, timeout=lock_timeout, txn_id=journal.meta.txn_id
     ):
@@ -932,35 +1001,28 @@ def _revert_txn_dir_locked(
     # hostname onto the same string, so this guard used to wave through the
     # single worst thing the tool can do (#63).
     client_origin = getattr(getattr(ctx.client, "settings", None), "origin", None)
-    if client_origin is not None and not targets(journal, client_origin):
+    if client_origin is not None and not authorizes(journal, client_origin):
+        # `authorizes`, not `targets`: a hostname match is enough to *list* a
+        # transaction and not nearly enough to restore one, and this is the
+        # path that writes another fabric's snapshots over live config.
+        if is_legacy(journal):
+            return CommitReport(
+                ok=False,
+                txn_id=journal.meta.txn_id,
+                state="NONE",
+                messages=[_unproven(journal, "restore")],
+            )
         return CommitReport(
             ok=False,
             txn_id=journal.meta.txn_id,
             state="NONE",
             messages=[
                 f"refusing: transaction targets Orchestrator "
-                f"{lock_origin(journal)!r} but the session is connected to "
+                f"{journal.meta.orch_origin!r} but the session is connected to "
                 f"{client_origin!r}"
             ],
         )
     caveats: list[str] = []
-    if client_origin is not None and is_legacy(journal):
-        # It matched on a hostname, which is all a format-1 journal records.
-        # Recorded *and* reported: the journal is the durable record, but the
-        # operator deciding whether to accept this restore reads the report,
-        # and a silent pass would imply the target had been verified.
-        journal.append(
-            "PROVENANCE_UNVERIFIED",
-            reason="journal predates origin recording; matched on host only",
-            orch_host=journal.meta.orch_host,
-            session_origin=client_origin,
-        )
-        caveats.append(
-            f"note: transaction {journal.meta.txn_id} predates origin recording, so it "
-            f"was matched to this session on the hostname {journal.meta.orch_host!r} "
-            f"alone. If more than one Orchestrator answers to that name, check this is "
-            f"the right one before accepting the restore."
-        )
     applied = journal.applied_refs()
     if not applied:
         # A journal with zero APPLY_START events (e.g. an interrupted Tier-0

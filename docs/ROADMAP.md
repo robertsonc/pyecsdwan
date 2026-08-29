@@ -126,10 +126,25 @@ for exactly these targets it compared equal and waved the restore through.
 Everything that persists or compares identity now keys by
 `Settings.origin`, a canonical `scheme://host[:port][/path]`, with file names
 carrying a digest of the *unsanitized* origin. `host` remains, for display
-only. Journals record both and are matched on the origin; ones written before
-it existed are still matched on their hostname, because losing an operator's
-way back is worse than the ambiguity that inherits — and a restore from one
-says so in the journal rather than implying the target was verified. The rule
+only. Identity is derived from the *effective API base*, through the same function
+the client uses to build it, so `https://orch` and `https://orch/gms/rest` —
+one endpoint — cannot become two identities the way two independent
+definitions of URL equivalence let them.
+
+Journals record both fields and are matched on the origin. Ones written before
+it existed are **listed** on a hostname match and **authorize nothing**: a
+hostname is shared by the `http://` and `https://` endpoints on that name and
+by every tenant path under it, so it cannot establish which Orchestrator a
+transaction targeted — and confirming or restoring on that basis writes one
+fabric's state over another's. Warning after the fact does not help, because
+by then the write has gone out. The history is preserved and readable; the
+operator who knows which target it belongs to says so with `ec-cli adopt`,
+and that claim is recorded in the event log. The same rule covers staged
+changes written under the old name: surfaced, never claimed, because the file
+is keyed by a display host that several origins share and first-reader
+adoption would turn unknown provenance into asserted provenance. Locks are
+held under both the old and new names while a pre-#63 lock file exists, so a
+surviving old process cannot run alongside a new one. The rule
 that production never keys state by the lossy field is not a type — both are
 `str` — so it is a test over the source with a reasoned allowlist, covering
 the test tree as well: a test that stages by the display host while the code

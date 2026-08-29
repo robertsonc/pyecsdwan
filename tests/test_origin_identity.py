@@ -58,6 +58,10 @@ ALLOWED = {
         "a local from the request URL, used only in the plaintext-URL warning"
     ),
     "src/pyecsdwan/mock/__main__.py:host": "the mock server's bind address, not an Orchestrator",
+    "src/pyecsdwan/cli/main.py:orch_host": (
+        "`adopt` reports the hostname an unadopted journal recorded, which is "
+        "the thing the operator is being asked to disambiguate"
+    ),
     "tests/test_journal.py:orch_host": "asserts the display host is still recorded",
     "tests/test_origin_identity.py:orch_host": "this file's own tests of the fallback",
 }
@@ -164,7 +168,7 @@ def test_two_origins_alike_in_their_last_48_characters_still_differ():
     tail = "x" * 60
     a = config.canonical_origin(f"https://a.example.com/{tail}")
     b = config.canonical_origin(f"https://b.example.com/{tail}")
-    assert config.origin_slug(a)[:-17] == config.origin_slug(b)[:-17]
+    assert config.origin_slug(a)[:-33] == config.origin_slug(b)[:-33]
     assert config.origin_slug(a) != config.origin_slug(b)
 
 
@@ -220,12 +224,15 @@ def test_a_format_one_journal_is_matched_on_its_host_and_marked_legacy(tmp_path)
 
     reopened = journal.TxnJournal.open(txn.dir)
     assert journal.is_legacy(reopened)
+    # Listed: broad, because anything on that hostname might be it.
     assert journal.targets(reopened, "https://orch.example.com")
-    # Matched on the host, so a different scheme matches too — that ambiguity
-    # is what format 1 recorded, and `is_legacy` is how a caller can say so.
     assert journal.targets(reopened, "http://orch.example.com")
     assert not journal.targets(reopened, "https://other.example.com")
-    assert journal.lock_origin(reopened) == "https://orch.example.com"
+    # Authorized: nothing. A hostname is shared by both schemes on that name
+    # and by every tenant path under it, so it proves nothing about the target.
+    assert not journal.authorizes(reopened, "https://orch.example.com")
+    assert not journal.authorizes(reopened, "http://orch.example.com")
+    assert not journal.authorizes(reopened, "https://orch.example.com/tenant-a")
 
 
 def test_a_format_two_journal_is_matched_exactly(tmp_path):
@@ -346,10 +353,10 @@ def test_a_matching_origin_is_not_refused(state_home):
     assert reopened.meta.state != journal.TxnState.APPLIED_UNCONFIRMED
 
 
-def test_a_legacy_journal_records_that_its_provenance_was_not_verified(state_home):
-    """A format-1 journal can only be matched on a hostname. It is still
-    recoverable — losing an operator's way back is worse — but the journal has
-    to say the target was inferred rather than checked."""
+def test_a_legacy_journal_cannot_authorize_a_restore(state_home):
+    """The review's finding: warning *after* authorizing does not help, because
+    by then another fabric's snapshots have gone out. A journal whose target
+    cannot be proven refuses until an operator adopts it."""
     from pyecsdwan import txn as txn_mod
     from pyecsdwan.registry import default_registry
 
@@ -365,12 +372,59 @@ def test_a_legacy_journal_records_that_its_provenance_was_not_verified(state_hom
         ctx=_ctx_for("https://orch.example.com"),
         registry=default_registry,
     )
+    assert not report.ok
+    assert "refusing to restore" in report.messages[0]
+    assert "ec-cli adopt --txn" in report.messages[0]
+    # Refused without touching the transaction at all.
+    assert (
+        journal.TxnJournal.open(staged_txn.dir).meta.state
+        == journal.TxnState.APPLIED_UNCONFIRMED
+    )
+
+
+def test_a_legacy_journal_cannot_be_confirmed_either(state_home):
+    """Confirming writes the marker, kills the watchdog and marks CONFIRMED —
+    it is what stops the fabric being put back, so it needs the same proof."""
+    from pyecsdwan import txn as txn_mod
+
+    staged_txn = _unconfirmed("https://orch.example.com")
+    meta = json.loads((staged_txn.dir / "meta.json").read_text())
+    del meta["orch_origin"]
+    meta["format"] = 1
+    (staged_txn.dir / "meta.json").write_text(json.dumps(meta))
+
+    report = txn_mod.confirm_pending(
+        config.Settings(orch_url="https://orch.example.com", api_key="k")
+    )
+    assert not report.ok
+    assert "refusing to confirm" in report.messages[0]
+
+
+def test_adoption_makes_a_legacy_journal_executable_and_is_recorded(state_home):
+    """The escape hatch has to exist, or preserving the history is worthless.
+    The operator is the proof, so the claim goes in the event log."""
+    staged_txn = _unconfirmed("https://orch.example.com")
+    meta = json.loads((staged_txn.dir / "meta.json").read_text())
+    del meta["orch_origin"]
+    meta["format"] = 1
+    (staged_txn.dir / "meta.json").write_text(json.dumps(meta))
+
     reopened = journal.TxnJournal.open(staged_txn.dir)
-    kinds = [e["event"] for e in reopened.events()]
-    assert "PROVENANCE_UNVERIFIED" in kinds, kinds
-    # And the operator deciding whether to accept the restore has to see it:
-    # the journal is the durable record, the report is what they read.
-    assert any("predates origin recording" in m for m in report.messages), report.messages
+    journal.adopt(reopened, "https://orch.example.com/tenant-a")
+
+    rebound = journal.TxnJournal.open(staged_txn.dir)
+    assert rebound.meta.orch_origin == "https://orch.example.com/tenant-a"
+    assert not journal.is_legacy(rebound)
+    assert journal.authorizes(rebound, "https://orch.example.com/tenant-a")
+    # And only that one: adoption records a target, it does not widen anything.
+    assert not journal.authorizes(rebound, "https://orch.example.com/tenant-b")
+    assert "ORIGIN_ADOPTED" in [e["event"] for e in rebound.events()]
+
+
+def test_adoption_cannot_re_target_an_already_bound_journal(state_home):
+    txn = _unconfirmed("https://orch.example.com/tenant-a")
+    with pytest.raises(ValueError, match="already bound"):
+        journal.adopt(txn, "https://orch.example.com/tenant-b")
 
 
 def test_a_format_two_journal_records_no_such_caveat(state_home):
@@ -443,34 +497,79 @@ def test_a_name_the_idna_codec_refuses_is_still_an_identity():
 # -- upgrading with work already staged --------------------------------------
 
 
-def test_work_staged_by_an_older_build_is_adopted_not_lost(tmp_path):
-    """The store moved to an origin-keyed name. Reading only the new name
-    would report an empty candidate to an operator who has work staged —
-    which reads as 'nothing to commit', and the work is re-done or lost."""
-    legacy = tmp_path / "orch.example.com.json"
+def _legacy_candidate(root, name="L1"):
+    legacy = root / "orch.example.com.json"
     legacy.write_text(
         json.dumps(
             {
                 "format": 1,
                 "items": [
                     {
-                        "ref_key": "interface_label/L1",
+                        "ref_key": f"interface_label/{name}",
                         "mode": "replace",
-                        "intent": {"name": "L1"},
+                        "intent": {"name": name},
                         "delete_paths": [],
                     }
                 ],
             }
         )
     )
-    store = CandidateStore("https://orch.example.com", root=tmp_path)
-    assert list(store.items) == ["interface_label/L1"]
+    return legacy
 
-    # Retired on the next save, not on read: a read-only session must not
-    # mutate state, and leaving it would let a later session read it back.
-    store.set_desired(Ref("interface_label", "L2"), {"name": "L2"})
+
+def test_work_staged_by_an_older_build_is_surfaced_but_not_claimed(tmp_path):
+    """The review's P1: the old file is keyed by a display host that several
+    origins share, so first-reader adoption turns unknown provenance into
+    asserted provenance — and two tenants would each copy it into their own
+    store. Surfaced instead, so nothing is lost and nothing is assumed."""
+    legacy = _legacy_candidate(tmp_path)
+    store = CandidateStore("https://orch.example.com", root=tmp_path)
+
+    assert store.items == {}
+    assert store.unadopted_legacy == legacy
+    assert store.legacy_pending() == ["interface_label/L1"]
+    assert legacy.exists()
+    assert not store.path.exists()
+
+
+def test_two_origins_cannot_both_claim_one_legacy_candidate(tmp_path):
+    """Both compute the same legacy path, because the old name carried only
+    the display host. Whoever adopts first takes it; the second finds nothing
+    rather than a second copy of the first one's work."""
+    _legacy_candidate(tmp_path)
+    a = CandidateStore("https://orch.example.com/tenant-a", root=tmp_path)
+    b = CandidateStore("https://orch.example.com/tenant-b", root=tmp_path)
+    assert a._legacy_path == b._legacy_path
+
+    assert a.adopt_legacy() == ["interface_label/L1"]
+    assert b.adopt_legacy() == []
+    assert list(a.items) == ["interface_label/L1"]
+    assert CandidateStore("https://orch.example.com/tenant-b", root=tmp_path).items == {}
+
+
+def test_adopting_a_legacy_candidate_retires_the_file(tmp_path):
+    legacy = _legacy_candidate(tmp_path)
+    store = CandidateStore("https://orch.example.com", root=tmp_path)
+    store.adopt_legacy()
     assert not legacy.exists()
     assert json.loads(store.path.read_text())["origin"] == "https://orch.example.com"
+    assert store.unadopted_legacy is None
+
+
+def test_a_commit_with_only_unadopted_staging_refuses_rather_than_saying_no_changes(
+    tmp_path,
+):
+    """"No changes" to an operator who staged twelve of them reads as "it was
+    lost", and they do the work again. The staging is right there; only its
+    target is unknown."""
+    from pyecsdwan import txn as txn_mod
+
+    _legacy_candidate(tmp_path)
+    store = CandidateStore("https://orch.example.com", root=tmp_path)
+    with pytest.raises(txn_mod.CommitError) as excinfo:
+        txn_mod._guard_unadopted_staging(store)
+    assert "adopt --candidate" in str(excinfo.value)
+    assert "1 change(s) staged by an older build" in str(excinfo.value)
 
 
 def test_the_new_name_wins_over_a_legacy_file(tmp_path):
@@ -569,3 +668,150 @@ def test_a_scheme_distinct_target_does_not_contend_across_processes(state_home):
     finally:
         a.kill()
         a.wait(timeout=10)
+
+
+# -- one endpoint, one identity (review P0-1) --------------------------------
+
+
+@pytest.mark.parametrize(
+    "a,b",
+    [
+        # `OrchClient` appends the fixed API suffix when it is absent, so both
+        # of these talk to exactly the same URL. Deriving identity from the
+        # typed string instead made them two of everything: #63 inverted.
+        ("https://orch.example.com", "https://orch.example.com/gms/rest"),
+        ("https://orch.example.com/", "https://orch.example.com/gms/rest/"),
+        ("orch.example.com", "https://orch.example.com/gms/rest"),
+        ("https://orch/tenant-a", "https://orch/tenant-a/gms/rest"),
+    ],
+)
+def test_one_effective_endpoint_is_one_identity(a, b):
+    assert config.canonical_origin(a) == config.canonical_origin(b)
+    assert config.api_base(a) == config.api_base(b)
+
+
+def test_identity_and_the_client_agree_on_what_the_endpoint_is():
+    """Two definitions of URL equivalence is the defect. One function, so the
+    client's base URL and the identity keying its state cannot drift apart."""
+    from pyecsdwan.client import OrchClient
+
+    for spelling in ("https://orch.example.com", "https://orch.example.com/gms/rest"):
+        settings = config.Settings(orch_url=spelling, api_key="k")
+        client = OrchClient(settings)
+        assert str(client._http.base_url).rstrip("/") == config.api_base(spelling)
+
+
+def test_a_deeper_path_is_still_a_distinct_target():
+    """Normalizing the suffix must not swallow a genuinely different base."""
+    assert config.canonical_origin("https://orch/gms/rest/gms/rest") != config.canonical_origin(
+        "https://orch"
+    )
+
+
+@pytest.mark.parametrize(
+    "a,b",
+    [
+        ("https://[2001:db8::1]", "https://[2001:0db8:0:0:0:0:0:1]"),
+        ("https://[::1]:8443", "https://[0:0:0:0:0:0:0:1]:8443"),
+    ],
+)
+def test_equivalent_ipv6_literals_are_one_identity(a, b):
+    """Re-bracketing fixes the port ambiguity and says nothing about a literal
+    written two ways; `ipaddress` gives the one compressed form."""
+    assert config.canonical_origin(a) == config.canonical_origin(b)
+
+
+def test_a_capitalized_scheme_is_not_treated_as_a_hostname():
+    """Schemes are case-insensitive, and operators paste capitalized URLs. A
+    case-sensitive check prepended a second scheme."""
+    assert config.canonical_origin("HTTPS://Orch.Example.COM") == "https://orch.example.com"
+    assert config.canonical_origin("HtTp://orch") == "http://orch"
+
+
+# -- the rolling upgrade (review P0-3b) --------------------------------------
+
+
+def test_a_pre_63_lock_is_held_alongside_the_new_one(state_home):
+    """Locks moved from the sanitized display host to an origin digest, so a
+    surviving pre-#63 process — a detached watchdog, say — and a new one take
+    different files and neither excludes the other."""
+    from pyecsdwan.locking import HostLock
+
+    root = config.lock_root()
+    root.mkdir(parents=True, exist_ok=True)
+    legacy = root / "orch.example.com.commit.lock"
+    legacy.write_text("")  # a build before #63 has run here
+
+    lock = HostLock("https://orch.example.com", "commit", timeout=0.2)
+    with lock:
+        assert [b.path for b in lock._barriers] == [legacy]
+    assert lock._barriers == []
+
+
+def test_the_barrier_excludes_a_pre_63_holder(state_home):
+    """Across processes, since that is the only place exclusion is real."""
+    from pyecsdwan.locking import HostLock, LockBusy
+
+    root = config.lock_root()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "orch.example.com.commit.lock").write_text("")
+
+    holder = _spawn_legacy_holder(state_home, "orch.example.com", "commit",
+                                  state_home / "old.ready")
+    try:
+        with pytest.raises(LockBusy):
+            HostLock("https://orch.example.com", "commit", timeout=0.5).acquire()
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
+
+
+def test_no_barrier_where_no_older_build_has_run(state_home):
+    """Otherwise two origins sharing a display host would serialize forever,
+    which is the #63 acceptance criterion this whole change exists to meet."""
+    from pyecsdwan.locking import HostLock
+
+    lock = HostLock("https://orch.example.com/tenant-a", "commit", timeout=0.2)
+    assert lock._legacy_barrier() is None
+    with lock:
+        # A different tenant is unaffected.
+        with HostLock("https://orch.example.com/tenant-b", "commit", timeout=0.5):
+            pass
+
+
+_LEGACY_HOLDER = """
+import time
+from pathlib import Path
+from pyecsdwan.locking import lock_root, _safe
+import os, sys
+# A pre-#63 build's lock: the sanitized display host, no digest.
+path = lock_root() / (_safe(sys.argv[1]) + "." + sys.argv[2] + ".lock")
+fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+import fcntl
+fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+Path(sys.argv[3]).write_text("ready")
+time.sleep(120)
+"""
+
+
+def _spawn_legacy_holder(state_home, host, scope, ready):
+    import os
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _LEGACY_HOLDER, host, scope, str(ready)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=dict(os.environ, ECSDWAN_HOME=str(state_home)),
+    )
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        if ready.exists():
+            return proc
+        if proc.poll() is not None:
+            raise AssertionError(f"legacy holder died: {proc.communicate()[1]}")
+        time.sleep(0.02)
+    proc.kill()
+    raise AssertionError("legacy holder never took the lock")

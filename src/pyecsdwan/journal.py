@@ -445,24 +445,37 @@ def unreadable_txn_dirs(root: Path | None = None) -> list[str]:
 
 
 def targets(txn: TxnJournal, origin: str) -> bool:
-    """Whether this transaction belongs to ``origin``.
+    """Whether this transaction *may* belong to ``origin`` — for listing.
 
-    Format-2 journals record the canonical origin and are matched exactly. A
-    format-1 journal recorded only the *display host*, which is precisely the
-    ambiguity #63 is about — two origins sharing a hostname wrote into one
-    pool, and nothing in the file can now separate them.
+    Deliberately broad for a format-1 journal, which recorded only a display
+    host: anything sharing that host might be it. Broad is the safe direction
+    for the two questions this answers — what to show an operator, and whether
+    to refuse to start a new transaction over a pending one — because both of
+    those fail closed by including too much.
 
-    Those are matched on the host, which keeps an upgrading operator's
-    rollback history reachable. That is deliberate and it is the lesser
-    hazard: discarding history silently would leave a fabric changed with no
-    way back, while the ambiguity it preserves only exists for someone who was
-    already running two origins behind one hostname. `is_legacy` marks them so
-    the surfaces that restore from a snapshot can say the provenance is
-    unverified rather than implying it was checked.
+    It is **not** sufficient to authorize a state change. See :func:`authorizes`.
     """
     if txn.meta.orch_origin:
         return txn.meta.orch_origin == origin
     return txn.meta.orch_host in (origin, config.display_host(origin))
+
+
+def authorizes(txn: TxnJournal, origin: str) -> bool:
+    """Whether ``origin`` may confirm, revert or roll back this transaction.
+
+    An exact match on the recorded origin, and nothing else. A hostname is not
+    proof: `orch.example.com` is shared by the `http://` and `https://`
+    endpoints on that name and by every tenant path under it, so a session on
+    one could confirm — or restore snapshots over — a transaction created
+    against another. Warning after the fact does not help; by then the write
+    has gone out.
+
+    So an unadopted format-1 journal authorizes nothing. Its history is still
+    listed (:func:`targets`) and still readable, and an operator who knows
+    which Orchestrator it belongs to can say so with :func:`adopt`. Unknown
+    provenance stays unknown until someone states it.
+    """
+    return bool(txn.meta.orch_origin) and txn.meta.orch_origin == origin
 
 
 def is_legacy(txn: TxnJournal) -> bool:
@@ -471,15 +484,27 @@ def is_legacy(txn: TxnJournal) -> bool:
     return not txn.meta.orch_origin
 
 
-def lock_origin(txn: TxnJournal) -> str:
-    """The origin whose locks and state files govern this transaction.
+def adopt(txn: TxnJournal, origin: str) -> None:
+    """Bind an unadopted journal to ``origin``, on an operator's say-so.
 
-    Format-2 journals record it. A format-1 journal predates it, so the
-    display host is canonicalized instead — a guess, but every path that
-    locks a legacy transaction makes the *same* guess, so they agree with one
-    another, which is the only property a lock actually needs.
+    The one place a hostname-level guess becomes a recorded fact, and it takes
+    a person to do it — which is the whole point: nothing in the file can
+    establish this, so the only sound source is someone who knows. Recorded in
+    the event log as well as the metadata, because an adoption is a claim
+    about provenance and an audit trail that cannot show who claimed what is
+    not an audit trail.
     """
-    return txn.meta.orch_origin or config.as_origin(txn.meta.orch_host)
+    if txn.meta.orch_origin:
+        raise ValueError(
+            f"transaction {txn.meta.txn_id} is already bound to "
+            f"{txn.meta.orch_origin!r}; adoption cannot re-target a journal"
+        )
+    origin = config.as_origin(origin)
+    txn.append("ORIGIN_ADOPTED", origin=origin, recorded_host=txn.meta.orch_host)
+    txn.meta.orch_origin = origin
+    txn.meta.orch_host = config.display_host(origin)
+    txn.meta.format = META_FORMAT
+    txn._write_meta()
 
 
 def _for_origin(txns: list[TxnJournal], origin: str | None) -> list[TxnJournal]:
@@ -517,7 +542,13 @@ def _driven_now(txn: TxnJournal, cache: dict[str, Any]) -> bool:
     """
     from pyecsdwan.locking import HostLock
 
-    origin = lock_origin(txn)
+    if is_legacy(txn):
+        # No origin recorded, so no lock can be named — and guessing one would
+        # read a lock file that belongs to some other target. Reported as not
+        # driven, which lists it for the operator; acting on it is refused
+        # separately until it is adopted, so listing it costs nothing.
+        return False
+    origin = txn.meta.orch_origin
     if origin not in cache:
         # read_owner() only reads the record; probing by acquisition would
         # contend with the very commit this is trying to detect.

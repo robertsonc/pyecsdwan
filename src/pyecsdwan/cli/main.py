@@ -836,6 +836,90 @@ def discard(ctx: typer.Context) -> None:
 
 
 @app.command()
+def adopt(
+    ctx: typer.Context,
+    txn_id: Annotated[
+        str | None,
+        typer.Option("--txn", help="Bind one pre-#63 transaction to this Orchestrator."),
+    ] = None,
+    candidate: Annotated[
+        bool,
+        typer.Option("--candidate", help="Bind pre-#63 staged changes to this Orchestrator."),
+    ] = False,
+) -> None:
+    """Bind local state written before origins were recorded to this Orchestrator.
+
+    Older builds keyed state by a display hostname, which the http:// and
+    https:// endpoints on one name — and every tenant path under it — share.
+    Such state is still listed and still readable, but it cannot confirm,
+    restore or commit anything, because nothing in it establishes which
+    Orchestrator it belongs to and a hostname is not proof.
+
+    You are the proof. Connect to the Orchestrator the state belongs to and
+    run this; the choice is recorded in the journal's event log.
+
+    With no options it reports what is adoptable and changes nothing.
+    """
+    state = _state(ctx)
+    _rt, _registry, settings = _bootstrap(state)
+    store = CandidateStore(settings.origin)
+    unproven = [t for t in journal_mod.list_txns() if journal_mod.is_legacy(t)]
+
+    if not txn_id and not candidate:
+        _report_adoptable(settings, store, unproven)
+        return
+
+    if candidate:
+        adopted = store.adopt_legacy()
+        if adopted:
+            console.print(
+                f"adopted {len(adopted)} staged change(s) into {settings.origin}: "
+                f"{', '.join(sorted(adopted))}"
+            )
+        else:
+            console.print("no unadopted staged changes found")
+
+    if txn_id:
+        match = [t for t in unproven if t.meta.txn_id == txn_id]
+        if not match:
+            bound = [t for t in journal_mod.list_txns() if t.meta.txn_id == txn_id]
+            if bound:
+                _fail(
+                    f"transaction {txn_id} is already bound to "
+                    f"{bound[0].meta.orch_origin!r}; adoption cannot re-target a journal"
+                )
+            _fail(f"no unadopted transaction {txn_id!r} found")
+        journal_mod.adopt(match[0], settings.origin)
+        console.print(f"adopted transaction {txn_id} into {settings.origin}")
+
+
+def _report_adoptable(
+    settings: config.Settings, store: CandidateStore, unproven: list[Any]
+) -> None:
+    """The no-op form. Reporting before acting matters more here than usual:
+    adoption is an assertion about provenance that cannot be checked, so the
+    operator should see exactly what they would be claiming."""
+    staged = store.legacy_pending()
+    if not staged and not unproven:
+        console.print("nothing to adopt: all local state records which Orchestrator it targets")
+        return
+    console.print(f"adoptable into {settings.origin}:")
+    if staged:
+        console.print(f"  staged changes ({len(staged)}): {', '.join(sorted(staged))}")
+        console.print("    adopt with: ec-cli adopt --candidate")
+    for t in unproven:
+        console.print(
+            f"  transaction {t.meta.txn_id} [{t.meta.state}] "
+            f"recorded host {t.meta.orch_host!r}"
+        )
+        console.print(f"    adopt with: ec-cli adopt --txn {t.meta.txn_id}")
+    console.print(
+        "\nAdopt only what you know belongs to this Orchestrator: a hostname is "
+        "shared by its http:// and https:// endpoints and by every tenant path under it."
+    )
+
+
+@app.command()
 def rollback(
     ctx: typer.Context,
     n: Annotated[
@@ -1058,8 +1142,20 @@ def render_locks_table(out: Console, rows: list[locking.LockState]) -> None:
         # The file name carries a one-way digest, so it cannot be read back as
         # an identity. Shown only when no owner record says which target it is.
         which = row.origin if row.origin else Text(row.name, style="dim")
+        if row.legacy:
+            which = Text.assemble(which, ("  (pre-#63 name)", "dim yellow"))
         table.add_row(which, row.scope, state_cell, holder, since)
     out.print(table)
+    if any(row.legacy for row in rows):
+        out.print(
+            Text(
+                "Locks marked (pre-#63 name) are also taken by this build, so a process "
+                "from before origin-keyed locks cannot run alongside one from after. "
+                "Once no such process can still be running, deleting those files ends "
+                "the barrier.",
+                style="dim",
+            )
+        )
 
 
 @show_app.command("locks")

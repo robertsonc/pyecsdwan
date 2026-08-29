@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import ipaddress
 import os
 import re
 import urllib.parse
@@ -148,6 +149,50 @@ class Settings:
 DEFAULT_PORTS = {"https": 443, "http": 80}
 
 
+#: Fixed suffix every Orchestrator API path carries. `OrchClient` appends it
+#: when the configured URL lacks it, which is why identity has to be derived
+#: through the same rule — see :func:`api_base`.
+API_SUFFIX = "/gms/rest"
+
+
+def api_base(url: str) -> str:
+    """The HTTP base an :class:`~pyecsdwan.client.OrchClient` will actually talk to.
+
+    The single definition of "the same endpoint", used by the client to build
+    its base URL and by :func:`canonical_origin` to derive identity. Two
+    definitions is what this fixes: the client already appended the API suffix
+    when the configured URL lacked it, so `https://orch` and
+    `https://orch/gms/rest` were one endpoint — while identity, derived
+    separately from the typed URL, made them two. Two shells against one
+    Orchestrator then took different commit locks and wrote different
+    journals, which is #63 in the inverse direction: one target, two
+    identities.
+    """
+    # Case-insensitive: `HTTPS://orch` is a scheme, and treating it as a bare
+    # hostname prepends a second one. Schemes are case-insensitive per RFC 3986
+    # and operators do paste capitalized URLs.
+    has_scheme = url[:8].lower().startswith(("http://", "https://"))
+    base = url if has_scheme else f"https://{url}"
+    base = base.rstrip("/")
+    if not base.endswith(API_SUFFIX):
+        base = f"{base}{API_SUFFIX}"
+    return base
+
+
+def _fold_host(host: str) -> str:
+    """One spelling per host, whether it is a name or an address literal.
+
+    `2001:0db8:0:0:0:0:0:1` and `2001:db8::1` are one address written two ways;
+    re-bracketing an IPv6 literal stops the port ambiguity but does nothing
+    about that. `ipaddress` gives the one compressed form, and answers for
+    IPv4 too, where it is a no-op for anything already well-formed.
+    """
+    try:
+        return ipaddress.ip_address(host).compressed
+    except ValueError:
+        return _fold_idn(host)
+
+
 def _fold_idn(host: str) -> str:
     """Fold the Unicode and punycode spellings of one name onto one identity.
 
@@ -193,13 +238,19 @@ def canonical_origin(url: str) -> str:
     `HTTPS://Orch.Example.COM:443/` and `https://orch.example.com` are one
     identity, and `https://orch/tenant-a` and `https://orch/tenant-b` are two.
     """
-    parsed = urllib.parse.urlsplit(url if "://" in url else f"https://{url}")
+    parsed = urllib.parse.urlsplit(api_base(url))
     scheme = (parsed.scheme or "https").lower()
     host = (parsed.hostname or "").lower()
     if not host:
         raise ValueError(f"cannot derive an Orchestrator identity from {url!r}")
-    path = parsed.path.rstrip("/")
-    return f"{scheme}://{_authority(_fold_idn(host), parsed.port, scheme)}{path}"
+    # Normalized *through* the API base so the equivalence is defined once,
+    # then shown without the fixed suffix every origin would otherwise carry —
+    # which would push the readable half of every file name off the end.
+    path = parsed.path
+    if path.endswith(API_SUFFIX):
+        path = path[: -len(API_SUFFIX)]
+    path = path.rstrip("/")
+    return f"{scheme}://{_authority(_fold_host(host), parsed.port, scheme)}{path}"
 
 
 def display_host(origin: str) -> str:
@@ -213,14 +264,19 @@ def display_host(origin: str) -> str:
 
 
 def origin_digest(origin: str) -> str:
-    """Short, collision-free key for a canonical origin.
+    """Short, collision-*resistant* key for a canonical origin.
 
     File names used to be the identity run through a lossy sanitizer, so
     ``orch:443`` and ``orch_443`` produced the same file. The digest is taken
-    over the *unsanitized* origin, so distinct targets cannot share a name
+    over the *unsanitized* origin, so distinct targets do not share a name
     however they are spelled.
+
+    128 bits, not the 64 it started at, and described as resistant rather than
+    free: this participates in an identity boundary that decides which fabric
+    a write lands on, the extra characters cost nothing in a file name, and
+    "collision-free" was a claim a truncated hash cannot make.
     """
-    return hashlib.sha256(origin.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(origin.encode("utf-8")).hexdigest()[:32]
 
 
 def origin_slug(origin: str) -> str:

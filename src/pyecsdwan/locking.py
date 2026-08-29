@@ -213,6 +213,10 @@ class HostLock:
         root = root if root is not None else lock_root()
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path = root / f"{config.origin_slug(self.origin)}.{_safe(scope)}.lock"
+        #: The pre-#63 name for this same scope, taken as well while it exists.
+        #: See `_legacy_barrier`.
+        legacy_stem = _safe(config.display_host(self.origin))
+        self._legacy_path: Path | None = root / f"{legacy_stem}.{_safe(scope)}.lock"
         self._init_state()
 
     @classmethod
@@ -236,12 +240,19 @@ class HostLock:
         lock.timeout = timeout
         lock.txn_id = None
         lock.path = path
+        # A probe inspects one file and takes no barrier: `active_locks` walks
+        # every file including the legacy ones, and a probe that acquired a
+        # second lock would contend with the very thing it is reporting on.
+        lock._legacy_path = None
         lock._init_state()
         return lock
 
     def _init_state(self) -> None:
         self._key = str(self.path)
         self._fd: int | None = None
+        #: Legacy-named locks held alongside this one, innermost last, so a
+        #: nested acquire/release pairs correctly. See `_legacy_barrier`.
+        self._barriers: list[HostLock] = []
         #: How many times *this object* contributed to the process-wide depth,
         #: so an unbalanced release through one object cannot drop a lock
         #: another object is still relying on.
@@ -249,7 +260,55 @@ class HostLock:
 
     # -- acquisition ---------------------------------------------------------
 
+    def _legacy_barrier(self) -> HostLock | None:
+        """The pre-#63 lock for this scope, if a build that used it ran here.
+
+        Locks moved from the sanitized display host to an origin digest, so a
+        process from before that change and one from after take *different*
+        files and neither excludes the other — including a detached watchdog
+        that survives the upgrade and is about to revert. During the overlap
+        both names have to be held.
+
+        Only while the old file exists, which is what makes this a transition
+        and not a permanent tax: the file outlives the lock, so its presence
+        means an older build has run on this host, and a fresh install never
+        creates one. While it is there, two origins sharing a display host
+        serialize against each other — the pre-#63 behaviour they already had,
+        so it costs correctness nothing and is simply not yet the improvement.
+        Deleting the stale file when no old process remains ends it;
+        `show locks` marks them.
+        """
+        if self._legacy_path is None or self._legacy_path == self.path:
+            return None
+        if not self._legacy_path.exists():
+            return None
+        barrier = HostLock.__new__(HostLock)
+        barrier.origin = self.origin
+        barrier.scope = self.scope
+        barrier.timeout = self.timeout
+        barrier.txn_id = self.txn_id
+        barrier.path = self._legacy_path
+        barrier._legacy_path = None  # never recurses
+        barrier._init_state()
+        return barrier
+
     def acquire(self) -> None:
+        # Always the legacy name first, then the new one. A fixed order is
+        # what makes this deadlock-free, and an old process only ever holds
+        # the first, so there is no cycle to close.
+        barrier = self._legacy_barrier()
+        if barrier is not None:
+            barrier.acquire()
+            self._barriers.append(barrier)
+            try:
+                self._acquire_own()
+            except BaseException:
+                self._barriers.pop().release()
+                raise
+            return
+        self._acquire_own()
+
+    def _acquire_own(self) -> None:
         deadline = time.monotonic() + self.timeout
         while True:
             with _HELD_GUARD:
@@ -268,6 +327,11 @@ class HostLock:
             time.sleep(_POLL_INTERVAL)
 
     def release(self) -> None:
+        self._release_own()
+        if self._barriers:
+            self._barriers.pop().release()
+
+    def _release_own(self) -> None:
         with _HELD_GUARD:
             if not self._mine:
                 return
@@ -423,6 +487,17 @@ def commit_lock(
         yield lock
 
 
+#: A post-#63 lock file ends in the origin digest. Anything else was named by
+#: a build from before it.
+_DIGEST_SUFFIX = re.compile(r"-[0-9a-f]{32}$")
+
+
+def _is_legacy_name(name: str) -> bool:
+    stem = name[: -len(".lock")] if name.endswith(".lock") else name
+    slug, _, _scope = stem.rpartition(".")
+    return not _DIGEST_SUFFIX.search(slug)
+
+
 @dataclasses.dataclass(frozen=True)
 class LockState:
     """One lock file as ``show locks`` reports it."""
@@ -437,6 +512,10 @@ class LockState:
     origin: str | None
     owner: LockOwner | None
     held: bool
+    #: Named the way builds before #63 named locks. Held alongside the new
+    #: name while it exists (see `HostLock._legacy_barrier`); once no
+    #: pre-#63 process can still be running, deleting it ends the barrier.
+    legacy: bool = False
 
 
 def active_locks(root: Path | None = None) -> list[LockState]:
@@ -457,7 +536,12 @@ def active_locks(root: Path | None = None) -> list[LockState]:
         owner = probe.read_owner()
         origin = owner.origin if owner is not None and owner.origin else None
         state = functools.partial(
-            LockState, name=entry.name, scope=probe.scope, origin=origin, owner=owner
+            LockState,
+            name=entry.name,
+            scope=probe.scope,
+            origin=origin,
+            owner=owner,
+            legacy=_is_legacy_name(entry.name),
         )
         with _HELD_GUARD:
             ours = probe._key in _HELD

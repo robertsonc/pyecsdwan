@@ -207,6 +207,10 @@ class CandidateStore:
         # saves: an operator who upgrades with work staged must not be told
         # they have none, which is how that work gets re-done or lost.
         self._legacy_path = root / f"{_legacy_name(self.origin)}.json"
+        #: Set when staging exists under the pre-#63 name and has not been
+        #: adopted. Not loaded — see `_load` — but callers must say so rather
+        #: than report an empty candidate.
+        self.unadopted_legacy: Path | None = None
         self.items: dict[str, CandidateItem] = {}
         self.lock = HostLock(self.origin, "candidate", root=lock_root, timeout=lock_timeout)
         self._load()
@@ -230,7 +234,65 @@ class CandidateStore:
     def reload(self) -> None:
         """Discard the in-memory view and re-read from disk."""
         self.items = {}
+        self.unadopted_legacy = None
         self._load()
+
+    def legacy_pending(self) -> list[str]:
+        """Ref keys sitting in an unadopted pre-#63 file, for reporting.
+
+        Read without claiming: this is what lets a caller say "12 changes were
+        staged before the upgrade" instead of "no changes", which is the
+        difference between an operator adopting them and re-doing them.
+        """
+        if self.unadopted_legacy is None:
+            return []
+        try:
+            data = json.loads(self.unadopted_legacy.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        items = data.get("items", []) if isinstance(data, dict) else []
+        return [str(e.get("ref_key")) for e in items if isinstance(e, dict)]
+
+    def adopt_legacy(self) -> list[str]:
+        """Claim the pre-#63 file for this origin, on an operator's say-so.
+
+        Serialized on the *legacy* namespace, not this origin's: the race is
+        between two different origins that share a display host and therefore
+        compute the same legacy path, so a lock keyed by this origin would not
+        exclude the one that matters. The claim and the unlink both happen
+        under it, so the second origin to arrive finds nothing rather than a
+        second copy of the first one's work.
+        """
+        if self.unadopted_legacy is None:
+            return []
+        claim = HostLock(config.display_host(self.origin), "candidate-legacy")
+        with claim, self._mutate():
+            if not self._legacy_path.exists():
+                # Won by another origin between the scan and the claim.
+                self.unadopted_legacy = None
+                return []
+            data = json.loads(self._legacy_path.read_text(encoding="utf-8"))
+            adopted = []
+            for entry in data.get("items", []):
+                mode = entry.get("mode")
+                if mode not in SUPPORTED_MODES:
+                    raise CandidateFormatError(
+                        f"candidate store {self._legacy_path} holds item "
+                        f"{entry.get('ref_key')!r} with mode {mode!r}; expected one of "
+                        f"{', '.join(sorted(SUPPORTED_MODES))}. The file has not been "
+                        f"modified."
+                    )
+                item = CandidateItem(
+                    ref_key=entry["ref_key"],
+                    mode=mode,
+                    intent=entry.get("intent", {}),
+                    delete_paths=entry.get("delete_paths", []),
+                )
+                self.items[item.ref_key] = item
+                adopted.append(item.ref_key)
+            self._legacy_path.unlink(missing_ok=True)
+            self.unadopted_legacy = None
+            return adopted
 
     def set_path(self, ref: Ref, path: list[str], value: Any) -> None:
         with self._mutate():
@@ -350,11 +412,15 @@ class CandidateStore:
         source = self.path
         if not source.exists():
             # Nothing under the origin-keyed name. A build before #63 wrote
-            # this store under the display host; adopt it rather than report
-            # an empty candidate, which would read as "no staged work".
-            if not self._legacy_path.exists():
-                return
-            source = self._legacy_path
+            # this store under the *display host*, which more than one origin
+            # can share — so the file says work was staged and cannot say for
+            # which target. Surfaced, never loaded: reading it in would let
+            # the first session to look claim it, and two tenants under one
+            # hostname would each copy the same staging into their own store
+            # (#63). `adopt_legacy` is where an operator says which it is.
+            if self._legacy_path.exists():
+                self.unadopted_legacy = self._legacy_path
+            return
         try:
             data = json.loads(source.read_text(encoding="utf-8"))
         except OSError:
@@ -448,8 +514,4 @@ class CandidateStore:
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
-        if self._legacy_path != self.path:
-            # Retired only now, after the replacement is durably in place, and
-            # only under the lock this save already holds. Leaving it would let
-            # a later session read stale staging back out of it.
-            self._legacy_path.unlink(missing_ok=True)
+
