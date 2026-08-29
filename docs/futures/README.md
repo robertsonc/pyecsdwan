@@ -116,9 +116,6 @@ the wrong implementation pass every assertion.
   (Distinct from API-key auth, which this session validated works fine
   against live gear — this item is specifically about the interactive
   username/password session-login path.)
-- **Resolver cache projection.** `/appliance` is cached whole; project it to
-  the fields actually consumed (hostName/nePk/site/model) to avoid persisting
-  inventory/recon data. File mode is already 0o600.
 - **`OrchClient.appliance_request()` has no query-param passthrough.**
   `deleteDependencies` and similar flags aren't body fields, so
   `resources/appliance_zones.py` (#19) had to bypass the helper and call

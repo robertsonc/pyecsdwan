@@ -84,6 +84,18 @@ are kept as the endpoint reference the plugins are built from — several
 research notes in `docs/research/` cite them directly. They are excluded from
 lint and type-checking; do not edit them to make a check pass.
 
+## Caching a new appliance field
+
+`pyecsdwan.resolver.APPLIANCE_FIELDS` is the whole list of `GET /appliance`
+fields written to `~/.pyecsdwan/cache/<host>.json`; everything else is dropped
+before it reaches memory or disk. Reading a dropped field raises
+`ProjectedAway` rather than answering `None`, so the failure names itself — add
+the field to that set (with a comment saying what consumes it) rather than
+working around the error. Note the constant is only safe while it is complete,
+and an empirical sweep is not enough to establish that: `id` is in the set
+because every consumer writes `nePk or id`, a branch the bundled mock never
+takes.
+
 ## Reporting an unrecognised job shape
 
 Since #64 the async-job poller allowlists success. If a real fabric returns a
