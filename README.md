@@ -197,7 +197,32 @@ journal and reports exactly what state the fabric is in. Orphaned unconfirmed
 transactions (CLI or host died) are detected on every start; recover with
 `rollback --pending`.
 
-State lives under `~/.pyecsdwan/` (journal doubles as the audit log).
+State lives under `~/.pyecsdwan/` (journal doubles as the audit log), and the
+journal comes back out as one:
+
+```bash
+ec-cli show journal                     # transactions, newest first
+ec-cli show journal --json              # the same, machine-readable
+ec-cli show journal --events            # every event as NDJSON -> a SIEM
+```
+
+Add `--txn <id>` to any of those to select one transaction; an id that is not
+in the journal is an error rather than an empty export, because a pipeline
+reading zero lines would record that nothing happened.
+
+`--events` is one self-contained record per line — stamped with its transaction
+and Orchestrator, oldest first, so a line still means something after a log
+shipper has torn it out of its file. Snapshot bodies are **redacted by
+default**: the journal is `0600` precisely because a snapshot holds a whole
+appliance object, and exporting is distribution. What survives redaction is a
+SHA-256 of the canonical body and its size, so an auditor can still prove two
+exports describe the same state — or that a restore matched what was captured —
+without ever seeing the config. `--include-snapshots` opts in.
+
+A journal directory too corrupt to open is named rather than skipped, on every
+one of these surfaces (and on stderr for `--events`, where a warning in the
+stream would break the consumer). An audit trail that quietly described a
+smaller history than the one on disk would be worse than none.
 
 ## Development
 

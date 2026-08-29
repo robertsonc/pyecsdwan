@@ -30,7 +30,8 @@ from rich.table import Table
 from rich.text import Text
 from typer.core import TyperGroup
 
-from pyecsdwan import config, desired, evidence, locking, runtime, specs, txn
+from pyecsdwan import audit, config, desired, evidence, locking, runtime, specs, txn
+from pyecsdwan import journal as journal_mod
 from pyecsdwan import registry as registry_mod
 from pyecsdwan import retry as retry_mod
 from pyecsdwan.candidate import CandidateCorruptError, CandidateStore, IntentSource
@@ -868,9 +869,107 @@ def show_commands(
 
 
 @show_app.command("journal")
-def show_journal() -> None:
-    """All journaled transactions, newest first."""
-    render.render_journal_table(console, list_txns())
+def show_journal(
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Transaction summaries as a JSON document.")
+    ] = False,
+    as_events: Annotated[
+        bool,
+        typer.Option(
+            "--events",
+            help="Every journaled event as NDJSON — the audit-trail / SIEM export.",
+        ),
+    ] = False,
+    txn_id: Annotated[
+        str | None, typer.Option("--txn", help="Limit to one transaction id.")
+    ] = None,
+    include_snapshots: Annotated[
+        bool,
+        typer.Option(
+            "--include-snapshots",
+            help="Include raw snapshot bodies in --events. Off by default: a "
+            "snapshot is a whole server object and exporting is distribution.",
+        ),
+    ] = False,
+) -> None:
+    """All journaled transactions, newest first.
+
+    `--events` streams the journal itself as NDJSON: one self-contained record
+    per line, stamped with its transaction and Orchestrator, oldest first. That
+    is the audit trail — who changed what, when, under which ownership
+    decision, and whether it was confirmed or reverted.
+
+    Snapshot bodies are redacted to a SHA-256 and a size unless
+    `--include-snapshots` says otherwise, because the journal is 0600 for a
+    reason and a log shipper is not.
+    """
+    # Flags first, before any disk walk: a rejected combination should not
+    # depend on what happens to be in the journal.
+    if as_events and as_json:
+        _fail("--events is already newline-delimited JSON; drop --json")
+    if include_snapshots and not as_events:
+        # Silently ignoring it would be bad enough for any flag. For the one
+        # flag whose whole job is to disclose config bodies, an operator who
+        # typed it and saw no bodies would conclude they had been disclosed.
+        _fail("--include-snapshots only applies to --events; a summary carries no bodies")
+
+    # Journal directories too corrupt to open. `list_txns` drops them, so
+    # without this an audit export would quietly describe a smaller journal
+    # than the one on disk — the export equivalent of a torn page.
+    corrupt = journal_mod.unreadable_txn_dirs()
+    txns = list_txns()
+    if txn_id is not None:
+        txns = [t for t in txns if t.meta.txn_id == txn_id]
+        if not txns:
+            # Not an empty export: a pipeline asking for one transaction and
+            # getting zero lines would record "nothing happened" for a typo.
+            _fail(f"no journaled transaction {txn_id!r}")
+
+    if as_events:
+        if include_snapshots:
+            # The one call here that distributes config bodies says so, the way
+            # `api` announces Tier-0. On stderr: it must reach the operator's
+            # terminal without reaching the file they are redirecting into.
+            err_console.print(
+                Text(
+                    "including raw snapshot bodies — this stream carries whole "
+                    "appliance objects and may contain credentials",
+                    style="bold yellow",
+                )
+            )
+        # Oldest first — it is a log. `list_txns` is newest-first for the table.
+        records = audit.events(reversed(txns), include_snapshots=include_snapshots)
+        for line in audit.to_ndjson(records):
+            # soft_wrap: a wrapped NDJSON line is two records, neither of which
+            # parses. Same reason `show configuration` prints raw.
+            console.print(line, markup=False, highlight=False, soft_wrap=True)
+        _warn_corrupt_journal(corrupt)
+        return
+
+    if as_json:
+        console.print_json(
+            json.dumps(
+                {"transactions": audit.summaries(txns), "unreadable": corrupt},
+                default=str,
+            )
+        )
+        return
+
+    render.render_journal_table(console, txns, corrupt)
+
+
+def _warn_corrupt_journal(names: list[str]) -> None:
+    """Same fact as the table's own warning, but for the NDJSON path — on
+    stderr, so it can never land in a stream being piped to a log shipper."""
+    if not names:
+        return
+    err_console.print(
+        Text(
+            f"warning: {len(names)} journal director(ies) could not be read and are "
+            f"absent from this export: {', '.join(names)}",
+            style="yellow",
+        )
+    )
 
 
 def render_locks_table(
@@ -914,11 +1013,16 @@ def show_locks() -> None:
 def show_pending(ctx: typer.Context) -> None:
     """Orphaned/unconfirmed transactions needing operator attention."""
     _rt, _registry, settings = _bootstrap(_state(ctx))
+    # Read before the early return: "no pending transactions" is the most
+    # dangerous place for a corrupt directory to hide, because it is the one
+    # answer an operator acts on by going home.
+    corrupt = journal_mod.unreadable_txn_dirs()
     orphans = txn.pending_rollbacks(host=settings.host)
     if not orphans:
         console.print("no pending transactions")
+        _warn_corrupt_journal(corrupt)
         return
-    render.render_journal_table(console, orphans)
+    render.render_journal_table(console, orphans, corrupt)
 
 
 # -- show version: fabric version report (#57) --------------------------------
