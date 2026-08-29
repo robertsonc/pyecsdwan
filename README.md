@@ -94,6 +94,7 @@ support status — and needs no Orchestrator connection at all.
 ```bash
 ec-cli set interface-labels global wan 3 name LTE
 ec-cli diff                     # exit 1 if changes pending -> CI drift check
+ec-cli drift                    # every instance, not just staged ones; 0/1/8
 ec-cli commit --confirm-minutes 10
 ec-cli commit                   # confirm within the window
 ec-cli rollback 1

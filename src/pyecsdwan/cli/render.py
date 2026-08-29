@@ -18,6 +18,7 @@ from pyecsdwan.cli import reference
 from pyecsdwan.cli.reference import CommandRow
 from pyecsdwan.diffing import render_diff_lines
 from pyecsdwan.journal import TxnJournal
+from pyecsdwan.reports import drift as drift_report
 from pyecsdwan.reports.bgpstate import BgpState
 
 #: Junos-style diff markers -> rich styles.
@@ -265,3 +266,60 @@ def render_command_reference(console: Console, rows: list[CommandRow]) -> None:
             style="dim",
         )
     )
+
+
+#: Drift statuses -> style. `undeclared` is dim rather than green on purpose:
+#: it is not a passing row, it is a row nobody has said anything about.
+_DRIFT_STYLES: dict[str, str] = {
+    "drift": "bold yellow",
+    "in-sync": "green",
+    "undeclared": "dim",
+    "unreadable": "bold red",
+    "unsupported": "dim cyan",
+}
+
+
+def render_drift(console: Console, report: drift_report.Report) -> None:
+    """Fabric-wide drift (epic #8).
+
+    Every row is printed, including the ones that found nothing: a report that
+    listed only drift would make an unreadable appliance and a clean one look
+    identical, which is the failure this command exists to prevent.
+    """
+    table = Table(title=f"drift ({len(report.rows)} instance(s))")
+    table.add_column("kind")
+    table.add_column("appliance")
+    table.add_column("instance")
+    table.add_column("status")
+    table.add_column("detail")
+    for row in report.rows:
+        table.add_row(
+            row.noun,
+            row.appliance or Text("-", style="dim"),
+            row.name,
+            Text(row.status.value, style=_DRIFT_STYLES.get(row.status.value, "")),
+            Text(
+                f"{row.entries} path(s): {row.detail}" if row.entries else row.detail,
+                style="dim",
+            ),
+        )
+    console.print(table)
+
+    counts = report.counts
+    console.print(
+        "  ".join(
+            f"{name}: {n}" for name, n in counts.items() if n or name in ("drift", "in-sync")
+        )
+    )
+    for note in report.notes:
+        console.print(Text(note, style="dim"))
+    if not report.complete:
+        # Said outright, not left to be inferred from a count: the whole
+        # difference between this and a report that lies is this line.
+        console.print(
+            Text(
+                f"incomplete: {len(report.inconclusive)} instance(s) could not be compared, "
+                f"so \"no drift\" is not a claim this run can make",
+                style="bold red",
+            )
+        )
