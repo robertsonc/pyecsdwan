@@ -810,7 +810,33 @@ def revert_txn_dir(
     journal = TxnJournal.open(txn_dir)
     host = journal.meta.orch_host
     with HostLock(host, "commit", root=lock_root, timeout=lock_timeout, txn_id=journal.meta.txn_id):
-        return _revert_txn_dir_locked(journal, reason, ctx, registry)
+        # Re-open *inside* the lock. The journal above was read before the
+        # wait, and waiting is exactly when it goes stale: recovery blocks on
+        # the lock a live commit is holding, that commit finishes and marks
+        # itself CONFIRMED, the lock is released, and this would then restore
+        # snapshots over work that had just succeeded (#100). The compare is
+        # against what is on disk now, not what was true when we queued.
+        fresh = TxnJournal.open(txn_dir)
+        if fresh.meta.state in TxnState.TERMINAL:
+            return CommitReport(
+                ok=False,
+                txn_id=fresh.meta.txn_id,
+                state=fresh.meta.state,
+                messages=[
+                    f"refusing recovery: transaction {fresh.meta.txn_id} reached "
+                    f"{fresh.meta.state} while this recovery waited for the commit "
+                    f"lock; it is settled and restoring it would undo a completed "
+                    f"transaction"
+                ],
+            )
+        # `fresh`, not the pre-lock `journal`. No test can tell them apart
+        # today — the callee reads `applied_refs()` and `snapshots()` from
+        # disk and touches `.meta` only for the host, which cannot change —
+        # and the mutation sweep confirmed that. It is passed anyway so the
+        # invariant holds structurally: everything past this point acts on
+        # what was re-read under the lock, and the next field someone reads
+        # from `.meta` is then correct by construction rather than by luck.
+        return _revert_txn_dir_locked(fresh, reason, ctx, registry)
 
 
 def _revert_txn_dir_locked(
