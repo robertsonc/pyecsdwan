@@ -737,6 +737,10 @@ def commit(
         report = txn.confirm_pending(settings)
         render.render_report(console, report)
         raise typer.Exit(0 if report.ok else 2)
+    # Snapshotted before the plan, and acknowledged item-by-item afterwards:
+    # another shell may stage something while this commit runs, and clearing
+    # the whole candidate on success would delete their work (#63).
+    staged = candidate.ordered_items()
     plan = txn.build_plan(rt_ctx, registry, candidate)
     if plan.empty:
         console.print("no changes")
@@ -754,7 +758,15 @@ def commit(
         rebase=rebase,
     )
     if report.ok:
-        candidate.clear()
+        kept = candidate.clear_committed(staged)
+        if kept:
+            console.print(
+                Text(
+                    f"kept {len(kept)} candidate item(s) changed since this commit "
+                    f"was planned: {', '.join(sorted(kept))}",
+                    style="yellow",
+                )
+            )
     render.render_report(console, report)
     raise typer.Exit(0 if report.ok else 2)
 

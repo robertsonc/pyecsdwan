@@ -34,7 +34,7 @@ import json
 import os
 import re
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -246,8 +246,42 @@ class CandidateStore:
             self.items.pop(ref.key(), None)
 
     def clear(self) -> None:
+        """Discard everything staged. The operator's explicit `discard`.
+
+        Not what a successful commit should call — see
+        :meth:`clear_committed`.
+        """
         with self._mutate():
             self.items = {}
+
+    def clear_committed(self, committed: Iterable[CandidateItem]) -> list[str]:
+        """Remove exactly what a commit applied, keeping anything staged since.
+
+        `commit` used to call :meth:`clear`, which takes the lock, *re-reads
+        the file* — picking up whatever another shell staged in the meantime —
+        and then wipes all of it. So shell A committing X destroyed shell B's
+        unrelated Y, silently, as the last act of a successful transaction
+        (#63).
+
+        The acknowledgement is per item and by value. An item whose key was
+        not in the commit's snapshot was staged afterwards and is not this
+        commit's to remove; an item whose *content* changed since the plan was
+        built is new intent that nobody has committed yet, so it survives too.
+        Returns the keys kept for that second reason, which the caller reports
+        — silently keeping them would be its own surprise.
+        """
+        planned = {item.ref_key: copy.deepcopy(item) for item in committed}
+        kept: list[str] = []
+        with self._mutate():
+            for key, current in list(self.items.items()):
+                snapshot = planned.get(key)
+                if snapshot is None:
+                    continue
+                if current == snapshot:
+                    del self.items[key]
+                else:
+                    kept.append(key)
+        return kept
 
     # -- reading -------------------------------------------------------------
 
