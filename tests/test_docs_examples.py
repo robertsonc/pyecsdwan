@@ -40,6 +40,7 @@ runner = CliRunner()
 #: every read, which is what a new user types first.
 SKIP_VERBS = {
     "api": "Tier-0 passthrough, deliberately uncurated",
+    "rotate-key": "mutates the OS keyring",
     "commit": "mutating",
     "diff": "needs staged state",
     "load": "needs a YAML file",

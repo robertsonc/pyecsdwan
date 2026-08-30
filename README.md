@@ -72,6 +72,14 @@ scrubbed before they are raised or journaled. TLS verification is on by default
 (`--insecure` exists, and nags). `commit confirm` requires API-key auth — a
 background watchdog cannot replay an interactive login.
 
+Secrets the *fabric* holds — BGP neighbor passwords, SNMP communities, OSPF
+auth keys — get their own treatment when they pass through staged candidates,
+rollback snapshots, or any rendered output: detected secret values are
+envelope-encrypted at rest (AES-256-GCM, key in the OS keyring or
+`ECSDWAN_ENVELOPE_KEY`) and masked in everything the tool prints or exports.
+`ec-cli rotate-key` re-seals everything under a fresh key. The model, the
+fail-closed rules, and what to back up are in `docs/secrets.md`.
+
 No Orchestrator handy? `python -m pyecsdwan.mock --port 8442` starts the
 bundled fake Orchestrator; then `ec-cli --mock 8442 shell`.
 
@@ -273,7 +281,8 @@ default**: the journal is `0600` precisely because a snapshot holds a whole
 appliance object, and exporting is distribution. What survives redaction is a
 SHA-256 of the canonical body and its size, so an auditor can still prove two
 exports describe the same state — or that a restore matched what was captured —
-without ever seeing the config. `--include-snapshots` opts in.
+without ever seeing the config. `--include-snapshots` opts in to the bodies,
+with secret-named fields still masked (`docs/secrets.md`).
 
 A journal directory too corrupt to open is named rather than skipped, on every
 one of these surfaces (and on stderr for `--events`, where a warning in the

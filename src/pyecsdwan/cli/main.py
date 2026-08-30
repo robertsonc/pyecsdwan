@@ -30,7 +30,18 @@ from rich.table import Table
 from rich.text import Text
 from typer.core import TyperGroup
 
-from pyecsdwan import audit, config, desired, evidence, locking, runtime, specs, txn
+from pyecsdwan import (
+    audit,
+    config,
+    desired,
+    evidence,
+    locking,
+    redaction,
+    runtime,
+    specs,
+    txn,
+    vault,
+)
 from pyecsdwan import journal as journal_mod
 from pyecsdwan import registry as registry_mod
 from pyecsdwan import retry as retry_mod
@@ -1031,8 +1042,9 @@ def show_journal(
         bool,
         typer.Option(
             "--include-snapshots",
-            help="Include raw snapshot bodies in --events. Off by default: a "
-            "snapshot is a whole server object and exporting is distribution.",
+            help="Include snapshot bodies in --events, with secret-named "
+            "fields masked (#106). Off by default: a snapshot is a whole "
+            "server object and exporting is distribution.",
         ),
     ] = False,
 ) -> None:
@@ -1076,8 +1088,10 @@ def show_journal(
             # terminal without reaching the file they are redirecting into.
             err_console.print(
                 Text(
-                    "including raw snapshot bodies — this stream carries whole "
-                    "appliance objects and may contain credentials",
+                    "including snapshot bodies — secret-named fields are "
+                    "masked, but this stream carries whole appliance objects "
+                    "and may contain credentials under names the redactor "
+                    "does not recognise",
                     style="bold yellow",
                 )
             )
@@ -1832,7 +1846,10 @@ def show_candidate(ctx: typer.Context) -> None:
     for item in items:
         console.print(Text(f"{item.ref_key} (mode: {item.mode})", style="bold"))
         if item.intent:
-            dumped = yaml.safe_dump(item.intent, sort_keys=True, default_flow_style=False)
+            # Redacted at the render, not in the store: commit needs the real
+            # values, a terminal never does (#106).
+            shown = redaction.redact_tree(item.intent)
+            dumped = yaml.safe_dump(shown, sort_keys=True, default_flow_style=False)
             console.print(dumped.rstrip("\n"))
         for path in item.delete_paths:
             console.print(Text(f"  delete: {'.'.join(path)}", style="red"))
@@ -2185,8 +2202,12 @@ def api(
     journal.append(
         "RAW_API",
         method=method_upper,
-        path=path,
-        params=params,
+        # Secret-named query values keep their name and a change hint only:
+        # `--param apiKey=...` must not land verbatim in an audit trail whose
+        # whole point is to be exportable (#106). The request itself sends
+        # the real values; only the record is masked.
+        path=redaction.redact_query(path),
+        params=redaction.redact_params(params),
         body_sha256=body_sha,
         retry_policy=policy.value,
         retry_reason=reason,
@@ -2217,6 +2238,25 @@ def api(
         raise
     journal.set_state(TxnState.AUDIT_ONLY, response_summary=_summarize_response(response))
     _print_response(response)
+
+
+# -- envelope-key rotation (#106) ---------------------------------------------
+
+
+@app.command("rotate-key")
+def rotate_key() -> None:
+    """Retire the secrets envelope key and re-seal all encrypted state under a new one.
+
+    Local-only: touches the OS keyring and the state directory, never the
+    Orchestrator. Run it when no commit is in flight. Admissible as a
+    top-level verb by grammar §8: it acts, nothing existing can carry it,
+    and it is neither a read intent nor a transaction transition.
+    """
+    try:
+        report = vault.rotate_key()
+    except (vault.VaultUnavailable, vault.VaultOpenError) as exc:
+        _fail(str(exc))
+    console.print(Text(f"ok: envelope key rotated; {report.summary()}", style="green"))
 
 
 # -- cache --------------------------------------------------------------------
@@ -3174,6 +3214,8 @@ def main() -> None:
         UnknownKind,
         CandidateCorruptError,
         CandidateFormatError,
+        vault.VaultUnavailable,
+        vault.VaultOpenError,
         ValueError,
     ) as exc:
         if _DEBUG:
