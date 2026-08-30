@@ -369,8 +369,8 @@ alongside #106, which owns the credential half.
 ## Parity map (Orchestrator UI area → code status)
 
 **What ✅ means here, precisely (#66).** It means the code shipped and is green
-against the bundled mock Orchestrator. As of 2026-08-30 one curated resource — `appliance/banners` — is
-**`live-change-and-rollback-verified`**, four more are
+against the bundled mock Orchestrator. As of 2026-08-30 two curated resources — `appliance/banners` and
+`appliance/bgp` — are **`live-change-and-rollback-verified`**, three more are
 **`live-no-op-write-verified`**, and 33 are **`live-read-verified`**,
 against Orchestrator 9.7.0.43282 / ECOS 9.7.0.0_109184: `fetch()` and `normalize()` were run on a real fabric,
 normalize is idempotent on those payloads, and a canonical state diffed against
@@ -380,11 +380,11 @@ drift (`docs/sitrep/2026-08-30-live-read.md`). The three that are not
 — `appliance/vrrp`, `security-policy`, `ip-service-group` — had nothing of that
 kind configured to read.
 
-For every row except `appliance/banners` it still does **not** mean anyone has
-run a write against real gear — level 4 included, since a no-op round trip
-produces an empty plan and an empty plan writes nothing. **Exactly one
-resource has live change-and-rollback evidence.** Forty of the 41 write paths
-have still never been executed and rolled back on a fabric at a recorded
+For every row except `appliance/banners` and `appliance/bgp` it still does
+**not** mean anyone has run a write against real gear — level 4 included, since a no-op round trip
+produces an empty plan and an empty plan writes nothing. **Exactly two
+resources have live change-and-rollback evidence.** Thirty-nine of the 41 write
+paths have still never been executed and rolled back on a fabric at a recorded
 version. That remains the state of nearly all of them, which is why it is stated once here rather than
 repeated in every cell — a per-row claim maintained by hand is a claim that
 drifts. The machine-readable answer is

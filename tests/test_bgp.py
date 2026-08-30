@@ -18,7 +18,7 @@ import pyecsdwan.resources  # noqa: F401 - registers the built-in plugins
 from pyecsdwan import config, txn
 from pyecsdwan.candidate import CandidateStore
 from pyecsdwan.client import OrchClient
-from pyecsdwan.contract import Ctx, Owned, Ref, Reversibility, Scope, Tier
+from pyecsdwan.contract import Ctx, JobOutcome, Owned, Ref, Reversibility, Scope, Tier
 from pyecsdwan.registry import default_registry
 from pyecsdwan.resolver import Resolver
 from pyecsdwan.resources.bgp import Bgp
@@ -330,3 +330,55 @@ def test_list_refs_enumerates_every_appliance(world: dict[str, Any]) -> None:
     refs = Bgp().list_refs(ctx)
     assert {r.appliance for r in refs} == {"HUB1-EC", "BR1-EC", "BR2-EC"}
     assert all(r.kind == "appliance/bgp" and r.name == "config" for r in refs)
+
+
+def test_normalize_drops_the_mirrored_neighbour_map() -> None:
+    """`bgp/config/system` echoes a `neighbor` map mirroring the standalone
+    neighbour table. Keeping it made the canonical state hold neighbours twice,
+    so a changeset adding a peer produced a desired state whose
+    `system.neighbor` was stale by construction — and post-apply verify failed
+    every time, on real gear.
+
+    No read-only check can catch this. With no change the two copies agree, so
+    idempotency passes, a self-diff is empty, and a no-op round trip is clean.
+    It took a live level-5 write to surface (2026-08-30, Orchestrator 9.7).
+    """
+    raw = {
+        "system": {"asn": 64501, "enable": True, "neighbor": {"10.0.0.1": {"remote_as": 65001}}},
+        "neighbors": {"10.0.0.1": {"remote_as": 65001}},
+    }
+    canonical = Bgp().normalize(raw)
+    assert "neighbor" not in canonical["system"], (
+        "the mirrored map is a derived view; keeping it makes desired state "
+        "stale the moment a peer changes"
+    )
+    assert canonical["neighbors"] == {"10.0.0.1": {"remote_as": 65001}}
+
+
+def test_the_write_re_derives_the_mirror_from_the_authoritative_table() -> None:
+    """Stripping it from canonical state must not change the wire payload: the
+    appliance is still sent a system object carrying `neighbor`, but built from
+    the neighbour table being written rather than from whatever the last read
+    happened to carry."""
+    posted: list[tuple[str, object]] = []
+
+    class _Client:
+        def appliance_request(self, method, ne_pk, path, json_body=None, **kw):
+            posted.append((path, json_body))
+            return {}
+
+    class _Ctx:
+        client = _Client()
+        resolver = type("R", (), {"ne_pk_for": staticmethod(lambda n: "3.NE")})()
+
+        @staticmethod
+        def save_changes(ne_pks, description=""):
+            return JobOutcome(key="k", state="SUCCESS", detail="ok")
+
+    desired = {"system": {"asn": 64501}, "neighbors": {"10.0.0.1": {"remote_as": 65001}}}
+    Bgp()._write(_Ctx(), Ref(kind="appliance/bgp", name="config", appliance="BR1-EC"),
+                 desired, "apply")
+    system_body = next(body for path, body in posted if path.endswith("system"))
+    assert system_body["neighbor"] == desired["neighbors"], (
+        "the system POST must carry the neighbours actually being written"
+    )
