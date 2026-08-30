@@ -242,31 +242,48 @@ def test_the_ledger_note_says_what_the_live_reads_do_and_do_not_buy() -> None:
     note = evidence.ledger().note
     assert "live-read-verified" in note
     assert "docs/live-validation.md" in note
-    # The limit, stated in the file rather than left to be inferred.
-    assert "no write path" in note.lower()
+    # The limit, stated in the file rather than left to be inferred. It is no
+    # longer "no write path has been verified" — one has — so the note must
+    # scope the claim instead of dropping it.
+    lowered = note.lower()
+    assert "live-change-and-rollback-verified" in lowered
+    assert "every other write" in lowered or "no other write" in lowered
 
 
-def test_no_record_claims_a_verified_write_path() -> None:
-    """The claim the parity map makes, enforced against the data.
+def test_every_verified_write_path_is_backed_by_its_four_behaviours() -> None:
+    """The guard changed shape when the first write path was verified.
 
-    The threshold is level **5**, not 4, and the difference matters because
-    level 4 is named `live-no-op-write-verified` and verifies no write path at
-    all: a no-op round trip produces an empty plan, and an empty plan writes
-    nothing. It proves the resource does not invent phantom drift. Only level 5
-    — a real change, verified, rolled back and persisted — says the write path
-    works, and `docs/live-validation.md` calls it "the floor for calling a
-    write path supported".
+    It used to assert nothing reached level 5. `appliance/banners` did on
+    2026-08-30, so the useful invariant is no longer "nothing claims it" but
+    "anything claiming it can show the work": a real change applied, verified
+    against freshly fetched state, rolled back, and persisted to flash.
 
-    A ledger that quietly acquired a level-5 entry would make
-    `show coverage --evidence` tell an operator their write paths were tested
-    on real gear when they were not.
+    `Record.validate()` enforces the same thing at load. This says it again
+    where a reader will look, because the failure it prevents — a resource
+    quietly promoted without the rollback half — is the one that makes
+    `show coverage --evidence` tell an operator their write path is supported
+    when only the apply was ever tried.
     """
-    written = [
+    required = {"real-change", "post-apply-verification", "rollback", "save-persistence"}
+    for record in evidence.ledger().records.values():
+        if record.level < evidence.Evidence.LIVE_CHANGE_AND_ROLLBACK_VERIFIED:
+            continue
+        missing = required - set(record.behaviors)
+        assert not missing, f"{record.kind} claims level 5 without witnessing {missing}"
+        assert record.source, f"{record.kind} claims level 5 with no source to re-read"
+
+
+def test_nothing_claims_production_supported() -> None:
+    """Level 6 needs the four failure paths — reboot persistence, a
+    template-owned refusal, an injected job failure, a permission denial.
+    None has been exercised, and the ladder's top rung is the one most likely
+    to be claimed by momentum."""
+    top = [
         r.kind
         for r in evidence.ledger().records.values()
-        if r.level >= evidence.Evidence.LIVE_CHANGE_AND_ROLLBACK_VERIFIED
+        if r.level >= evidence.Evidence.PRODUCTION_SUPPORTED
     ]
-    assert written == [], f"{written} claim a verified write path"
+    assert top == [], f"{top} claim production-supported"
 
 
 def test_a_level_four_record_does_not_imply_a_working_write_path() -> None:
