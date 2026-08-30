@@ -233,6 +233,16 @@ class Bgp(Resource):
             return None
         system_raw = raw.get("system") or {}
         system = _mapping_copy(system_raw, "bgp system config")
+        # `bgp/config/system` echoes a `neighbor` map mirroring the standalone
+        # neighbour table. It is a *derived view*, and keeping it made the
+        # canonical state hold neighbours twice — so a changeset that added a
+        # peer produced a desired state whose `system.neighbor` was stale by
+        # construction, and post-apply verify failed every time. It is dropped
+        # here and re-derived in `_write`, so one representation is
+        # authoritative and the wire payload still carries what the appliance
+        # expects. Found by a live level-5 run; no read-only check can see it,
+        # because with no change the two copies agree (#66).
+        system.pop("neighbor", None)
         system = {key: system[key] for key in sorted(system)}
         neighbors = _neighbor_table(raw.get("neighbors") or {})
         return {"system": system, "neighbors": neighbors}
@@ -251,8 +261,13 @@ class Bgp(Resource):
     def _write(self, ctx: Ctx, ref: Ref, desired: RawState, action: str) -> ApplyResult:
         ne_pk = self._ne_pk(ctx, ref)
         desired_dict = desired if isinstance(desired, dict) else {}
-        system = desired_dict.get("system") or {}
+        system = dict(desired_dict.get("system") or {})
         neighbors = desired_dict.get("neighbors") or {}
+        # Re-attach the mirror `normalize` stripped, from the authoritative
+        # table rather than from whatever the last read happened to carry. The
+        # wire shape is unchanged; what changes is that it is now current.
+        if neighbors:
+            system["neighbor"] = neighbors
 
         ctx.client.appliance_request("POST", ne_pk, _SYSTEM_PATH, json_body=system)
         ctx.client.appliance_request("POST", ne_pk, _NEIGHBOR_PATH, json_body=neighbors)

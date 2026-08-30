@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "note": "One curated resource \u2014 appliance/banners \u2014 is live-change-and-rollback-verified against Orchestrator 9.7.0.43282 / ECOS 9.7.0.0_109184 (2026-08-30): a real change applied, verified on the appliance, confirmed, rolled back, and persisted to flash at both ends. Four more are live-no-op-write-verified and 33 are live-read-verified. Level 5 is the floor for calling a write path supported, so exactly one write path in this repository has met that floor; every other write is still code that has not been applied and rolled back on real gear. A programmatic equivalent of the level-4 check passed for 33 write-capable kinds with zero phantom drift, recorded as supporting evidence in docs/sitrep/2026-08-30-live-read.md rather than promoted, because the ledger records levels by the procedure actually run. Three kinds stay at mock-verified because nothing of that kind is configured on the observed fabric. docs/live-validation.md is the protocol, including the four failure paths level 6 needs and that none has exercised.",
+  "note": "Two curated resources \u2014 appliance/banners and appliance/bgp \u2014 are live-change-and-rollback-verified against Orchestrator 9.7.0.43282 / ECOS 9.7.0.0_109184 (2026-08-30): a real change applied, verified on the appliance, confirmed, rolled back, and persisted to flash at both ends. Three more are live-no-op-write-verified and 33 are live-read-verified. Level 5 is the floor for calling a write path supported, so exactly two write paths in this repository have met that floor; every other write is still code that has not been applied and rolled back on real gear. A programmatic equivalent of the level-4 check passed for 33 write-capable kinds with zero phantom drift, recorded as supporting evidence in docs/sitrep/2026-08-30-live-read.md rather than promoted, because the ledger records levels by the procedure actually run. Three kinds stay at mock-verified because nothing of that kind is configured on the observed fabric. docs/live-validation.md is the protocol, including the four failure paths level 6 needs and that none has exercised.",
   "support": {
     "orchestrator": [],
     "ecos": [],
@@ -67,15 +67,19 @@
     },
     {
       "kind": "appliance/bgp",
-      "level": "live-no-op-write-verified",
-      "notes": "Level 4 by the documented procedure (docs/live-validation.md): show -> load -> diff empty -> commit -> diff still empty, with no transaction journaled because the plan was empty. Shape: nested system + peer-keyed neighbours.",
+      "level": "live-change-and-rollback-verified",
+      "notes": "Full level-5 cycle on S1-ecv-02 (13.NE): a placeholder peer 192.0.2.77 (RFC 5737) added under a confirm window, verified present with both working EVPN peers byte-identical, confirmed, rolled back, and the result byte-identical to the pre-change baseline for both the neighbour table and the system object. hasUnsavedChanges False at both ends. Needed NO --override-template: the bgp template governs timers, not peers (spec 004). Two defects had to be fixed first, both invisible to any read-only check \u2014 see the sitrep. A peer create must carry a COMPLETE object: the appliance defaults password/rtmap_inbound/rtmap_outbound to '' and strict verify then fails, which is D7's materialization requirement and is T8's to solve generally.",
       "orchestrator": "9.7.0.43282",
       "ecos": "9.7.0.0_109184",
       "auth_mode": "api-key",
       "observed": "2026-08-30",
       "behaviors": [
         "live-read",
-        "no-op-round-trip"
+        "no-op-round-trip",
+        "real-change",
+        "post-apply-verification",
+        "rollback",
+        "save-persistence"
       ],
       "source": "docs/sitrep/2026-08-30-live-read.md"
     },
