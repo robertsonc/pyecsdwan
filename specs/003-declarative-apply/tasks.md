@@ -16,7 +16,7 @@ linked pull request identifies work already drafted but not approved.
 | T5 | Separate rollback-private secrets from public plan/audit state | T0 | Seeded secrets absent from plaintext/output; encrypted rollback remains functional | #106 |
 | T6 | Complete ownership and shared-write-target preflight | T0, T2 | Every enabled kind has fail-closed ownership and target declarations; conflicts are structured and pre-write | #20, #69 |
 | T7 | Implement the versioned declaration envelope and atomic loader | T0, T2 | R1–R5 pass; empty/invalid input performs no API access; canonical declaration digest is stable | #98 |
-| T8 | Add per-resource declarative capability and safe materialization | T5, T6, T7 | Registry coverage is total; unsafe unknown/redacted fields block; capability matches evidence | #98 |
+| T8 | Add per-resource declarative capability and safe materialization | T5, T6, T7 | Registry coverage is total; unsafe unknown/redacted fields block; capability matches evidence | #126 |
 | T9 | Build the shared live+declared intent universe | T7, T8 | R6–R9 pass; desired-only creates are visible; list failure is incomplete; undeclared is out of scope | #102 |
 | T10 | Extract one non-mutating preflight for drift, dry-run, and apply | T3, T6, T9 | R10–R12 and R16 pass; same plan/guards on every path; apply revalidates under lock | #98 |
 | T11 | Implement explicit absent declarations for proven-safe resources | T4, T8, T10 | No implicit deletion; capability/deletability checked; delete and restore are live verified |  |
