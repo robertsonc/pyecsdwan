@@ -67,7 +67,20 @@ from pyecsdwan.registry import Registry
 
 
 class CommitError(Exception):
-    """Commit refused or failed; message is operator-facing."""
+    """Commit refused or failed; message is operator-facing.
+
+    ``collisions`` carries the shared-write-target conflicts structurally when
+    that is why the commit refused (#69). The message says the same thing in
+    prose, and prose is what an operator reads — but "conflicts are found
+    before the first API write" is worth nothing to a pipeline that can only
+    regex an error string, so the objects travel with it. Rendering them into
+    a command's JSON output is T12's, which owns the shared result schema;
+    this is the data that surface will carry.
+    """
+
+    def __init__(self, message: str, collisions: tuple[Collision, ...] = ()) -> None:
+        super().__init__(message)
+        self.collisions = collisions
 
 
 #: The detached watchdog's revert waits far longer for the commit lock than an
@@ -119,6 +132,16 @@ class Collision:
 
     def __str__(self) -> str:
         return f"{self.target}: {', '.join(self.refs)}"
+
+    def as_json(self) -> dict[str, Any]:
+        """The stable machine-readable form (#69).
+
+        Both fields, always: the target alone does not say what conflicts, and
+        the refs alone do not say what they conflict *over*. ``refs`` is a list
+        and stays sorted by `_write_collisions`, so a consumer diffing two runs
+        sees a real change rather than dict ordering.
+        """
+        return {"target": self.target, "refs": list(self.refs)}
 
 
 @dataclasses.dataclass
@@ -653,7 +676,8 @@ def _guard(
             + "; ".join(str(c) for c in collisions)
             + ". Whichever applies second overwrites the first (deployment posts the "
             "whole object it computed at plan time, so ordering does not save it). "
-            "Commit them separately."
+            "Commit them separately.",
+            collisions=tuple(collisions),
         )
 
     # `blocks_write`, not `state is OWNED`: UNKNOWN refuses on exactly the same
