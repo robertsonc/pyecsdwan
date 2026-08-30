@@ -531,3 +531,34 @@ def test_priorities_are_derived_from_the_template_not_a_fixed_band(ctx: Ctx) -> 
     for local in ("20000", "1600"):
         verdict = ownership.resolve(ctx, res, NE_PK, _Diff(("data", "map1", "prio", local)))
         assert verdict.state is Owned.UNOWNED, f"prio {local} should be local"
+
+
+def test_ownership_does_not_share_a_cache_key_with_the_resolver() -> None:
+    """Both read `/template/templateGroups` and keep different shapes of it.
+
+    `Resolver.template_groups()` caches a list of group *names*;
+    `ownership._template_groups` caches the full group objects, because it
+    needs the section bodies. They cached under the same key for one commit,
+    and whichever ran first won: `template-group.list_refs` then built refs
+    whose name was an entire group object, and the fetch after it raised
+    `InvalidURL: URL component 'query' too long`.
+
+    Nothing in the type system stops this — both are `list` — and no mock test
+    hit it, because it needs the two callers in one process against one cache.
+    The live read sweep is where the orderings finally met.
+    """
+    assert ownership._GROUP_BODIES_KEY != "template_groups"
+
+
+@respx.mock
+def test_the_two_readers_do_not_poison_each_other(ctx: Ctx) -> None:
+    """The behaviour, not just the constant: ask both, in the order that broke."""
+    groups = [{"name": "Branch-Std", "templates": [{"name": "bgp", "value": {}}]}]
+    respx.get(GROUPS).mock(return_value=httpx.Response(200, json=groups))
+
+    ownership.known_sections(ctx)  # ownership first — the poisoning order
+    names = ctx.resolver.template_groups()
+
+    assert names == ["Branch-Std"], (
+        f"resolver got {names!r}; a group object leaked through a shared key"
+    )

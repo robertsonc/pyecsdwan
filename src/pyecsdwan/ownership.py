@@ -317,6 +317,15 @@ def known_sections(ctx: Ctx) -> frozenset[str]:
     return frozenset(names)
 
 
+#: Cache key for the full group bodies. Deliberately *not* "template_groups":
+#: `Resolver.template_groups()` already owns that key and stores a list of
+#: group *names*, so sharing it made whichever call ran first poison the other
+#: — `template-group.list_refs` built refs whose name was an entire group
+#: object, and the fetch that followed produced an InvalidURL. Found by the
+#: live read sweep, which is the only place the two orderings met.
+_GROUP_BODIES_KEY = "ownership_template_group_bodies"
+
+
 def _template_groups(ctx: Ctx) -> list[dict[str, Any]]:
     """Every template group with its section bodies, read once per run.
 
@@ -336,7 +345,7 @@ def _template_groups(ctx: Ctx) -> list[dict[str, Any]]:
         return [g for g in raw if isinstance(g, dict)]
 
     try:
-        groups = ctx.resolver.cached("template_groups", fetch)
+        groups = ctx.resolver.cached(_GROUP_BODIES_KEY, fetch)
     except OrchApiError as exc:
         raise Unreadable(f"template groups unreadable: {exc}") from exc
     return groups if isinstance(groups, list) else []

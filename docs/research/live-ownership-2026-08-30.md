@@ -147,6 +147,48 @@ appliances is correct for this reason and should not be "fixed" to filter them.
 * Three `test_live_*_read_only` tests called `config.load_settings()`, which
   does not exist. Gated on `ECSDWAN_ORCH_URL`, so they had never run anywhere.
 
+## 7. Live read sweep — all 41 curated kinds
+
+Run after the ownership rework, read-only, against the four reachable
+appliances (S3 was in maintenance).
+
+**41 kinds, 0 problems.** Every kind that could be read is idempotent
+(`normalize(normalize(x)) == normalize(x)`) and produces no phantom drift
+(a canonical state diffed against itself is empty) — on *real* payloads, which
+is the property the promotion checklist asks for and which the mock could only
+ever suggest.
+
+Ownership after the rework, on a fabric whose Default Template Group selects 17
+sections:
+
+| Verdict | Kinds |
+|---|---|
+| OWNED | acl, banners, bgp, inbound-shaper, loopback, mgmt-services, optimization-map, ospf, qos-map, route-map, security-maps, shaper, snmp |
+| UNOWNED | logging, routes |
+| UNKNOWN (fails closed) | deployment, dhcp, nat-maps, nat-pools, zones |
+
+The five UNKNOWNs are the mappings whose section names the fabric does not
+have. That is the correct answer and the one stage 1 introduced; before it they
+were a confident "unowned".
+
+Four kinds read nothing. Three are genuinely empty on this fabric — `vrrp`
+returns `[]` from the appliance, and `security-policy`/`ip-service-group` have
+nothing configured. The fourth was a bug, below.
+
+### The sweep found a regression the rework had introduced
+
+`template-group` read 0 refs and raised
+`InvalidURL: URL component 'query' too long`. `ownership._template_groups`
+cached the full group bodies under the key `template_groups` — which
+`Resolver.template_groups()` already owned for a list of group *names*.
+Whichever ran first won, so `template-group.list_refs` built refs whose name
+was an entire group object.
+
+Nothing in the type system stops this: both values are `list`. No mock test hit
+it either, because it needs both callers in one process against one cache. The
+sweep is where the orderings met. Fixed by namespacing the key, with a test on
+the constant *and* on the behaviour in the order that broke.
+
 ## Suggested shape for the rework
 
 Ownership becomes a question about **the fields being changed**, answered from
