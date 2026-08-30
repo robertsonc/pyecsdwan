@@ -216,8 +216,12 @@ def build_plan(ctx: Ctx, registry: Registry, candidate: IntentSource) -> Plan:
         # template push because there is nothing to revert. An unchanged item
         # keeps the UNOWNED default rather than the UNKNOWN one, so it never
         # trips the guard on a check that was deliberately skipped.
+        # The diff goes with the question (spec 004 D1): "would a template
+        # revert *this*" is answerable where "does a template govern this kind"
+        # is not. Adding a BGP peer is local even on an appliance whose `bgp`
+        # section is selected, because that template governs timers, not peers.
         ownership = (
-            resource.managed_by(ctx, ref)
+            resource.managed_by(ctx, ref, diff)
             if diff.entries
             else Ownership.unowned("no change staged for this instance")
         )
@@ -498,7 +502,9 @@ def _commit_locked(
         # accept the risk, and this costs two round trips per item.
         fresh_ownership = item.ownership
         if not override_template:
-            fresh_ownership = item.resource.managed_by(ctx, item.ref)
+            # Re-checked under the lock with the same diff, so the answer is
+            # about the same change the first check saw.
+            fresh_ownership = item.resource.managed_by(ctx, item.ref, item.diff)
             if fresh_ownership.blocks_write:
                 newly_blocked.append((item.ref.key(), fresh_ownership))
         work.append(

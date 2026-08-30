@@ -403,7 +403,7 @@ class _PolicyMaps(Resource):
 
     # -- ownership -------------------------------------------------------------
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+    def managed_by(self, ctx: Ctx, ref: Ref, diff: Diff | None = None) -> Ownership:
         ne_pk = self._ne_pk(ctx, ref)
         # Per-object precision first (routes.py #15 pattern): anything the
         # fabric itself flagged gms_marked is server-owned regardless of what
@@ -412,7 +412,7 @@ class _PolicyMaps(Resource):
             return Ownership.owned(
                 f"gms (gms_marked entry present in {self.ecos_path} on this appliance)"
             )
-        return ownership.owning_group(ctx, self.kind, ne_pk)
+        return ownership.resolve(ctx, self, ne_pk, diff)
 
 
 def _desired_doc(ecos_path: str) -> str:

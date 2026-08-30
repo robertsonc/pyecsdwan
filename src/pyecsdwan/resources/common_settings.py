@@ -391,9 +391,9 @@ class _ApplianceSetting(Resource):
 
     # -- ownership ------------------------------------------------------------
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+    def managed_by(self, ctx: Ctx, ref: Ref, diff: Diff | None = None) -> Ownership:
         ne_pk = self._ne_pk(ctx, ref)
-        return ownership.owning_group(ctx, self.kind, ne_pk)
+        return ownership.resolve(ctx, self, ne_pk, diff)
 
 
 # == SNMP =====================================================================

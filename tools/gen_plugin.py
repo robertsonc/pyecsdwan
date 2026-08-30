@@ -890,7 +890,7 @@ def _rollback_method(
 
 def _managed_by_method(endpoint: specs.Endpoint) -> list[str]:
     return [
-        "    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:",
+        "    def managed_by(self, ctx: Ctx, ref: Ref, diff: Diff | None = None) -> Ownership:",
         *_docstring(
             "        ",
             "Template ownership for this appliance-scope section.",

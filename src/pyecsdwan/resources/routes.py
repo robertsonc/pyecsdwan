@@ -256,13 +256,13 @@ class Routes(Resource):
         ordered = {cidr: prefixes[cidr] for cidr in sorted(prefixes, key=_sort_key)}
         return {"prefix": ordered}
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+    def managed_by(self, ctx: Ctx, ref: Ref, diff: Diff | None = None) -> Ownership:
         ne_pk = self._ne_pk(ctx, ref)
         # Per-object precision first: a route the fabric itself flagged
         # gms_marked is server-owned regardless of what any template selects.
         if _has_gms_marked(self.fetch(ctx, ref)):
             return Ownership.owned("gms (gms_marked route entry present on this appliance)")
-        return ownership.owning_group(ctx, self.kind, ne_pk)
+        return ownership.resolve(ctx, self, ne_pk, diff)
 
     # -- write side -------------------------------------------------------------
 

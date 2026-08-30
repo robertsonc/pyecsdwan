@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -421,3 +422,112 @@ def test_a_partly_stale_mapping_can_still_match(ctx: Ctx) -> None:
 
     verdict = ownership.owning_group(ctx, "appliance/inbound-shaper", NE_PK)
     assert verdict.state is Owned.OWNED
+
+
+# -- spec 004: ownership is about the change ---------------------------------
+
+
+class _Res:
+    """Minimal stand-in carrying just what `resolve` reads off a resource."""
+
+    def __init__(self, kind: str, governs: tuple[str, ...] = ()) -> None:
+        self.kind = kind
+        self.template_governs = governs
+
+
+class _Diff:
+    def __init__(self, *paths: tuple[str, ...]) -> None:
+        self.entries = [SimpleNamespace(path=p) for p in paths]
+
+
+@respx.mock
+def test_a_local_subtree_change_is_not_owned(ctx: Ctx) -> None:
+    """R1, the case that started spec 004.
+
+    The `bgp` section is selected, so the coarse verdict is OWNED. The `bgp`
+    template governs timers and per-peer defaults and declares no peer, so
+    adding one is locally significant and must not need --override-template.
+    """
+    _associated("Branch-Std")
+    _selects("bgp")
+    verdict = ownership.resolve(
+        ctx, _Res("appliance/bgp", ("system",)), NE_PK,
+        _Diff(("neighbors", "192.0.2.77")),
+    )
+    assert verdict.state is Owned.UNOWNED
+    assert not verdict.blocks_write
+
+
+@respx.mock
+def test_a_governed_subtree_change_is_still_owned(ctx: Ctx) -> None:
+    """R2. The same template that does not govern peers does govern `ka`."""
+    _associated("Branch-Std")
+    _selects("bgp")
+    verdict = ownership.resolve(
+        ctx, _Res("appliance/bgp", ("system",)), NE_PK, _Diff(("system", "ka")),
+    )
+    assert verdict.state is Owned.OWNED
+    assert verdict.blocks_write
+
+
+@respx.mock
+def test_a_change_spanning_both_refuses_whole(ctx: Ctx) -> None:
+    """D3. `bgp` POSTs the whole object, so a partial apply has no wire
+    representation — one governed path makes the changeset governed."""
+    _associated("Branch-Std")
+    _selects("bgp")
+    verdict = ownership.resolve(
+        ctx, _Res("appliance/bgp", ("system",)), NE_PK,
+        _Diff(("neighbors", "192.0.2.77"), ("system", "ka")),
+    )
+    assert verdict.state is Owned.OWNED
+
+
+@respx.mock
+def test_without_a_declaration_nothing_narrows(ctx: Ctx) -> None:
+    """The fail-closed default. No declared subtree and no derived priorities
+    is *no evidence*, and absence of evidence must not read as 'local'."""
+    _associated("Branch-Std")
+    _selects("bgp")
+    _vocabulary("bgp")
+    respx.get(GROUPS).mock(
+        return_value=httpx.Response(
+            200, json=[{"name": "Branch-Std", "templates": [{"name": "bgp", "value": {}}]}]
+        )
+    )
+    verdict = ownership.resolve(
+        ctx, _Res("appliance/bgp"), NE_PK, _Diff(("neighbors", "192.0.2.77")),
+    )
+    assert verdict.state is Owned.OWNED
+
+
+@respx.mock
+def test_no_diff_asks_the_coarse_question(ctx: Ctx) -> None:
+    """A display surface with no change in hand still gets an answer, and it is
+    the conservative one every caller got before D1."""
+    _associated("Branch-Std")
+    _selects("bgp")
+    assert ownership.resolve(ctx, _Res("appliance/bgp", ("system",)), NE_PK).state is Owned.OWNED
+
+
+@respx.mock
+def test_priorities_are_derived_from_the_template_not_a_fixed_band(ctx: Ctx) -> None:
+    """D2. `optmap` asserts 1000/1490/1500/1510 on 9.7, so a change to 1490 is
+    governed and one to 20000 is local — and so is 1600, which a hard-coded
+    1000-9999 band would refuse even though the template never pushes it."""
+    _associated("Branch-Std")
+    _selects("optmap")
+    respx.get(GROUPS).mock(
+        return_value=httpx.Response(200, json=[{
+            "name": "Branch-Std",
+            "templates": [{"name": "optmap", "value": {"data": {"map1": {"prio": {
+                "1000": {}, "1490": {}, "1500": {}, "1510": {}}}}}}],
+        }])
+    )
+    res = _Res("appliance/optimization-map")
+    governed = ownership.resolve(ctx, res, NE_PK, _Diff(("data", "map1", "prio", "1490")))
+    assert governed.state is Owned.OWNED
+
+    for local in ("20000", "1600"):
+        verdict = ownership.resolve(ctx, res, NE_PK, _Diff(("data", "map1", "prio", local)))
+        assert verdict.state is Owned.UNOWNED, f"prio {local} should be local"

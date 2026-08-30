@@ -147,7 +147,7 @@ class AppliancePostVirtualifVtiByVtiName(Resource):
             "diff or commit can use it. See docs/plugin-promotion.md for the promotion checklist."
         )
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+    def managed_by(self, ctx: Ctx, ref: Ref, diff: Diff | None = None) -> Ownership:
         """Template ownership for this appliance-scope section.
 
         TODO(curation): pyecsdwan.ownership.SECTION_MAP carries no entry for this kind, so

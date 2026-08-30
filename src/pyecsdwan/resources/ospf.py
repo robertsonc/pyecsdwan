@@ -65,6 +65,7 @@ from typing import Any
 
 import structlog
 
+from pyecsdwan import ownership
 from pyecsdwan.contract import (
     ApplyResult,
     CanonicalState,
@@ -78,7 +79,6 @@ from pyecsdwan.contract import (
     Scope,
     Tier,
 )
-from pyecsdwan.ownership import owning_group
 from pyecsdwan.registry import register
 
 log = structlog.get_logger("pyecsdwan.resources.ospf")
@@ -134,6 +134,11 @@ def _interface_table(value: Any) -> dict[str, dict[str, Any]]:
 
 
 class Ospf(Resource):
+    #: The `ospf` template governs per-VRF timers and authentication —
+    #: `helloInterval`, `deadInterval`, `transmitDelay`, `retransmitInterval`,
+    #: auth keys — and declares no interfaces or areas. Which interfaces run
+    #: OSPF is local (spec 004 L3, live 9.7 template body).
+    template_governs = ("system",)
     kind = "appliance/ospf"
     scope = Scope.APPLIANCE
     reversibility = Reversibility.REVERSIBLE
@@ -192,14 +197,14 @@ class Ospf(Resource):
         interfaces = _interface_table(raw.get("interfaces") or {})
         return {"system": system, "interfaces": interfaces}
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+    def managed_by(self, ctx: Ctx, ref: Ref, diff: Diff | None = None) -> Ownership:
         if ref.appliance is None:
             return Ownership.unknown(
                 f"{ref.kind} is appliance-scope but the ref names no appliance, "
                 f"so no nePk resolves and ownership cannot be checked"
             )
         ne_pk = ctx.resolver.ne_pk_for(ref.appliance)
-        return owning_group(ctx, self.kind, ne_pk)
+        return ownership.resolve(ctx, self, ne_pk, diff)
 
     # -- write side -------------------------------------------------------------
 

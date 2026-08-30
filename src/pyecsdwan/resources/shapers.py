@@ -310,13 +310,13 @@ class _Shapers(Resource):
 
     # -- ownership -------------------------------------------------------------
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+    def managed_by(self, ctx: Ctx, ref: Ref, diff: Diff | None = None) -> Ownership:
         ne_pk = self._ne_pk(ctx, ref)
         if _has_gms_marked(self.fetch(ctx, ref)):
             return Ownership.owned(
                 f"gms (gms_marked entry present in {self.ecos_path} on this appliance)"
             )
-        return ownership.owning_group(ctx, self.kind, ne_pk)
+        return ownership.resolve(ctx, self, ne_pk, diff)
 
 
 def _desired_doc(ecos_path: str) -> str:

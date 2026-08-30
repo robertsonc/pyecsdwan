@@ -34,11 +34,13 @@ how a section name gets promoted from guess to verified.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
+from typing import Any
 
 import structlog
 
 from pyecsdwan.client import OrchApiError
-from pyecsdwan.contract import Ctx, Ownership
+from pyecsdwan.contract import Ctx, Owned, Ownership
 
 log = structlog.get_logger("pyecsdwan.ownership")
 
@@ -307,26 +309,84 @@ def known_sections(ctx: Ctx) -> frozenset[str]:
     vocabulary (#63).
     """
 
-    def fetch() -> list[str]:
+    names: set[str] = set()
+    for group in _template_groups(ctx):
+        for tpl in group.get("templates") or []:
+            if isinstance(tpl, dict) and tpl.get("name"):
+                names.add(str(tpl["name"]))
+    return frozenset(names)
+
+
+def _template_groups(ctx: Ctx) -> list[dict[str, Any]]:
+    """Every template group with its section bodies, read once per run.
+
+    One read serves both questions this module asks of the fabric: which
+    section names exist (`known_sections`) and what each selected section
+    actually asserts (`governed_prios`). Cached through the resolver, which is
+    origin-keyed, so two Orchestrators cannot share an answer (#63).
+    """
+
+    def fetch() -> list[dict[str, Any]]:
         raw = ctx.client.get("/template/templateGroups")
         if not isinstance(raw, list):
             raise Unreadable(
                 f"template groups came back as {type(raw).__name__}, "
                 f"expected a list of groups"
             )
-        names: set[str] = set()
-        for group in raw:
-            if not isinstance(group, dict):
-                continue
-            for tpl in group.get("templates") or []:
-                if isinstance(tpl, dict) and tpl.get("name"):
-                    names.add(str(tpl["name"]))
-        return sorted(names)
+        return [g for g in raw if isinstance(g, dict)]
 
     try:
-        return frozenset(ctx.resolver.cached("template_sections", fetch))
+        groups = ctx.resolver.cached("template_groups", fetch)
     except OrchApiError as exc:
-        raise Unreadable(f"template vocabulary unreadable: {exc}") from exc
+        raise Unreadable(f"template groups unreadable: {exc}") from exc
+    return groups if isinstance(groups, list) else []
+
+
+def governed_prios(ctx: Ctx, group: str, section: str) -> frozenset[int] | None:
+    """Priorities the named template section actually asserts, or ``None``.
+
+    Decision D2: the governed band is **derived from the template's own
+    entries**, not hard-coded. Orchestrator-pushed entries occupy 1000-9999 on
+    every section observed, but that is a vendor convention this project cannot
+    verify across releases — and hard-coding an unverifiable magic range is the
+    guess `SECTION_MAP` already taught us about.
+
+    Deriving is also stricter than a fixed band in the useful direction. On
+    9.7 `optmap` asserts 1000, 1490, 1500 and 1510; an entry at 1600 is "in
+    band" but the template never pushes one, so a fixed range refuses a change
+    nothing would revert while this permits it.
+
+    ``None`` means the body could not be read or holds no priorities, and the
+    caller must not narrow anything on that basis — absence of evidence is not
+    evidence the change is local.
+    """
+    for grp in _template_groups(ctx):
+        if str(grp.get("name")) != group:
+            continue
+        for tpl in grp.get("templates") or []:
+            if not isinstance(tpl, dict) or str(tpl.get("name")) != section:
+                continue
+            return _prios_in(tpl.get("value")) or None
+    return None
+
+
+def _prios_in(node: Any) -> frozenset[int]:
+    """Every integer key under any ``prio`` mapping, at any depth."""
+    found: set[int] = set()
+    stack: list[Any] = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if key == "prio" and isinstance(value, dict):
+                    found.update(
+                        int(p) for p in value if str(p).lstrip("-").isdigit()
+                    )
+                else:
+                    stack.append(value)
+        elif isinstance(current, list):
+            stack.extend(current)
+    return frozenset(found)
 
 
 def _unknown_names(ctx: Ctx, entry: Sections) -> tuple[str, ...]:
@@ -351,6 +411,88 @@ def _unknown_names(ctx: Ctx, entry: Sections) -> tuple[str, ...]:
         log.debug("ownership_vocabulary_empty")
         return ()
     return tuple(n for n in entry.names if n not in vocabulary)
+
+
+def _matched_section(ctx: Ctx, entry: Sections, groups: list[str]) -> tuple[str, str] | None:
+    """The (group, section) pair that made a kind OWNED, or ``None``."""
+    wanted = {n.lower() for n in entry.names}
+    for group in groups:
+        try:
+            selected = selected_sections(ctx, group)
+        except Unreadable:
+            continue
+        for name in selected:
+            if name.lower() in wanted:
+                return group, name
+    return None
+
+
+def governs_change(
+    ctx: Ctx,
+    kind: str,
+    ne_pk: str,
+    governs: tuple[str, ...],
+    paths: Sequence[Sequence[str]],
+) -> bool | None:
+    """Would the owning template revert *these* changes? ``None`` = cannot tell.
+
+    The narrowing half of the model (spec 004). A coarse OWNED says a template
+    governs the kind; this asks whether it governs what is actually changing,
+    and only ever narrows — an answer of ``False`` downgrades OWNED to UNOWNED,
+    and ``None`` leaves the coarse verdict standing. It can never make an
+    unowned change owned, so a wrong answer here cannot invent a refusal.
+
+    Two sources of evidence, and **positive evidence is required to narrow**:
+
+    * **L3, declared subtrees.** A resource states which top-level subtrees its
+      template governs — `bgp` declares ``("system",)`` because the `bgp`
+      template carries timers and per-peer defaults and no peer key at any
+      depth. A change under a declared subtree is governed; one outside is not.
+    * **L2, derived priorities.** For prio-keyed sections the governed set is
+      the template's own entries (:func:`governed_prios`), so a change to prio
+      20000 is local while one to 1000 is not.
+
+    With neither, the answer is ``None``: absence of evidence is not evidence a
+    change is local, and #20's posture is that an unknown stays refused.
+
+    Decision D3 — **any** governed path makes the whole changeset governed.
+    That is largely forced rather than chosen: `bgp`, `ospf` and `vrrp` write
+    whole objects, so a changeset touching one governed and one local field has
+    no partial wire representation. "Commit them separately" is the same remedy
+    the shared-write-target guard already gives for the same reason.
+    """
+    if not paths:
+        return None
+
+    if governs:
+        return any(bool(p) and str(p[0]) in governs for p in paths)
+
+    try:
+        groups = associated_groups(ctx, ne_pk)
+    except Unreadable:
+        return None
+    entry = SECTION_MAP.get(kind)
+    if entry is None:
+        return None
+    matched = _matched_section(ctx, entry, groups)
+    if matched is None:
+        return None
+    try:
+        prios = governed_prios(ctx, matched[0], matched[1])
+    except Unreadable:
+        return None
+    if not prios:
+        return None
+    return any(_prio_of(p) in prios for p in paths if _prio_of(p) is not None)
+
+
+def _prio_of(path: Sequence[str]) -> int | None:
+    """The priority a changed path addresses, if it addresses one."""
+    segments = [str(x) for x in path]
+    for i, segment in enumerate(segments[:-1]):
+        if segment == "prio" and segments[i + 1].lstrip("-").isdigit():
+            return int(segments[i + 1])
+    return None
 
 
 def owning_group(ctx: Ctx, kind: str, ne_pk: str) -> Ownership:
@@ -430,3 +572,38 @@ def owning_group(ctx: Ctx, kind: str, ne_pk: str) -> Ownership:
     return Ownership.unowned(
         f"no template group associated with {ne_pk} selects {names}"
     )
+
+
+def resolve(
+    ctx: Ctx,
+    resource: Any,
+    ne_pk: str,
+    diff: Any | None = None,
+) -> Ownership:
+    """Ownership of one change: the coarse verdict, narrowed by what changes.
+
+    The single entry point appliance-scope resources should use. It runs
+    :func:`owning_group` as before and then, only on OWNED and only with
+    positive evidence, asks :func:`governs_change` whether the template governs
+    the paths actually being written.
+
+    Narrowing is one-directional by construction: OWNED can become UNOWNED, and
+    nothing here can turn UNOWNED or UNKNOWN into a refusal. A mistake in a
+    resource's `template_governs` therefore costs a permitted write that a push
+    may revert — the same failure the pre-#20 code had — and never a refusal of
+    something safe. That asymmetry is why the declaration must cite a template
+    body rather than an intuition.
+    """
+    verdict = owning_group(ctx, resource.kind, ne_pk)
+    if diff is None or verdict.state is not Owned.OWNED:
+        return verdict
+    paths = [entry.path for entry in getattr(diff, "entries", [])]
+    governed = governs_change(
+        ctx, resource.kind, ne_pk, getattr(resource, "template_governs", ()), paths
+    )
+    if governed is False:
+        return Ownership.unowned(
+            f"{verdict.owner} governs {resource.kind}, but not the fields this "
+            f"change touches — see spec 004"
+        )
+    return verdict

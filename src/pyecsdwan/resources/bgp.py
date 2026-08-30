@@ -103,6 +103,7 @@ from typing import Any
 
 import structlog
 
+from pyecsdwan import ownership
 from pyecsdwan.contract import (
     ApplyResult,
     CanonicalState,
@@ -116,7 +117,6 @@ from pyecsdwan.contract import (
     Scope,
     Tier,
 )
-from pyecsdwan.ownership import owning_group
 from pyecsdwan.registry import register
 
 log = structlog.get_logger("pyecsdwan.resources.bgp")
@@ -170,6 +170,13 @@ def _neighbor_table(value: Any) -> dict[str, dict[str, Any]]:
 
 
 class Bgp(Resource):
+    #: The `bgp` template governs system-level settings and per-peer defaults —
+    #: `ka`, `hold`, `next_hop_self`, `as_override`, `route_target_template` —
+    #: and contains no peer key at any depth. Peer *behaviour* is template
+    #: governed; peer *existence* is locally significant, which is why adding
+    #: or removing a neighbour needs no --override-template (spec 004 L3,
+    #: verified against a live 9.7 `bgp` template body).
+    template_governs = ("system",)
     kind = "appliance/bgp"
     scope = Scope.APPLIANCE
     reversibility = Reversibility.REVERSIBLE
@@ -230,14 +237,14 @@ class Bgp(Resource):
         neighbors = _neighbor_table(raw.get("neighbors") or {})
         return {"system": system, "neighbors": neighbors}
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+    def managed_by(self, ctx: Ctx, ref: Ref, diff: Diff | None = None) -> Ownership:
         if ref.appliance is None:
             return Ownership.unknown(
                 f"{ref.kind} is appliance-scope but the ref names no appliance, "
                 f"so no nePk resolves and ownership cannot be checked"
             )
         ne_pk = ctx.resolver.ne_pk_for(ref.appliance)
-        return owning_group(ctx, self.kind, ne_pk)
+        return ownership.resolve(ctx, self, ne_pk, diff)
 
     # -- write side -------------------------------------------------------------
 

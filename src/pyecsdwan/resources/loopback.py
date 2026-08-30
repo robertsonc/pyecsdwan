@@ -254,7 +254,7 @@ class Loopback(Resource):
         }
         return {name: interfaces[name] for name in sorted(interfaces)}
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+    def managed_by(self, ctx: Ctx, ref: Ref, diff: Diff | None = None) -> Ownership:
         if ref.appliance is None:
             return Ownership.unknown(
                 f"{ref.kind} is appliance-scope but the ref names no appliance, "

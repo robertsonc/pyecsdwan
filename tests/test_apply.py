@@ -710,7 +710,9 @@ def test_ownership_still_refuses_through_apply(
     monkeypatch.setattr(
         type(resource),
         "managed_by",
-        lambda self, ctx, ref: Ownership.unknown("template selection unreadable (403)"),
+        lambda self, ctx, ref, diff=None: Ownership.unknown(
+            "template selection unreadable (403)"
+        ),
     )
 
     result = _cli(world, "commit")

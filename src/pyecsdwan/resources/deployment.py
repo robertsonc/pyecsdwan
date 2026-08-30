@@ -260,8 +260,8 @@ class Deployment(Resource):
         by nePk: two appliances are two objects, not a conflict."""
         return f"appliance {self._ne_pk(ctx, ref)} deployment"
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
-        return ownership.owning_group(ctx, self.kind, self._ne_pk(ctx, ref))
+    def managed_by(self, ctx: Ctx, ref: Ref, diff: Diff | None = None) -> Ownership:
+        return ownership.resolve(ctx, self, self._ne_pk(ctx, ref), diff)
 
     # -- enumeration ------------------------------------------------------------
 
