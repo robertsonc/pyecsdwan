@@ -1,6 +1,9 @@
 # Command grammar
 
-**Feature:** `001-cli-command-taxonomy` · **Version:** 0.4.0 · **Status:** draft
+**Feature:** `001-cli-command-taxonomy` · **Version:** 0.5.0 · **Status:** draft
+**Changed in 0.5.0:** Decision 10 — §8 supplies the test for admitting a new
+top-level verb, which this spec had grandfathered rather than stated, and
+applies it to `adopt` (#63/#120).
 **Changed in 0.4.0:** Decision 9 — `orchestrator` is the noun for selecting
 which Orchestrator a command addresses (#121), and is reserved as a kind alias.
 **Changed in 0.2.0:** Q1 and Q2 answered by the owner — the datastore token is
@@ -285,3 +288,67 @@ Each maps to exactly one intent, source, scope, cost class and schema.
 | `show configuration zones` | running config | Orchestrator | — | single |
 
 The last two are the collision pair, disambiguated by scope alone.
+
+## 8. New top-level verbs (Decision 10)
+
+### The gap this closes
+
+§1 governs *reads*: "every read command resolves to exactly one [intent]". The
+write verbs — `set`, `delete`, `load`, `commit`, `confirm`, `discard`,
+`rollback`, `apply` — were a stated **non-goal** of this spec, grandfathered on
+the grounds that "their spelling already matches the scope ordering this spec
+adopts". That was true and it was not a rule. It said the existing set was
+fine; it never said what makes a *new* one admissible.
+
+So the first genuinely new verb had nothing to be measured against, and the
+choice would have been settled by whoever wrote it first. This section supplies
+the measure.
+
+### The test
+
+A new top-level verb is admissible only if all three hold.
+
+| # | Test | Why |
+|---|---|---|
+| V1 | It **acts**; it does not report | A read belongs under `show`, whatever it reads. §2 already puts CLI state there. |
+| V2 | No existing verb can carry it **without changing that verb's meaning** | Principle I: one token, one intent. A verb that sometimes means something else is two intents wearing one name. |
+| V3 | Its intent is neither one of §1's four nor a transaction-lifecycle transition | Those two spaces are already spoken for. A command that fits either belongs in it, not beside it. |
+
+A flag on an existing verb is the default and the verb is the exception —
+but a flag repeated across three commands to express one operation is the
+exception's own failure mode, and counts against V2 rather than for it.
+
+### `adopt` (#63, #120)
+
+State written before this tool recorded which Orchestrator a transaction or a
+candidate targeted is keyed by a hostname, which the `http://` and `https://`
+endpoints on that name — and every tenant path under it — share. It is listed
+and readable and it authorizes nothing, because a hostname cannot establish a
+target and a warning issued after authorizing is a warning issued after the
+write. `adopt` is how an operator supplies what the file cannot.
+
+| Test | |
+|---|---|
+| V1 | Acts: records an origin into a journal's metadata and event log, or claims a pre-#63 candidate file. |
+| V2 | `rollback --adopt` would be three flags on three commands (`rollback`, `confirm`, and the candidate path) for one operation. `set` stages resource intent and adoption stages nothing; `load` is about content where this is about provenance, and it does not reach journals. |
+| V3 | Not a read intent, and not a lifecycle transition — the state machine is untouched; only the record of *which target* gains a value. |
+
+### The contract this verb class carries
+
+`adopt` asserts something the tool cannot verify. Any verb that does must:
+
+1. **Report before it acts.** The bare form lists what is adoptable and changes
+   nothing. An assertion that cannot be checked should be read before it is
+   made.
+2. **Never be inferred or defaulted.** No flag, environment variable or
+   configuration may perform it; the operator must be connected to the target
+   they are claiming.
+3. **Not widen.** It records one target. Re-targeting something already bound
+   is refused, not overwritten.
+4. **Leave a record.** The claim goes in the audit trail with what was
+   previously known, because a provenance assertion no one can attribute is
+   not evidence.
+
+Anything reached this way stays refused until the assertion is made. Preserving
+unprovable state and authorizing it are separate acts, and this verb is the
+seam between them.

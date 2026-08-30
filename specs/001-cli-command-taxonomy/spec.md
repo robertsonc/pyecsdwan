@@ -90,6 +90,15 @@ making one.
 | 8 | Exit codes and output schema | **Resolved** — `grammar.md` §5, from gNMI's taxonomy extended with the distributed cases (D-GNMI-2). |
 | 9 | Noun for selecting *which* Orchestrator a command addresses (#121) | **`orchestrator`.** `fabric` is the obvious word and is already taken: §3 defines it as a scope noun meaning *every appliance, bounded fan-out*, so `--fabric prod show fabric version` would carry two senses one space apart. `orchestrator` is the word §3 already uses for the bare no-scope subject — the Orchestrator itself. Reserves `orchestrator` and `orchestrators` as kind aliases (R12). |
 
+| 10 | When is a new top-level verb admissible? | **Three tests, all required** — it acts rather than reports; no existing verb can carry it without changing that verb's meaning; and its intent is neither one of §1's four nor a transaction-lifecycle transition. `grammar.md` §8 states them and applies them to `adopt` (#63/#120), which also carries a contract for verbs that assert what the tool cannot verify. |
+
+Decision 10 closes a gap rather than reversing anything. The Non-goals below
+grandfather `set`/`delete`/`commit`/`rollback` as already correctly spelled —
+true, and not a rule: it said the existing set was fine and never said what
+makes a *new* one admissible. The first genuinely new verb therefore had
+nothing to be measured against, and would have been settled by whoever wrote it
+first. §8 supplies the measure and shows it has teeth by naming what fails it.
+
 Decision 9 was escalated the same way 1 and 2 were, and answered by the owner.
 It settles the **noun only**; the command shape that carries it is Q5.
 
@@ -109,7 +118,41 @@ around, and written down here so the overlap is on the record as considered.
 | Q2 | Fan-out cost behavior, and is `--stale-ok` opt-in? | was blocking | owner | **Answered: confirm then warn; `--stale-ok` opt-in.** Grammar 0.2.0. |
 | Q3 | Removal boundary for compatibility aliases | — | owner | **Answered: not needed.** pyecsdwan has not shipped to production, so old forms are removed rather than aliased. See `compatibility.md` 0.3.0. |
 | Q4 | Does `show fabric <domain>` warrant existing where the Orchestrator has a single-call answer, or should those stay unscoped (`show version`)? Currently inconsistent: `show version` is Orchestrator+fanout but unscoped, while `show flows summary` gains `fabric`. | No — resolvable during #74 | owner or implementer | open |
-| Q5 | Command shape for the orchestrator registry. §2 puts CLI-state *reads* under bare `show`, which makes `show orchestrators` the consistent listing; where the mutations live (a top-level `orchestrator` verb group, flags on an existing one, or a config file only) is unsettled. | No — #121 is unstarted | owner | open |
+| Q5 | Command shape for the orchestrator registry. §2 puts CLI-state *reads* under bare `show`, which makes `show orchestrators` the consistent listing; where the mutations live (a top-level `orchestrator` verb group, flags on an existing one, or a config file only) is unsettled. | No — #121 is unstarted | owner | **open — recommendation below** |
+
+### Q5 recommendation: a file, `show orchestrators`, and no mutation verbs in v1
+
+Not because mutation verbs are wrong, but because they are the half that cannot
+be taken back. Adding `orchestrator add` later is additive; removing it is a
+break, and it arrives with a surface behind it — `add`, `remove`, `rename`,
+`set-default`, and a default that is then ambient state, which is the failure
+`ROADMAP.md` already argues against for this feature.
+
+Three things point the same way.
+
+**The tool does not configure itself today.** Credentials go to the keyring or
+the environment; everything else is an `ECSDWAN_*` variable. There is no
+`ec-cli configure`, and the registry would be the first command that writes
+this tool's own configuration — a new category, introduced for a feature that
+has not shipped.
+
+**A mapping that decides which fabric a write lands on wants a review trail.**
+A file is diffable, reviewable and version-controllable; a registry edited by
+command is one no one reviewed. That argument is this project's own — it is why
+a declaration is a file and not a sequence of `set` commands.
+
+**Commands would buy no safety here.** Validation at write time is the usual
+argument for them, and it does not apply: the file is validated on load, the
+origin is shown in the banner and in every refusal, and no command can catch an
+operator typing a real hostname they did not mean.
+
+Consistent with Decision 10, incidentally: listing the registry *reports*, so
+V1 sends it to `show orchestrators` on its own.
+
+What would change this: operators actually asking, once the selector ships; or
+the registry needing to hold something they should not hand-edit — a credential
+handle with a lifecycle, say — at which point the file stops being the whole
+truth and a command has something to do.
 
 **Nothing blocks the plan now.** One reading is flagged rather than assumed
 silently: "confirm, then warn" is implemented as *confirm where a prompt can be
