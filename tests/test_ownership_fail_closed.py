@@ -19,6 +19,7 @@ selection read, then the verification status of the name being compared.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -41,14 +42,22 @@ GROUPS = f"{BASE}/template/templateGroups"
 #: spelled after the ECOS path and never observed. The difference between them
 #: is the whole point of `Sections.verified`.
 VERIFIED_KIND = "appliance/routes"
-GUESSED_KIND = "appliance/bgp"
+GUESSED_KIND = "appliance/vrrp"
 
 
 @pytest.fixture
-def ctx() -> Iterator[Ctx]:
+def ctx(tmp_path: Path) -> Iterator[Ctx]:
+    """A resolver with a per-test cache directory.
+
+    `Resolver` persists to `~/.pyecsdwan/cache/<origin>.json` and holds entries
+    for its TTL, so without this every test in the file shares one cached
+    template vocabulary — the first to run decides what the rest see — and the
+    run writes into the developer's real state directory. Both were latent
+    until ownership started reading a cached section.
+    """
     settings = config.Settings(orch_url="https://orch.example.com", api_key="k")
     client = OrchClient(settings)
-    yield Ctx(client=client, resolver=Resolver(client))
+    yield Ctx(client=client, resolver=Resolver(client, cache_dir=tmp_path))
 
 
 def _associated(*groups: str) -> None:
@@ -231,13 +240,18 @@ def test_a_non_match_on_a_verified_name_is_unowned(ctx: Ctx) -> None:
 
 @respx.mock
 def test_a_non_match_on_a_guessed_name_is_unknown(ctx: Ctx) -> None:
-    """The subtle one. "bgp" is spelled after the ECOS path and has never been
-    seen in a selected-section list, so a group that does not select "bgp" may
-    still own BGP under a name we never compared against. "Not selected" and
-    "wrong name" are indistinguishable from here."""
+    """The subtle one. "vrrp" is spelled after the ECOS path and has never
+    been seen in a *selected* list, so a group that does not select it may
+    still own VRRP under a name we never compared against. "Not selected" and
+    "wrong name" are indistinguishable from here.
+
+    The vocabulary deliberately contains "vrrp": the fabric knows the name, so
+    this is the unverified-non-match branch and not the stale-name one. (On
+    9.7 that is exactly true — `vrrp` is a real section that no group on the
+    lab fabric happened to select.)"""
     _associated("Branch-Std")
     _selects("dns", "snmp")
-    _vocabulary("subnets", "routes", "bgp", "dns", "snmp")
+    _vocabulary("subnets", "routes", "vrrp", "dns", "snmp")
     owns = ownership.owning_group(ctx, GUESSED_KIND, NE_PK)
     assert owns.state is Owned.UNKNOWN
     assert owns.blocks_write
@@ -249,7 +263,7 @@ def test_a_match_on_a_guessed_name_is_still_owned(ctx: Ctx) -> None:
     """Asymmetry on purpose: a guess that matches was a correct guess. Only the
     negative answer depends on the name being right."""
     _associated("Branch-Std")
-    _selects("bgp")
+    _selects("vrrp")
     owns = ownership.owning_group(ctx, GUESSED_KIND, NE_PK)
     assert owns.state is Owned.OWNED
     assert owns.owner == "template-group Branch-Std"
@@ -355,10 +369,13 @@ def test_a_name_the_fabric_never_heard_of_is_unknown(ctx: Ctx) -> None:
     operator surprise ownership exists to prevent.
     """
     _associated("Branch-Std")
-    _selects("optmap", "qosMaps")  # the real names, none of them the guess
+    _selects("optmap", "qosMaps")
     _vocabulary("optmap", "qosMaps", "bgp")
 
-    verdict = ownership.owning_group(ctx, "appliance/optimization-map", NE_PK)
+    # `appliance/zones` looks for a section called `zones`. The live 9.7
+    # vocabulary has 46 names and none of them is `zones`, so the mapping can
+    # never match — the same silence a resource no template governs produces.
+    verdict = ownership.owning_group(ctx, "appliance/zones", NE_PK)
     assert verdict.state is Owned.UNKNOWN
     assert "no section by any of those names" in _text(verdict)
 

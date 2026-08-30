@@ -77,25 +77,72 @@ def _guess(note: str, *names: str) -> Sections:
     return Sections(names=names, verified=False, note=note)
 
 
-#: The section names live-confirmed this project has ever seen. A real Default
-#: Template Group's selected-section list was probed read-only during #38 and
-#: answered with exactly these eleven names. Every ``_verified`` entry below
-#: draws from this list and nothing else may claim verification without adding
-#: to it — which takes a fabric, not an argument.
+#: The section names live-confirmed this project has ever seen. Every
+#: ``_verified`` entry below draws from this list and nothing else may claim
+#: verification without adding to it — which takes a fabric, not an argument.
+#:
+#: The first eleven came from #38's read-only probe of one Default Template
+#: Group's *selected* list. The rest are the full vocabulary Orchestrator
+#: 9.7.0.43282 reports from ``GET /template/templateGroups`` — every name it
+#: knows, selected or not, which is a strictly better source: a name absent
+#: from *this* set can never match, and `owning_group` now says so instead of
+#: answering "unowned" (docs/research/live-ownership-2026-08-30.md).
 LIVE_CONFIRMED_SECTIONS: frozenset[str] = frozenset(
     {
+        "acls",
         "adminDistance",
+        "authentication",
+        "banners",
+        "bfd",
+        "bgp",
         "cli",
-        "dns",
         "datetime",
+        "dns",
+        "dnsProxy",
+        "firewallProtectionProfile",
+        "httpsCertsUpload",
+        "ipAllowList",
         "logging",
+        "logsettings",
         "mgmtServices",
+        "multicast",
+        "nac",
+        "natMaps",
+        "netflow",
+        "optmap",
+        "ospf",
+        "passwordSettings",
+        "peerPriorityList",
+        "qosMaps",
+        "radius",
+        "remotereceivers",
+        "routeMaps",
         "routes",
+        "routesRedistributeMaps",
         "secureWebServicesConfig",
+        "securityMaps",
         "shaper",
         "snmp",
+        "sslCACerts",
+        "sslCerts",
+        "system",
+        "tacacs",
+        "thresholdCrossingAlert",
+        "tunnels",
+        "userAppGroups",
+        "userApps",
+        "users",
+        "vrrp",
+        "vxlan",
         "webconfig",
     }
+)
+
+#: Provenance for names confirmed against a real 9.7 fabric this session: the
+#: Orchestrator's own template vocabulary, not an ECOS path that resembles one.
+_LIVE_9_7 = (
+    "live 9.7.0.43282 template vocabulary "
+    "(docs/research/live-ownership-2026-08-30.md)"
 )
 
 _ECOS_PATH_GUESS = (
@@ -133,13 +180,23 @@ SECTION_MAP: dict[str, Sections] = {
     # the ECOS path and the template section name are different namespaces that
     # happen to agree often. They are recorded here as what they are.
     "appliance/security-policy": _guess(_ECOS_PATH_GUESS, "securityMaps"),
-    "appliance/bgp": _guess(_ECOS_PATH_GUESS, "bgp"),
-    "appliance/ospf": _guess(_ECOS_PATH_GUESS, "ospf"),
+    "appliance/bgp": _verified(_LIVE_9_7, "bgp"),
+    "appliance/ospf": _verified(_LIVE_9_7, "ospf"),
     "appliance/vrrp": _guess(_ECOS_PATH_GUESS, "vrrp"),
-    "appliance/dhcp": _guess(_ECOS_PATH_GUESS, "dhcpd", "dhcpFailover"),
+    "appliance/dhcp": _guess(
+        f"{_ECOS_PATH_GUESS}. {_LIVE_9_7}: neither name is in the vocabulary",
+        "dhcpd",
+        "dhcpFailover",
+    ),
     "appliance/nat": _guess(_ECOS_PATH_GUESS, "natMaps"),
+    # Checked against the live 9.7 vocabulary: neither name exists there, and
+    # no section in it is an obvious stand-in. Left as-is deliberately —
+    # `owning_group` now answers UNKNOWN for a mapping whose names the fabric
+    # does not have, which is the honest result. Replacing them with a fresh
+    # guess would only move the guess.
     "appliance/deployment": _guess(
-        "UI-grouping candidates; the live probe's group selected neither (#12)",
+        "UI-grouping candidates; the live probe's group selected neither (#12). "
+        f"{_LIVE_9_7}: neither name is in the vocabulary at all",
         "deployment",
         "interfaces",
     ),
@@ -147,20 +204,28 @@ SECTION_MAP: dict[str, Sections] = {
     # pre-seeded "appliance/security-policy" above nor the orchestrator-scope
     # "security-policy" kind, to keep all three names unambiguous (#19).
     "appliance/security-maps": _guess(_ECOS_PATH_GUESS, "securityMaps"),
-    "appliance/zones": _guess(_ECOS_PATH_GUESS, "zones"),
+    "appliance/zones": _guess(
+        f"{_ECOS_PATH_GUESS}. {_LIVE_9_7}: not in the vocabulary", "zones"
+    ),
     # The bare "appliance/nat" above is left in place for Branch NAT (ECOS
     # "nat/maps"): one kind cannot name the two distinct appliance NAT
     # resources, which have different endpoints (#32).
     "appliance/nat-maps": _guess(_ECOS_PATH_GUESS, "natMaps"),
-    "appliance/nat-pools": _guess(_ECOS_PATH_GUESS, "natPools"),
-    "appliance/qos-map": _guess(_ECOS_PATH_GUESS, "qosMaps"),
-    "appliance/optimization-map": _guess(_ECOS_PATH_GUESS, "optimizationMaps"),
-    "appliance/route-map": _guess(_ECOS_PATH_GUESS, "routeMaps"),
-    "appliance/banners": _guess(
-        "'banners' is NOT among the live-probed names, so the UI may fold "
-        "login banners into another section entirely",
-        "banners",
+    "appliance/nat-pools": _guess(
+        f"{_ECOS_PATH_GUESS}. {_LIVE_9_7}: not in the vocabulary; `natMaps` is, "
+        f"but whether it governs pools is unproven",
+        "natPools",
     ),
+    "appliance/qos-map": _verified(_LIVE_9_7, "qosMaps"),
+    "appliance/optimization-map": _verified(
+        f"{_LIVE_9_7}: the section is `optmap`. `optimizationMaps` was an "
+        f"ECOS-path guess that matched nothing, so ownership answered "
+        f"'unowned' while the template demonstrably pushed four entries to "
+        f"the appliance — the fail-open this correction closes",
+        "optmap",
+    ),
+    "appliance/route-map": _guess(_ECOS_PATH_GUESS, "routeMaps"),
+    "appliance/banners": _verified(_LIVE_9_7, "banners"),
     # acls.py prefers the per-rule gms_marked flag; this join is its fallback.
     "appliance/acl": _guess(_ECOS_PATH_GUESS, "acls"),
     # No entry for "schedule-timezone": it is Orchestrator-scope config

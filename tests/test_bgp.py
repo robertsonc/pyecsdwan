@@ -224,24 +224,29 @@ def test_managed_by_unowned_when_no_group_is_associated(world: dict[str, Any]) -
     assert Bgp().managed_by(ctx, REF).state is Owned.UNOWNED
 
 
-def test_managed_by_unknown_when_an_associated_group_does_not_select_bgp(
+def test_managed_by_unowned_when_an_associated_group_does_not_select_bgp(
     world: dict[str, Any],
 ) -> None:
-    """The new behaviour, and the reason #20 is a P0. "bgp" is a guessed
-    section name — spelled after the ECOS path, never seen in a live
-    selected-section list — so a group that does not select it has not told us
-    anything: the group may select the real section under another name. The old
-    answer here was a confident None, which let a direct write straight through
-    to be reverted by the next push."""
+    """A live probe turned this from UNKNOWN into a clean negative.
+
+    While `bgp` was a guessed name — spelled after the ECOS path, never seen in
+    a selected-section list — a group that did not select it told us nothing:
+    it might select the real section under a name we never compared. That had
+    to be UNKNOWN, and #20 made UNKNOWN refuse.
+
+    Orchestrator 9.7 reports `bgp` in its own template vocabulary, so the name
+    is confirmed and a non-match now means what it says. The refusal is gone
+    because the uncertainty is gone, not because the guard was relaxed — the
+    unverified branch still exists and `appliance/vrrp` still takes it.
+    """
     ctx, state = world["ctx"], world["state"]
     state.template_groups["Branch-Std"] = {"name": "Branch-Std"}
     state.template_selection["Branch-Std"] = ["dns"]
     state.template_association[NE_PK] = ["Branch-Std"]
 
     owns = Bgp().managed_by(ctx, REF)
-    assert owns.state is Owned.UNKNOWN
-    assert owns.blocks_write
-    assert "unverified" in owns.reason
+    assert owns.state is Owned.UNOWNED
+    assert not owns.blocks_write
 
 
 def test_managed_by_reports_owning_template_group(world: dict[str, Any]) -> None:

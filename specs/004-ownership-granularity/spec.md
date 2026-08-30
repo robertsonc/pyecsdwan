@@ -112,14 +112,16 @@ for them.
 
 ## Required decisions
 
-These are the owner's. Each changes the shape of the work.
+**All four answered by the owner, 2026-08-30.** Resolutions in the last column;
+the reasoning that produced them is kept because a decision without its
+alternatives is a decision nobody can revisit.
 
-| # | Decision | Why it is escalated |
-|---|---|---|
-| D1 | **Does ownership become change-aware?** Today `managed_by(ctx, ref)` cannot see what is changing, so L2 and L3 are impossible without passing the diff. This is a contract change touching every resource that overrides it. | Architectural, and the alternative — a second method alongside `managed_by` — trades a smaller blast radius for two ways to ask one question. |
-| D2 | **Is 1000–9999 hard-coded, configurable, or derived?** Derived would mean taking the band from the selected template's own prios, which is self-describing and survives a release that moves the range — but it makes ownership depend on a body we may fail to read. | It is a vendor convention this project cannot verify across releases, and hard-coding an unverifiable magic range is the kind of guess `SECTION_MAP` already taught us about. |
-| D3 | **What happens to a change spanning both?** e.g. one commit editing `system.ka` (governed) and adding a peer (local). | Refusing the whole change is safe and may be annoying; splitting it is neither obviously safe nor obviously expressible. |
-| D4 | **Does `SECTION_MAP` survive at all?** With the vocabulary readable and authority per-field, the kind→section mapping is the last hand-maintained guess in the path. It could instead be derived by matching the template body against the resource's live config. | Deleting it removes a whole class of the defect found live; deriving it is more machinery and a new way to be wrong. |
+| # | Decision | Why it is escalated | **Resolved** |
+|---|---|---|---|
+| D1 | **Does ownership become change-aware?** Today `managed_by(ctx, ref)` cannot see what is changing, so L2 and L3 are impossible without passing the diff. This is a contract change touching every resource that overrides it. | Architectural, and the alternative — a second method alongside `managed_by` — trades a smaller blast radius for two ways to ask one question. | **Yes — `managed_by(ctx, ref, diff)`.** One question, one method; a second method answering the wrong question beside the right one is how `gms_marked` survived unexamined in `acls.py`. |
+| D2 | **Is 1000–9999 hard-coded, configurable, or derived?** Derived would mean taking the band from the selected template's own prios, which is self-describing and survives a release that moves the range — but it makes ownership depend on a body we may fail to read. | It is a vendor convention this project cannot verify across releases, and hard-coding an unverifiable magic range is the kind of guess `SECTION_MAP` already taught us about. | **Derived from the selected template's own prios**, falling back to UNKNOWN when the body cannot be read. Self-describing, survives a release that moves the range, and stricter than a fixed band: an entry at 1600 that `optmap` never pushes is permitted rather than refused for being 'in band'. |
+| D3 | **What happens to a change spanning both?** e.g. one commit editing `system.ka` (governed) and adding a peer (local). | Refusing the whole change is safe and may be annoying; splitting it is neither obviously safe nor obviously expressible. | **Refuse the whole changeset.** Largely forced: `bgp`/`ospf`/`vrrp` POST whole objects, so a partial apply has no wire representation. Only `routes` writes per entry, and one uniform rule beats a special case. 'Commit them separately' is already the collision guard's remedy for the same reason. |
+| D4 | **Does `SECTION_MAP` survive at all?** With the vocabulary readable and authority per-field, the kind→section mapping is the last hand-maintained guess in the path. It could instead be derived by matching the template body against the resource's live config. | Deleting it removes a whole class of the defect found live; deriving it is more machinery and a new way to be wrong. | **Keep it, corrected.** Derivation is how the `optmap` bug was *found*, but it cannot answer when a section is selected and pushes nothing yet — `acls` and `securityMaps` had empty bodies here, and derivation would read that as unowned, which is the fail-open again. A list that is wrong loudly beats inference that is wrong quietly. |
 
 ## Requirements
 
