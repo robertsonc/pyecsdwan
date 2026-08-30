@@ -185,6 +185,21 @@ drift-since-compare, reversibility, the journal — is literally the same code.
 A non-empty candidate refuses the apply rather than merging two intents into
 one transaction.
 
+*Shared write targets (#69) — complete.* Two individually-correct changes can
+replace the same server object (`appliance/deployment` and `appliance/dhcp`
+both POST `/deployment`), and ordering is not a fix. Planning refuses the
+pair before the first write, the refusal carries structured
+`Collision` objects, and both entry points reach the check through
+`build_plan`. As of 2026-08-30 the decision is *total*: all 41 curated kinds
+are partitioned — 31 declare the object their `apply()` replaces
+(`write_target()`), 10 record why a target would be wrong for them
+(per-entry editors, delta reconcilers, one read-modify-write splicer, one
+unimplemented write path) — and `tests/test_write_collisions.py` refuses a
+new curated kind until its author has traced `apply()` to the object it
+writes. The property is semantic, so it is declared per kind, never derived
+mechanically: the one derivation attempt produced `/template/template` as a
+"shared prefix" and was abandoned as worse than no declaration.
+
 *MCP trust boundary (#62).* `mcp_server/` reflectively exposed every public
 method of the vendored `pyedgeconnect` SDK — 641 on `Orchestrator`, ~250 of
 them writes — with no transaction, TLS verification off, and credentials as

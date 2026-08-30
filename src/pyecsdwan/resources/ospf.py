@@ -236,6 +236,16 @@ class Ospf(Resource):
             ),
         )
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """One appliance's whole OSPF configuration (#69).
+
+        Two objects behind one identity — ``ospf/config/system`` and
+        ``ospf/config/interfaces`` — same shape and same review obligation as
+        ``appliance/bgp``: a future writer of either endpoint reuses this
+        string or splits both.
+        """
+        return f"appliance {self._ne_pk(ctx, ref)} ospf config"
+
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:
             return ApplyResult.noop()

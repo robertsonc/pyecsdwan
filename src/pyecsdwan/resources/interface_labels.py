@@ -318,6 +318,12 @@ class InterfaceLabels(Resource):
 
     # -- write side ---------------------------------------------------------------
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The single Orchestrator-wide label table (#69): apply is a
+        full-replace POST, so a removed label is expressed by absence and a
+        second writer would be overwritten wholesale."""
+        return f"orchestrator {_PATH}"
+
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:
             return ApplyResult.noop()

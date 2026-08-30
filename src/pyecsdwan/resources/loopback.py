@@ -379,6 +379,11 @@ class LoopbackOrch(Resource):
 
     # -- write side -------------------------------------------------------------
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The single loopback-orchestration object (#69): apply posts the
+        full structure, never a partial document."""
+        return f"orchestrator {_LOOPBACK_ORCH_PATH}"
+
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:
             return ApplyResult.noop()

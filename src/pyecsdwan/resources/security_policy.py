@@ -132,6 +132,13 @@ class SecurityPolicy(Resource):
             stripped.pop(meta_key, None)
         return {"maps": stripped} if stripped else None
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The complete policy object for one segment pair (#69): apply posts
+        with ``merge: false``, so the body is the whole policy for the map
+        the ref names. Instance-scoped by map — two segment pairs are two
+        objects, not a conflict."""
+        return f"orchestrator {_PATH} map={ref.name}"
+
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:
             return ApplyResult.noop()

@@ -168,6 +168,12 @@ class TemplateAssociation(Resource):
             groups = []
         return {"template_groups": sorted(str(g) for g in groups)}
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """One appliance's complete template-group association (#69): the
+        POST replaces the whole list and triggers the push. Instance-scoped
+        by nePk; the ref's *name* is the appliance for this kind."""
+        return f"appliance {ctx.resolver.ne_pk_for(ref.name)} template-association"
+
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:
             return ApplyResult.noop()

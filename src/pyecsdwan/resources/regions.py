@@ -509,6 +509,14 @@ class RegionAssociation(Resource):
 
     # -- write side -------------------------------------------------------------
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """One appliance's region association (#69): the per-appliance PUT
+        replaces the association object outright. Declared because the API
+        also offers a bulk POST form that would overwrite every appliance's
+        association at once — a future kind using it must declare against
+        these per-instance targets. The ref's *name* is the appliance."""
+        return f"appliance {ctx.resolver.ne_pk_for(ref.name)} region-association"
+
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:
             return ApplyResult.noop()

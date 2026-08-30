@@ -215,6 +215,12 @@ class ApplianceZones(Resource):
 
     # -- write side -------------------------------------------------------------
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The whole zone table on one appliance (#69): ``_replace`` posts the
+        complete table through the appliance proxy. A different object from
+        the Orchestrator-wide ``zones`` table, so the two do not collide."""
+        return f"appliance {self._ne_pk(ctx, ref)} {_ZONES_ECOS_PATH}"
+
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:
             return ApplyResult.noop()
@@ -364,6 +370,11 @@ class ApplianceSecurityMaps(Resource):
         return {"maps": stripped} if stripped else None
 
     # -- write side -------------------------------------------------------------
+
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The whole security-maps object on one appliance (#69): apply posts
+        the complete map set through the appliance proxy."""
+        return f"appliance {self._ne_pk(ctx, ref)} {_SECURITY_MAPS_ECOS_PATH}"
 
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:

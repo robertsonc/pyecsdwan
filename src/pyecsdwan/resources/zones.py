@@ -250,6 +250,19 @@ class Zones(Resource):
 
     # -- write side -------------------------------------------------------------
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The Orchestrator-wide zone configuration (#69).
+
+        Three endpoints behind one identity: the zone table (``/zones``, a
+        full-table POST), the id allocator it advances (``/zones/nextId``)
+        and the end-to-end ZBFW toggle (``/zones/eeEnable``). Named as a set
+        for the same reason as ``appliance/bgp``: the contract compares
+        strings, and a future writer of any of the three reuses this string
+        or splits the declarations. The per-appliance ``appliance/zones``
+        table is a different object and deliberately not this target.
+        """
+        return "orchestrator zones"
+
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:
             return ApplyResult.noop()

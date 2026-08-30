@@ -396,30 +396,62 @@ class _TargetCtx:
     resolver = _Resolver()
 
 
+#: Declaring kinds whose ref *name* is the appliance (their apply() resolves
+#: ne_pk from ref.name, so their write_target must too).
+_APPLIANCE_NAMED = frozenset({"template-association", "region-association"})
+
+
 def _targets_for(appliance: str) -> dict[str, str]:
     out = {}
     for kind in _declaring_kinds():
+        name = appliance if kind in _APPLIANCE_NAMED else "global"
         target = default_registry.get(kind).write_target(
-            _TargetCtx(), Ref(kind=kind, name="global", appliance=appliance)
+            _TargetCtx(), Ref(kind=kind, name=name, appliance=appliance)
         )
         if target is not None:
             out[kind] = target
     return out
 
 
+#: Declaring kinds whose object is Orchestrator-wide: one instance by
+#: definition, so the target is *expected* to be identical whichever
+#: appliance the ref happens to mention. Everything else must differ per
+#: appliance. Spelled as a list rather than inferred from the kind's name,
+#: because `template-association` writes a per-appliance object without an
+#: `appliance/` prefix — the prefix rule this replaces silently skipped it.
+_SINGLETON_TARGET_KINDS = frozenset({
+    "app-express-association",
+    "interface-labels",
+    "internal-subnets",
+    "loopback-orch",
+    "overlay-priority",
+    "schedule-timezone",
+    "security-policy",   # scoped by map name, which does not vary here
+    "snat-maps",
+    "template-group-priority",
+    "zones",
+})
+
+
 def test_a_declared_target_is_instance_scoped() -> None:
     """The docstring's rule, enforced: a target names the object *and its
     instance*. A target that ignored the appliance would make one legitimate
     fan-out — the same setting pushed to two appliances — look like a
-    conflict, and refusing that is worse than the bug this prevents."""
+    conflict, and refusing that is worse than the bug this prevents. Both
+    directions are asserted: a singleton whose target varied by appliance
+    would fragment one object into phantom non-conflicts."""
     first, second = _targets_for("BR1-EC"), _targets_for("BR2-EC")
     for kind, target in first.items():
-        if not kind.startswith("appliance/"):
-            continue  # orchestrator singletons have one instance by definition
-        assert target != second[kind], (
-            f"{kind} returns the same target for two appliances, so two "
-            f"appliances would read as one object"
-        )
+        if kind in _SINGLETON_TARGET_KINDS:
+            assert target == second[kind], (
+                f"{kind} is Orchestrator-wide but returns different targets "
+                f"for two appliances, splitting one object in two"
+            )
+        else:
+            assert target != second[kind], (
+                f"{kind} returns the same target for two appliances, so two "
+                f"appliances would read as one object"
+            )
 
 
 def test_only_the_known_pair_collides_today() -> None:
@@ -436,6 +468,53 @@ def test_only_the_known_pair_collides_today() -> None:
         "appliance 1.NE deployment": ["appliance/deployment", "appliance/dhcp"],
         "appliance 2.NE deployment": ["appliance/deployment", "appliance/dhcp"],
     }, shared
+
+
+def test_every_curated_kind_is_decided_declare_or_exempt() -> None:
+    """#69's completeness criterion, the whole of it.
+
+    The endpoint-sharing check catches a kind that collides with one already
+    declared; the declaration list catches a kind someone remembered to
+    classify. What neither catches is the kind nobody looked at — and an
+    unexamined kind is exactly where the next deployment/dhcp overlap ships
+    from. So the registry is partitioned: every curated kind is either a
+    declared full-object replacement or a recorded exemption with the reason
+    a target would be wrong for it. A new curated kind fails here until its
+    author has traced apply() to the object it writes, which is the decision
+    this project spent a session learning cannot be derived mechanically.
+    """
+    from pyecsdwan.contract import Tier
+
+    curated = {
+        kind
+        for kind in default_registry.kinds()
+        if default_registry.get(kind).tier is Tier.CURATED
+    }
+    declared = set(_declaring_kinds()) & curated
+    exempt = set(WRITE_TARGET_EXEMPT)
+
+    both = declared & exempt
+    assert not both, (
+        f"{sorted(both)} both declare a target and claim exemption; an "
+        f"exemption for a kind that declares is a stale reason waiting to "
+        f"mislead — remove the exempt entry"
+    )
+    undecided = curated - declared - exempt
+    assert not undecided, (
+        f"{sorted(undecided)} are curated but neither declare a write_target "
+        f"nor record an exemption in WRITE_TARGET_EXEMPT; trace apply() to "
+        f"the object it writes and decide"
+    )
+    stale = exempt - curated
+    assert not stale, (
+        f"{sorted(stale)} are exempted but not curated; remove the entries"
+    )
+    assert declared == set(FULL_OBJECT_REPLACEMENT), (
+        "FULL_OBJECT_REPLACEMENT and the kinds actually declaring "
+        "write_target() have drifted apart: "
+        f"only in the list: {sorted(set(FULL_OBJECT_REPLACEMENT) - declared)}; "
+        f"only declaring: {sorted(declared - set(FULL_OBJECT_REPLACEMENT))}"
+    )
 
 
 def test_every_full_object_replacement_kind_declares_a_target() -> None:
@@ -488,7 +567,77 @@ FULL_OBJECT_REPLACEMENT = (
     "internal-subnets",
     "overlay-priority",
     "template-group-priority",
+    # The #69 completeness sweep (2026-08-30): every remaining curated kind
+    # traced to the object its apply() writes. These replace whole objects.
+    "app-express-association",   # complete association list, POST
+    "appliance/acl",             # complete ACL table, merge: false
+    "appliance/bgp",             # bgp/config/system + neighbor, both whole
+    "appliance/nat-maps",        # complete NAT maps object, merge: false
+    "appliance/nat-pools",       # per-id deletes + whole-object POST
+    "appliance/ospf",            # ospf/config/system + interfaces, both whole
+    "appliance/security-maps",   # complete map set via appliance proxy
+    "appliance/vrrp",            # complete instance list
+    "appliance/zones",           # complete per-appliance zone table
+    "interface-labels",          # full-replace POST of the label table
+    "loopback-orch",             # full structure, never partial
+    "region-association",        # per-appliance PUT replaces the association
+    "schedule-timezone",         # whole (one-field) singleton object
+    "security-policy",           # complete policy per segment pair, merge: false
+    "snat-maps",                 # full-table replace per the SDK's own warning
+    "template-association",      # complete group list, triggers the push
+    "zones",                     # zone table + nextId + eeEnable, one identity
 )
+
+#: Kinds whose apply() does NOT replace a whole shared object, each with the
+#: reason a target would be wrong for it. This is the other half of #69's
+#: completeness criterion: a kind is *decided*, never merely undeclared — the
+#: partition test below refuses a curated kind that is in neither list.
+#: A wrongly-asserted target refuses legitimate changesets, so the honest
+#: answer for these is a recorded exemption, not a guessed string.
+WRITE_TARGET_EXEMPT = {
+    "app-express-group": (
+        "per-entry POST/DELETE by group name; the spec is explicit that the "
+        "POST edits a single group and the table is never replaced"
+    ),
+    "appliance/loopback": (
+        "apply() raises NotImplementedError — no write path exists to declare "
+        "a target for; the decision belongs to whoever implements it"
+    ),
+    "appliance/routes": (
+        "pure add/delete delta per prefix through the add and delete "
+        "endpoints; the code never posts the table whole"
+    ),
+    "bio": (
+        "per-overlay create (POST), update (PUT ?overlayId=) and delete "
+        "(DELETE ?overlayId=); other overlays are never in the body"
+    ),
+    "bio-association": (
+        "membership deltas — adds and removes are separate POSTs of only the "
+        "changed nePks; nothing is replaced"
+    ),
+    "ip-address-group": (
+        "per-entry create/replace/delete by name; the group table is untouched"
+    ),
+    "ip-service-group": (
+        "per-entry create/replace/delete by name; the group table is untouched"
+    ),
+    "region": (
+        "per-entry create (POST), update (PUT ?regionId=) and delete "
+        "(DELETE ?regionId=); other regions are never in the body"
+    ),
+    "regional-overlay": (
+        "region-scoped read-modify-write splice: everything except "
+        "[overlayId][regionId] is carried through from a fresh GET at apply "
+        "time, so two splicers are order-safe. The destructive partner would "
+        "be a kind that PUTs the whole table from plan-time state — none "
+        "exists, and one that appears must declare the table path and move "
+        "this kind beside it (the deployment/dhcp shape)"
+    ),
+    "template-group": (
+        "per-group create/update/delete addressed by ?templateGroup=; other "
+        "groups are never in the body"
+    ),
+}
 
 
 # -- the structured conflict, and both entry points ---------------------------
