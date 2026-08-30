@@ -600,7 +600,7 @@ def test_e2e_list_refs_covers_every_appliance(world: dict[str, Any]) -> None:
     not os.environ.get("ECSDWAN_ORCH_URL"),
     reason="live Orchestrator smoke test; set ECSDWAN_ORCH_URL (and auth) to run",
 )
-def test_live_policy_maps_read_only() -> None:
+def test_live_policy_maps_read_only(readable_refs) -> None:
     """Read-only probe of all five #33 surfaces against a real Orchestrator.
 
     Credentials come from the ambient config/keyring — never hardcoded here.
@@ -615,9 +615,12 @@ def test_live_policy_maps_read_only() -> None:
     client = OrchClient(settings)
     ctx = Ctx(client=client, resolver=Resolver(client))
 
+    probed = 0
     for res in (QosMaps(), OptimizationMaps(), RouteMaps(), Shapers(), InboundShapers()):
-        for ref in res.list_refs(ctx):
-            canonical = res.normalize(res.fetch(ctx, ref))
+        for ref, raw in readable_refs(res, ctx):
+            canonical = res.normalize(raw)
             assert res.normalize(canonical) == canonical, f"{ref} is not idempotent"
             if isinstance(canonical, dict) and canonical.get("activeMap"):
                 assert res.normalize(canonical)["activeMap"] == canonical["activeMap"]
+            probed += 1
+    assert probed, "no appliance answered; the probe proved nothing"

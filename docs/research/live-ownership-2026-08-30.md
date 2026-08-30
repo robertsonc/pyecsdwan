@@ -111,10 +111,39 @@ BGP rtmaps (`S1-ecv-01_to_bd-01`, …) that `bgp` neighbours reference by name i
 `rtmap_inbound`/`rtmap_outbound` — so BGP config points at objects the tool
 cannot see or diff. Its template section is `routesRedistributeMaps`.
 
-## 5. Other live findings
+## 5. What the tool got right, verified live
 
-* `natPools` and `snatMaps` 404 as bare ECOS paths; `nat/natPools` works. Two
-  `test_live_*_read_only` tests fail on a real 400 under 9.7 — unchased.
+`drift` degrades correctly on an incomplete fabric. Two appliances were
+unreachable (state `2`, in maintenance); `drift --kind appliance/bgp` returned:
+
+```
+drift: 0  in-sync: 0  undeclared: 4  unreadable: 2
+incomplete: 2 instance(s)/scope(s) could not be compared, so "no drift" is not
+a claim this run can make                                          exit 8
+```
+
+It enumerated all six, marked the two as `unreadable`, and refused to claim
+"no drift". That is T9's "list failure is incomplete" criterion satisfied, now
+with live evidence rather than mock evidence. `list_refs` returning unreachable
+appliances is correct for this reason and should not be "fixed" to filter them.
+
+## 6. Other live findings
+
+* **`drift --kind` takes registry keys, not user-facing nouns.** `set bgp
+  config --appliance X` works; `drift --kind bgp` is rejected and demands
+  `appliance/bgp`. Decision 6 (#77) says kinds are addressed "by user-facing
+  nouns scoped by the command, never by internal registry keys", so this flag
+  contradicts the ratified grammar. `test_grammar_parity.py` covers the two
+  *parsers* but not this flag's vocabulary.
+* Live read-only smoke probes hard-failed on unreachable appliances because
+  they fetched every ref `list_refs` returned. They now skip what cannot
+  answer (`readable_refs` fixture) and assert they probed something, so an
+  all-unreachable fabric fails loudly rather than passing vacuously.
+* The 400 those probes hit was the two maintenance-mode appliances, not a bad
+  path: every resource fetch succeeds on all four reachable ones. `natPools`
+  and `snatMaps` 404 only as *bare* ECOS paths — the real ones are
+  `nat/natPools` and `vrf/config/snatMaps`, which the resources already use and
+  the vendored payload examples already document.
 * Three `test_live_*_read_only` tests called `config.load_settings()`, which
   does not exist. Gated on `ECSDWAN_ORCH_URL`, so they had never run anywhere.
 

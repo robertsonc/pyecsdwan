@@ -882,7 +882,7 @@ def test_e2e_dnat_view_is_read_only(world: dict[str, Any]) -> None:
     not os.environ.get("ECSDWAN_ORCH_URL"),
     reason="live Orchestrator smoke test; set ECSDWAN_ORCH_URL (and auth) to run",
 )
-def test_live_nat_read_only() -> None:
+def test_live_nat_read_only(readable_refs) -> None:
     """Read-only probe against a real Orchestrator. Credentials come from the
     ambient config/keyring — never hardcoded here."""
     settings = config.settings_from_env()
@@ -893,7 +893,10 @@ def test_live_nat_read_only() -> None:
     canonical = snat.normalize(snat.fetch(ctx, SNAT_REF))
     assert snat.normalize(canonical) == canonical  # idempotency, on real payloads
 
+    probed = 0
     for res in (NatMaps(), NatPools()):
-        for ref in res.list_refs(ctx):
-            once = res.normalize(res.fetch(ctx, ref))
+        for _ref, raw in readable_refs(res, ctx):
+            once = res.normalize(raw)
             assert res.normalize(once) == once
+            probed += 1
+    assert probed, "no appliance answered; the probe proved nothing"
