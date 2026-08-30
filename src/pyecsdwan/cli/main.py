@@ -2198,15 +2198,20 @@ def api(
     policy, reason = retry_mod.effective_policy(
         method_upper, path, retry_mod.Retry.NEVER, scope=scope
     )
-    journal = TxnJournal.create(settings.origin, [Ref(kind="api", name=f"{method_upper} {path}")])
+    # Secret-named query values keep their name and a change hint only:
+    # `--param apiKey=...` must not land verbatim in an audit trail whose
+    # whole point is to be exportable (#106). The request itself sends the
+    # real values; only the record is masked — and the transaction Ref is
+    # built from the masked path too, because the ref key lands in meta.json
+    # and TXN_BEGIN, which is exactly the file nobody thinks of.
+    safe_path = redaction.redact_query(path)
+    journal = TxnJournal.create(
+        settings.origin, [Ref(kind="api", name=f"{method_upper} {safe_path}")]
+    )
     journal.append(
         "RAW_API",
         method=method_upper,
-        # Secret-named query values keep their name and a change hint only:
-        # `--param apiKey=...` must not land verbatim in an audit trail whose
-        # whole point is to be exportable (#106). The request itself sends
-        # the real values; only the record is masked.
-        path=redaction.redact_query(path),
+        path=safe_path,
         params=redaction.redact_params(params),
         body_sha256=body_sha,
         retry_policy=policy.value,

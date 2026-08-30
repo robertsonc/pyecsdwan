@@ -164,6 +164,40 @@ def test_the_raw_api_journal_keeps_param_names_and_masked_values(
     assert raw["params"]["community"].startswith("<redacted")
 
 
+def test_an_inline_query_string_is_masked_in_the_journal_too(
+    state_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--param` is not the only way a secret reaches a Tier-0 call: the path
+    argument itself can carry `?community=...`, and the journal records the
+    path verbatim otherwise."""
+    monkeypatch.setenv("ECSDWAN_API_KEY", "test-key")
+    with respx.mock:
+        respx.get(f"{BASE}/snmp/config", params={"community": PARAM_SENTINEL}).mock(
+            return_value=httpx.Response(200, json={})
+        )
+        result = runner.invoke(
+            app,
+            ["--orch-url", ORIGIN, "api", "get",
+             f"/snmp/config?community={PARAM_SENTINEL}"],
+        )
+    assert result.exit_code == 0, result.output
+    assert _sweep(state_home) == []
+
+
+def test_api_error_text_masks_query_values() -> None:
+    """An exception's text is the one string guaranteed to travel — into
+    logs, the journal's response_summary, a pasted bug report — so the
+    masking happens at construction, not at any rendering site."""
+    from pyecsdwan.client import OrchApiError
+
+    exc = OrchApiError(
+        "GET", f"/snmp/config?community={PARAM_SENTINEL}&rows=5", 500, "boom"
+    )
+    assert PARAM_SENTINEL not in str(exc)
+    assert PARAM_SENTINEL not in exc.path
+    assert "rows=5" in exc.path
+
+
 # -- rollback still works ------------------------------------------------------
 
 
