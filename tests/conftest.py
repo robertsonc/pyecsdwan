@@ -1,8 +1,24 @@
 """Shared fixtures for the pyecsdwan unit test suite."""
 
+import base64
+
 import pytest
 
-from pyecsdwan import config
+from pyecsdwan import config, vault
+
+
+@pytest.fixture(autouse=True)
+def envelope_key(monkeypatch):
+    """A fixed env-sourced envelope key, so no test touches the OS keyring.
+
+    Autouse because the code that needs it decides for itself — any test that
+    stages or snapshots something the secret detector recognises will reach
+    for a key, and a CI box has no keyring backend to give one. Tests that
+    exercise the key-less fail-closed path delete the variable themselves.
+    """
+    monkeypatch.setenv(
+        vault.ENV_ENVELOPE_KEY, base64.b64encode(b"\x07" * vault.KEY_BYTES).decode()
+    )
 
 
 @pytest.fixture

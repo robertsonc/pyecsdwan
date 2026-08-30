@@ -27,7 +27,7 @@ from typing import Any
 import httpx
 import structlog
 
-from pyecsdwan import config
+from pyecsdwan import config, redaction
 from pyecsdwan.config import Settings
 from pyecsdwan.retry import Retry, effective_policy
 
@@ -42,15 +42,22 @@ _RETRYABLE_STATUS = frozenset({500, 502, 503, 504})
 
 
 class OrchApiError(Exception):
-    """API call failed; carries status and the Orchestrator's error text."""
+    """API call failed; carries status and the Orchestrator's error text.
+
+    The recorded path has secret-named query values masked (#106): an
+    exception's text is the one string guaranteed to travel — into logs, the
+    journal's ``response_summary``, a pasted bug report — and an appliance
+    proxy path can carry credentials folded in as query parameters. Masked
+    here, at construction, so no rendering site has to remember to.
+    """
 
     def __init__(self, method: str, path: str, status_code: int | None, detail: str):
         self.method = method
-        self.path = path
+        self.path = redaction.redact_query(path)
         self.status_code = status_code
         self.detail = detail
         status = status_code if status_code is not None else "connection error"
-        super().__init__(f"{method} {path} failed ({status}): {detail[:500]}")
+        super().__init__(f"{method} {self.path} failed ({status}): {detail[:500]}")
 
 
 def validate_ne_pk(ne_pk: str) -> str:

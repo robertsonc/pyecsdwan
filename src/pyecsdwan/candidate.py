@@ -38,7 +38,7 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, Protocol
 
-from pyecsdwan import config
+from pyecsdwan import config, vault
 from pyecsdwan.contract import Ref
 from pyecsdwan.locking import DEFAULT_TIMEOUT, HostLock
 
@@ -60,10 +60,19 @@ def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
 #: On-disk schema version for the candidate store. Bumped only alongside an
 #: entry in :data:`CANDIDATE_MIGRATIONS`; a file claiming anything higher was
 #: written by a newer binary and is refused rather than guessed at (#108).
-CANDIDATE_FORMAT = 2
+#: Format 3 (#106): secret-named values inside ``intent`` are envelope-sealed
+#: (:mod:`pyecsdwan.vault`) rather than stored in the clear. The bump is what
+#: keeps an older binary from reading a sealed blob as literal intent and
+#: writing the *marker* to an appliance.
+CANDIDATE_FORMAT = 3
+
+#: GCM associated-data tag for sealed candidate values — a blob sealed here
+#: cannot be spliced into a journal and opened as a snapshot (#106).
+INTENT_PURPOSE = "candidate-intent"
 
 #: Older formats this binary knows how to read, mapped to the function that
-#: brings one forward. Populated below, once the migrations are defined.
+#: brings one forward one step. Applied in sequence by ``_load``, so a
+#: format-1 file passes through every migration between it and current.
 CANDIDATE_MIGRATIONS: dict[int, Any] = {}
 
 
@@ -94,6 +103,19 @@ def _migrate_1_to_2(data: dict[str, Any], origin: str) -> dict[str, Any]:
 
 
 CANDIDATE_MIGRATIONS[1] = _migrate_1_to_2
+
+
+def _migrate_2_to_3(data: dict[str, Any], origin: str) -> dict[str, Any]:
+    """Format 2 differs only in what it *may not* contain: sealed values.
+
+    Nothing in the bytes needs rewriting — a format-2 file is a valid
+    format-3 file whose secrets happen to be in the clear. They are sealed by
+    the next save, like the origin field in the 1→2 migration.
+    """
+    return data
+
+
+CANDIDATE_MIGRATIONS[2] = _migrate_2_to_3
 
 #: Every mode `materialize_desired` knows how to honour. Anything else is an
 #: error: modes decide whether omitted keys keep their live values, and
@@ -455,9 +477,8 @@ class CandidateStore:
                 f"reads at most {CANDIDATE_FORMAT}; upgrade, or discard it with a "
                 f"build that understands it. The file has not been modified."
             )
-        migrate = CANDIDATE_MIGRATIONS.get(fmt)
-        if migrate is not None:
-            data = migrate(data, self.origin)
+        for step in range(fmt, CANDIDATE_FORMAT):
+            data = CANDIDATE_MIGRATIONS[step](data, self.origin)
         stored = data.get("origin")
         if stored != self.origin:
             # Belt and braces behind the digest in the file name: if a file is
@@ -492,7 +513,11 @@ class CandidateStore:
             item = CandidateItem(
                 ref_key=entry["ref_key"],
                 mode=mode,
-                intent=entry.get("intent", {}),
+                # Sealed secret values open here, so everything downstream —
+                # materialize, diff, commit — works on real intent. What they
+                # render is a different question, answered by redaction at
+                # each rendering surface (#106).
+                intent=vault.unseal_secrets(entry.get("intent", {}), INTENT_PURPOSE),
                 delete_paths=entry.get("delete_paths", []),
             )
             self.items[item.ref_key] = item
@@ -501,7 +526,14 @@ class CandidateStore:
         payload = {
             "format": CANDIDATE_FORMAT,
             "origin": self.origin,
-            "items": [dataclasses.asdict(i) for i in self.items.values()],
+            # Secret-named values are sealed before they touch disk. This
+            # raises — and the save with it — when no envelope key can be had:
+            # a candidate that cannot be stored safely is not stored (#106).
+            "items": [
+                dataclasses.asdict(i)
+                | {"intent": vault.seal_secrets(i.intent, INTENT_PURPOSE)}
+                for i in self.items.values()
+            ],
         }
         # Unique temp name + fsync + 0o600: two shells staging against the same
         # host must not O_TRUNC each other's staging file, and the candidate can

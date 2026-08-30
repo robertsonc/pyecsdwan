@@ -84,14 +84,26 @@ def test_a_snapshot_body_is_not_in_the_default_export(state_home: Path) -> None:
 def test_include_snapshots_really_discloses(state_home: Path) -> None:
     """Guards the guard. A redactor hard-wired to always fire would leave the
     test above green and this whole feature useless — `--include-snapshots`
-    exists precisely for the restore-verification case an auditor needs."""
+    exists precisely for the restore-verification case an auditor needs.
+
+    Since #106, "discloses" has a ceiling: the body and its non-secret content,
+    never a secret-named value. Verifying a restore does not require reading a
+    community string out of a log aggregator, and the acceptance bar is that no
+    sentinel survives into *any* export — this flag included.
+    """
     _journal()
 
     result = _cli("--events", "--include-snapshots")
 
     assert result.exit_code == 0, result.output
     snap = [r for r in _lines(result.stdout) if r["event"] == "SNAPSHOT"]
-    assert snap[0]["raw"] == SECRET
+    body = snap[0]["raw"]
+    # The body is really there: structure and non-secret values intact ...
+    assert body["users"] == ["admin"]
+    assert set(body["snmp"]) == {"community"}
+    # ... and the one secret-named value is masked, keeping only a change hint.
+    assert body["snmp"]["community"].startswith("<redacted")
+    assert "public-but-not-really" not in result.stdout
 
 
 def test_disclosing_bodies_announces_itself_off_stream(state_home: Path) -> None:
