@@ -611,7 +611,7 @@ def test_live_policy_maps_read_only() -> None:
     from pyecsdwan.resolver import Resolver
     from pyecsdwan.resources.shapers import InboundShapers, Shapers
 
-    settings = config.load_settings()
+    settings = config.settings_from_env()
     client = OrchClient(settings)
     ctx = Ctx(client=client, resolver=Resolver(client))
 

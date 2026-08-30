@@ -615,7 +615,7 @@ def test_live_regions_read_only() -> None:
     """Read-only probe of the two confirmed endpoints against a real
     Orchestrator. Credentials come from the ambient config/keyring — never
     hardcoded here."""
-    settings = config.load_settings()
+    settings = config.settings_from_env()
     ctx = Ctx(client=OrchClient(settings), resolver=Resolver(OrchClient(settings)))
 
     regions = Region().list_refs(ctx)

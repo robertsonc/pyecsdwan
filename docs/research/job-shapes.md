@@ -55,6 +55,23 @@ Matched as case-insensitive **substrings**, so `COMPLETED`, `Completed` and
 | Prefix | Orchestrator / ECOS | Provenance |
 |---|---|---|
 | `Success` | version unrecorded | `docs/research/expert-repo.md` §Async patterns: "Success test used in the field: `taskStatus == "COMPLETED" and result.startswith("Success")`" |
+| `Saved change on appliance successfully` | Orchestrator 9.7.0.43282 / ECOS 9.7.0.0_109184 | Observed live 2026-08-30 on a lab fabric: `POST /appliance/saveChanges` after a BGP neighbor write returned `taskStatus='COMPLETED' result='Saved change on appliance successfully'`. Captured verbatim from the UNKNOWN failure detail this table is designed to grow from. |
+
+The second entry is the **whole string**, not the shorter `saved change on
+appliance`. The `Success` entry works as a prefix because a sentence starting
+with "Success" cannot be a negation; here the success word is at the *end*,
+where that protection is gone — `saved change on appliance` alone would also
+admit a future `...partially` or `...with warnings`. A variant reports itself
+as UNKNOWN and gets its own row, which costs one failed transaction and buys
+the guarantee that no unseen wording is ever read as a confirmed push.
+
+This shape cost a real transaction to find: the write reached the fabric and
+was saved, the poller could not confirm it, the engine auto-reverted, and the
+revert hit the *same* unrecognised shape and reported `REVERT_FAILED`. The
+fabric was correct throughout — both the apply and the revert really happened —
+but the tool could report neither. That is the designed fail-closed behaviour
+working as intended and is exactly why this table exists; it is also why an
+entry here is load-bearing enough to need a version stamp.
 
 The version column is honest rather than helpful: the observation is
 field-sourced but arrived without a version stamp, and the surrounding SDK

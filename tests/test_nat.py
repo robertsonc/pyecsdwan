@@ -885,7 +885,7 @@ def test_e2e_dnat_view_is_read_only(world: dict[str, Any]) -> None:
 def test_live_nat_read_only() -> None:
     """Read-only probe against a real Orchestrator. Credentials come from the
     ambient config/keyring — never hardcoded here."""
-    settings = config.load_settings()
+    settings = config.settings_from_env()
     client = OrchClient(settings)
     ctx = Ctx(client=client, resolver=Resolver(client))
 
