@@ -369,14 +369,20 @@ alongside #106, which owns the credential half.
 ## Parity map (Orchestrator UI area → code status)
 
 **What ✅ means here, precisely (#66).** It means the code shipped and is green
-against the bundled mock Orchestrator — `mock-verified` on the evidence ladder.
-It does **not** mean anyone has run a write against real gear. Today **no
-resource in this tool has live change-and-rollback evidence**: not one write
-path has been executed and rolled back on a fabric at a recorded version.
+against the bundled mock Orchestrator. As of 2026-08-30, 38 of the 41 curated
+resources are also **`live-read-verified`** against Orchestrator 9.7.0.43282 /
+ECOS 9.7.0.0_109184: `fetch()` and `normalize()` were run on a real fabric,
+normalize is idempotent on those payloads, and a canonical state diffed against
+itself is empty (`docs/sitrep/2026-08-30-live-read.md`). The three that are not
+— `appliance/vrrp`, `security-policy`, `ip-service-group` — had nothing of that
+kind configured to read.
 
-That is not a caveat on a few rows, it is the state of all 41 of them, which is
-why it is stated once here rather than repeated in every cell — a per-row claim
-maintained by hand is a claim that drifts. The machine-readable answer is
+It still does **not** mean anyone has run a write against real gear. **No
+resource in this tool has live change-and-rollback evidence**: not one write
+path has been executed and rolled back on a fabric at a recorded version. That
+remains the state of all 41, which is why it is stated once here rather than
+repeated in every cell — a per-row claim maintained by hand is a claim that
+drifts. The machine-readable answer is
 `src/pyecsdwan/_evidence/ledger.json`, checked on load and by
 `tests/test_evidence.py`, and readable offline:
 

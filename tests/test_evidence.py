@@ -230,13 +230,34 @@ def test_the_support_matrix_is_empty_and_that_is_the_honest_answer() -> None:
     )
 
 
-def test_the_ledger_note_explains_why_the_live_reads_do_not_count() -> None:
-    """The ledger has to carry its own reasoning: someone reading it will see
-    live-read history in the sitreps and every record at mock-verified, and
-    the resolution of that has to be in the file, not in a commit message."""
+def test_the_ledger_note_says_what_the_live_reads_do_and_do_not_buy() -> None:
+    """The ledger carries its own reasoning, and the reasoning changed.
+
+    It used to explain why the 2026-08-26 live reads counted for nothing: none
+    recorded the Orchestrator version. The 2026-08-30 sweep recorded it, so 38
+    resources are `live-read-verified` — and the note now has a harder job,
+    because a reader who sees "live" anywhere is one step from believing the
+    write paths were tested. They were not. The note must say both.
+    """
     note = evidence.ledger().note
-    assert "version" in note
+    assert "live-read-verified" in note
     assert "docs/live-validation.md" in note
+    # The limit, stated in the file rather than left to be inferred.
+    assert "no write path" in note.lower()
+
+
+def test_no_record_claims_a_write_level() -> None:
+    """The claim the parity map makes, enforced against the data.
+
+    Level 4 and above are claims that a write reached real gear and was
+    verified. Nothing here has earned one, and a ledger that quietly acquired
+    one would make `show coverage --evidence` lie to an operator."""
+    written = [
+        r.kind
+        for r in evidence.ledger().records.values()
+        if r.level >= evidence.Evidence.LIVE_NO_OP_WRITE_VERIFIED
+    ]
+    assert written == [], f"{written} claim a verified write path"
 
 
 # -- degradation --------------------------------------------------------------
