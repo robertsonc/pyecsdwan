@@ -228,6 +228,66 @@ def selected_sections(ctx: Ctx, template_group: str) -> list[str]:
     return [str(s) for s in raw]
 
 
+def known_sections(ctx: Ctx) -> frozenset[str]:
+    """Every template section name this Orchestrator knows, selected or not.
+
+    The vocabulary is *readable*, which is the whole point: `SECTION_MAP` was
+    written by guessing names from ECOS paths, and a guess that matches nothing
+    is indistinguishable from a resource no template governs. Both answer
+    "unowned", and one of them is wrong in the direction that lets a template
+    silently revert an operator's change.
+
+    Read once per run through the resolver's cache so a fanned-out plan pays
+    for it once, and origin-keyed there so two Orchestrators cannot share a
+    vocabulary (#63).
+    """
+
+    def fetch() -> list[str]:
+        raw = ctx.client.get("/template/templateGroups")
+        if not isinstance(raw, list):
+            raise Unreadable(
+                f"template groups came back as {type(raw).__name__}, "
+                f"expected a list of groups"
+            )
+        names: set[str] = set()
+        for group in raw:
+            if not isinstance(group, dict):
+                continue
+            for tpl in group.get("templates") or []:
+                if isinstance(tpl, dict) and tpl.get("name"):
+                    names.add(str(tpl["name"]))
+        return sorted(names)
+
+    try:
+        return frozenset(ctx.resolver.cached("template_sections", fetch))
+    except OrchApiError as exc:
+        raise Unreadable(f"template vocabulary unreadable: {exc}") from exc
+
+
+def _unknown_names(ctx: Ctx, entry: Sections) -> tuple[str, ...]:
+    """Mapped section names this Orchestrator has never heard of.
+
+    Returned rather than raised: an unreadable vocabulary must not turn every
+    ownership question into an error, and a *partly* wrong mapping is still
+    usable — a kind naming two sections where one is real can still match.
+    """
+    try:
+        vocabulary = known_sections(ctx)
+    except Unreadable as exc:
+        log.debug("ownership_vocabulary_unreadable", error=str(exc))
+        return ()
+    if not vocabulary:
+        # A read that succeeded and returned nothing is not evidence that every
+        # name is stale — it is far more likely a shape this parse did not
+        # understand, or an Orchestrator that reports groups without their
+        # template lists. Calling that "stale" would turn one unrecognised
+        # response into UNKNOWN for every kind at once, which is fail-closed
+        # in the letter and useless in practice.
+        log.debug("ownership_vocabulary_empty")
+        return ()
+    return tuple(n for n in entry.names if n not in vocabulary)
+
+
 def owning_group(ctx: Ctx, kind: str, ne_pk: str) -> Ownership:
     """Resolve template ownership of ``kind`` on one appliance.
 
@@ -273,6 +333,26 @@ def owning_group(ctx: Ctx, kind: str, ne_pk: str) -> Ownership:
         return Ownership.unknown(
             f"template selection unreadable for group(s) {', '.join(unreadable)} "
             f"associated with {ne_pk}; one of them may select {names}"
+        )
+
+    # Nothing matched. Before reporting that as an answer, ask whether these
+    # names could ever have matched: a section this Orchestrator has never
+    # heard of produces exactly the same non-match as a resource no template
+    # governs, and only one of those is safe to act on. Read here rather than
+    # up front so a matching kind never pays for it, and so the question is
+    # asked precisely where the wrong answer would be dangerous.
+    #
+    # Verified live on 9.7: `optimization-map` looks for `optimizationMaps`,
+    # the real section is `optmap`, and `optmap` demonstrably pushes to the
+    # appliance — so the old "unowned" here permitted a write the template
+    # silently reverted.
+    stale = _unknown_names(ctx, entry)
+    if stale and len(stale) == len(entry.names):
+        return Ownership.unknown(
+            f"ownership of {kind} cannot be checked: it is mapped to template "
+            f"section(s) {', '.join(stale)}, and this Orchestrator reports no "
+            f"section by any of those names. The mapping is stale or was "
+            f"guessed; correct it against the names the fabric reports"
         )
     if not entry.verified:
         return Ownership.unknown(

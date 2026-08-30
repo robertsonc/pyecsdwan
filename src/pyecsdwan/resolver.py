@@ -244,6 +244,16 @@ class Resolver:
             return []
         return [project_appliance(a) for a in raw if isinstance(a, dict)]
 
+    def cached(self, name: str, fetch: Any) -> Any:
+        """Public entry to the same TTL cache the resolved sections use.
+
+        Exists so callers outside this module — `ownership`, which reads the
+        Orchestrator's template vocabulary once per run rather than once per
+        planned item — get the origin keying and the staleness bound for free
+        instead of growing a second cache with neither (#63).
+        """
+        return self._section(name, fetch)
+
     def _section(self, name: str, fetch: Any) -> Any:
         entry = self._data.get(name)
         if entry and (time.time() - entry.get("ts", 0)) < self.ttl:

@@ -35,6 +35,15 @@ SECMAP_REF = Ref(kind="appliance/security-maps", name="global", appliance="BR1-E
 class _StubResolver:
     """Resolves any appliance name straight through to a canned nePk."""
 
+    def cached(self, name, fetch):
+        """Match `Resolver.cached`: call through, no caching.
+
+        Ownership reads the Orchestrator's template vocabulary through this in
+        the real resolver; a stub that lacks it fails with an AttributeError
+        that says nothing about the behaviour under test.
+        """
+        return fetch()
+
     def ne_pk_for(self, name: str) -> str:
         return {"BR1-EC": "3.NE", "HUB1-EC": "1.NE", "BR2-EC": "5.NE"}.get(name, name)
 

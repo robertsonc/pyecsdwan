@@ -62,6 +62,15 @@ RAW = {
 class _StubResolver:
     """Minimal resolver stand-in: name -> nePk, for unit tests without a live inventory."""
 
+    def cached(self, name, fetch):
+        """Match `Resolver.cached`: call through, no caching.
+
+        Ownership reads the Orchestrator's template vocabulary through this in
+        the real resolver; a stub that lacks it fails with an AttributeError
+        that says nothing about the behaviour under test.
+        """
+        return fetch()
+
     def __init__(self, mapping: dict[str, str]):
         self._map = mapping
 
@@ -260,6 +269,11 @@ def test_managed_by_unknown_when_the_group_selects_something_else(settings):
     )
     respx.get(BASE + "/template/templateSelection", params={"templateGroup": "Branch-Std"}).mock(
         return_value=httpx.Response(200, json=["securityMaps"])
+    )
+    # The vocabulary read the non-match path now makes: these section names
+    # are real, so the assertion stays about 'not selected'.
+    respx.get(f"{BASE}/template/templateGroups").mock(
+        return_value=httpx.Response(200, json=[{"name": "g", "templates": []}])
     )
     # "deployment"/"interfaces" are UI-grouping candidates nobody has seen in a
     # live selected-section list, so a group selecting neither has not ruled

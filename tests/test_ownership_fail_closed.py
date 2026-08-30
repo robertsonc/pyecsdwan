@@ -35,6 +35,7 @@ NE_PK = "3.NE"
 
 ASSOCIATION = f"{BASE}/template/applianceAssociation"
 SELECTION = f"{BASE}/template/templateSelection"
+GROUPS = f"{BASE}/template/templateGroups"
 
 #: A kind whose section names are live-confirmed, and one whose names are
 #: spelled after the ECOS path and never observed. The difference between them
@@ -58,6 +59,29 @@ def _associated(*groups: str) -> None:
 
 def _selects(*sections: str) -> None:
     respx.get(SELECTION).mock(return_value=httpx.Response(200, json=list(sections)))
+
+
+def _vocabulary(*names: str) -> None:
+    """What the Orchestrator says its template sections are *called*.
+
+    Read only on a non-match, where a name the fabric has never heard of and a
+    section nobody selected produce the same silence. These tests are about
+    the second case, so the vocabulary here contains every name under test —
+    a kind whose names are absent is `test_a_name_the_fabric_never_heard_of_
+    is_unknown`.
+    """
+    respx.get(GROUPS).mock(
+        return_value=httpx.Response(
+            200,
+            json=[{"name": "g", "templates": [{"name": n} for n in names]}],
+        )
+    )
+
+
+def _text(verdict) -> str:
+    """Every human-facing string on an Ownership, whatever field carries it."""
+    import dataclasses
+    return " ".join(str(v) for v in dataclasses.asdict(verdict).values() if v)
 
 
 # -- the table itself --------------------------------------------------------
@@ -199,6 +223,7 @@ def test_a_non_match_on_a_verified_name_is_unowned(ctx: Ctx) -> None:
     select it genuinely does not own static routes."""
     _associated("Branch-Std")
     _selects("dns", "snmp")
+    _vocabulary("subnets", "routes", "bgp", "dns", "snmp")
     owns = ownership.owning_group(ctx, VERIFIED_KIND, NE_PK)
     assert owns.state is Owned.UNOWNED
     assert not owns.blocks_write
@@ -212,6 +237,7 @@ def test_a_non_match_on_a_guessed_name_is_unknown(ctx: Ctx) -> None:
     "wrong name" are indistinguishable from here."""
     _associated("Branch-Std")
     _selects("dns", "snmp")
+    _vocabulary("subnets", "routes", "bgp", "dns", "snmp")
     owns = ownership.owning_group(ctx, GUESSED_KIND, NE_PK)
     assert owns.state is Owned.UNKNOWN
     assert owns.blocks_write
@@ -309,3 +335,72 @@ def test_the_plan_renderer_shows_both_blocking_states() -> None:
     # And nothing at all for the state that needs no action.
     unowned = _render(Ownership.unowned("no group associated"))
     assert "managed-by" not in unowned and "ownership-unknown" not in unowned
+
+
+# -- a name the fabric never heard of (#20, live-found on 9.7) ---------------
+
+
+@respx.mock
+def test_a_name_the_fabric_never_heard_of_is_unknown(ctx: Ctx) -> None:
+    """The fail-open this closes, found live.
+
+    `appliance/optimization-map` looked for a section called
+    `optimizationMaps`. The real name on Orchestrator 9.7 is `optmap`, that
+    section is selected, and it demonstrably pushes to the appliance — its four
+    entries match the live config byte-for-byte by comment.
+
+    A name nothing can match produces exactly the same non-match as a resource
+    no template governs, and the old code answered both with "unowned". One of
+    those answers permits a write the template silently reverts, which is the
+    operator surprise ownership exists to prevent.
+    """
+    _associated("Branch-Std")
+    _selects("optmap", "qosMaps")  # the real names, none of them the guess
+    _vocabulary("optmap", "qosMaps", "bgp")
+
+    verdict = ownership.owning_group(ctx, "appliance/optimization-map", NE_PK)
+    assert verdict.state is Owned.UNKNOWN
+    assert "no section by any of those names" in _text(verdict)
+
+
+@respx.mock
+def test_an_unreadable_vocabulary_does_not_invent_staleness(ctx: Ctx) -> None:
+    """The vocabulary is an *extra* signal, never a prerequisite.
+
+    If the read fails the answer must be whatever it was before this check
+    existed — turning one unreadable endpoint into UNKNOWN for every kind at
+    once is fail-closed in the letter and useless in practice.
+    """
+    _associated("Branch-Std")
+    _selects("dns", "snmp")
+    respx.get(GROUPS).mock(return_value=httpx.Response(500, text="boom"))
+
+    verdict = ownership.owning_group(ctx, VERIFIED_KIND, NE_PK)
+    assert verdict.state is Owned.UNOWNED
+
+
+@respx.mock
+def test_an_empty_vocabulary_does_not_invent_staleness(ctx: Ctx) -> None:
+    """A read that succeeds and returns nothing is not evidence either. It is
+    far more likely a shape this parse did not understand — the mock reports
+    groups without their template lists, for one."""
+    _associated("Branch-Std")
+    _selects("dns", "snmp")
+    respx.get(GROUPS).mock(return_value=httpx.Response(200, json=[]))
+
+    verdict = ownership.owning_group(ctx, VERIFIED_KIND, NE_PK)
+    assert verdict.state is Owned.UNOWNED
+
+
+@respx.mock
+def test_a_partly_stale_mapping_can_still_match(ctx: Ctx) -> None:
+    """Only an *entirely* unknown mapping is refused. A kind naming two
+    sections where one is real is still usable, and `inbound-shaper` is exactly
+    that: `shaper` is real and selected, `inboundShapers` is not a section at
+    all."""
+    _associated("Branch-Std")
+    _selects("shaper")
+    _vocabulary("shaper", "qosMaps")
+
+    verdict = ownership.owning_group(ctx, "appliance/inbound-shaper", NE_PK)
+    assert verdict.state is Owned.OWNED
