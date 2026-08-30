@@ -35,6 +35,10 @@ dependencies = [
     "structlog~=26.1",
     "PyYAML~=6.0.3",
     "keyring~=25.7",
+    # Envelope encryption for rollback-private secrets (#106). Already present
+    # transitively on Linux (keyring -> SecretStorage), but the vault's use is
+    # direct, and a direct use of a transitive dependency is a missing pin.
+    "cryptography~=50.0",
 ]
 
 [project.optional-dependencies]
