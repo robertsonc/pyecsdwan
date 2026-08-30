@@ -5,12 +5,19 @@ Layout (one directory per transaction, under ``~/.pyecsdwan/journal/``)::
     <txn-id>/
         meta.json        # small state record, atomically rewritten (tmp+rename+fsync)
         events.jsonl     # append-only event log, fsynced per record
+        private.jsonl    # rollback-private snapshot bodies (#106)
         confirm.marker   # written by bare `commit` inside a confirm window
         watchdog.pid     # pid of the detached rollback watchdog, if armed
 
-``events.jsonl`` is the source of truth for rollback: SNAPSHOT events embed
-the full pre-change raw server state per resource. ``meta.json`` is a fast
-index for listing/orphan-scan; if the two ever disagree, events win.
+``events.jsonl`` orders the transaction and is what the audit export reads; a
+SNAPSHOT event carries the digest and size of the pre-change state, never the
+state itself. The body lives in ``private.jsonl``, which nothing exports:
+snapshots embed whole server objects — BGP neighbor passwords, SNMP
+communities — and the split is what lets the audit trail leave the machine
+while rollback material never does (#106). A body the secret detector flags
+is envelope-encrypted (:mod:`pyecsdwan.vault`) inside that file as well.
+``meta.json`` is a fast index for listing/orphan-scan; if it and the events
+ever disagree, events win.
 
 Journal doubles as the audit log: Tier-0 raw API calls are journaled here too
 (state AUDIT_ONLY), with no rollback data beyond what a GET-before-write could
@@ -29,13 +36,17 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from pyecsdwan import config
+from pyecsdwan import config, redaction, vault
 from pyecsdwan.contract import RawState, Ref
 
 #: On-disk schema version for ``meta.json``. A file claiming anything higher
 #: was written by a newer binary; this one refuses it rather than reading it
 #: through an older shape and rewriting it (#108).
 META_FORMAT = 2
+
+#: GCM associated-data tag for sealed snapshot bodies — a blob sealed here
+#: cannot be spliced into a candidate file and opened as intent (#106).
+SNAPSHOT_PURPOSE = "journal-snapshot"
 
 
 class JournalFormatError(Exception):
@@ -157,6 +168,7 @@ class TxnJournal:
         self.dir = txn_dir
         self.meta = meta
         self._events_path = txn_dir / "events.jsonl"
+        self._private_path = txn_dir / "private.jsonl"
 
     # -- construction --------------------------------------------------------
 
@@ -192,16 +204,17 @@ class TxnJournal:
 
     # -- event log -----------------------------------------------------------
 
-    def _write_line(self, record: dict[str, Any]) -> None:
+    def _write_line(self, record: dict[str, Any], path: Path | None = None) -> None:
         line = json.dumps(record, sort_keys=True, default=str)
         # 0o600 on first creation; snapshots can embed sensitive server config.
-        fd = os.open(self._events_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(path if path is not None else self._events_path,
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
             fh.flush()
             os.fsync(fh.fileno())
 
-    def _repair_tail(self) -> dict[str, Any] | None:
+    def _repair_tail(self, path: Path | None = None) -> dict[str, Any] | None:
         """Terminate or discard an unterminated final record (#110).
 
         Every complete record ends with a newline, written in the same call as
@@ -224,8 +237,9 @@ class TxnJournal:
         as a digest and a length rather than quoted: a fragment can be part of
         a snapshot body, and this file is 0600 for that reason.
         """
+        target = path if path is not None else self._events_path
         try:
-            data = self._events_path.read_bytes()
+            data = target.read_bytes()
         except FileNotFoundError:
             return None
         if not data or data.endswith(b"\n"):
@@ -238,7 +252,7 @@ class TxnJournal:
             action = "discarded"
         else:
             action = "terminated"
-        with open(self._events_path, "r+b") as fh:
+        with open(target, "r+b") as fh:
             if action == "discarded":
                 fh.truncate(cut)
             else:
@@ -307,20 +321,125 @@ class TxnJournal:
     # -- snapshots -----------------------------------------------------------
 
     def record_snapshot(self, ref: Ref, raw: RawState) -> None:
-        self.append("SNAPSHOT", ref=ref.key(), exists=raw is not None, raw=raw)
+        """Capture pre-change state: digest to the audit log, body to private.
+
+        Order matters twice here. The seal happens *first*, so a box that
+        cannot encrypt a secret-bearing body fails before one byte of it is
+        persisted — and before the commit's first fabric write, because
+        snapshotting precedes applying. The private record lands before the
+        public event, so a SNAPSHOT event never claims a body that a crash
+        kept out of ``private.jsonl``; the reverse orphan (a private record
+        with no event) is harmless and invisible.
+        """
+        sha = redaction.digest(raw)
+        record: dict[str, Any] = {"ref": ref.key(), "exists": raw is not None}
+        if raw is not None and redaction.finds_secrets(raw):
+            record["sealed"] = vault.seal(raw, purpose=SNAPSHOT_PURPOSE)
+        else:
+            record["raw"] = raw
+        repair = self._repair_tail(self._private_path)
+        if repair is not None:
+            self.append("JOURNAL_REPAIRED", file=self._private_path.name, **repair)
+        self._write_line({"ts": utcnow(), **record}, path=self._private_path)
+        canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"), default=str)
+        self.append(
+            "SNAPSHOT",
+            ref=ref.key(),
+            exists=raw is not None,
+            sha256=sha,
+            bytes=len(canonical.encode("utf-8")),
+            private=True,
+        )
+
+    def _private_records(self) -> dict[str, dict[str, Any]]:
+        """Last private record per ref key. Lenient on parse — the strict
+        cross-check against the event log lives in :meth:`snapshots`, which
+        knows which refs *must* be present."""
+        out: dict[str, dict[str, Any]] = {}
+        if not self._private_path.exists():
+            return out
+        with open(self._private_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict) and "ref" in record:
+                    out[str(record["ref"])] = record
+        return out
+
+    def _private_body(self, ref_key: str, event: dict[str, Any]) -> RawState:
+        """The snapshot body for one SNAPSHOT event, opened and verified.
+
+        Everything here fails closed, because the caller is a revert: a
+        missing record, an unopenable seal, or a body whose digest disagrees
+        with the audit log each mean the journal cannot prove what the
+        resource looked like — and restoring a guess is worse than refusing.
+        """
+        record = self._private_records().get(ref_key)
+        if record is None:
+            raise JournalCorrupt(
+                f"{self._private_path}: no private snapshot for {ref_key!r}, but "
+                f"the event log says one was taken; refusing to revert from an "
+                f"incomplete history"
+            )
+        raw: RawState
+        if "sealed" in record:
+            raw = vault.unseal(record["sealed"], purpose=SNAPSHOT_PURPOSE)
+        else:
+            raw = record.get("raw")
+        expected = event.get("sha256")
+        if expected is not None and redaction.digest(raw) != expected:
+            raise JournalCorrupt(
+                f"{self._private_path}: snapshot body for {ref_key!r} does not "
+                f"match the digest the event log recorded; refusing to restore "
+                f"state the journal cannot vouch for"
+            )
+        return raw
 
     def snapshots(self) -> dict[str, RawState]:
-        """Pre-change raw state per ref key, from the event log.
+        """Pre-change raw state per ref key, cross-checked event log against
+        private store.
 
         Strict: this is what a revert restores from, and a missing key here is
         read by the caller as "the resource did not exist before", which would
-        make it *delete* something the journal simply lost.
+        make it *delete* something the journal simply lost. Events written
+        before the #106 split carry the body inline and are read as they are.
         """
         snaps: dict[str, RawState] = {}
         for ev in self.events(strict=True):
-            if ev.get("event") == "SNAPSHOT":
-                snaps[ev["ref"]] = ev.get("raw") if ev.get("exists") else None
+            if ev.get("event") != "SNAPSHOT":
+                continue
+            if not ev.get("exists"):
+                snaps[ev["ref"]] = None
+            elif ev.get("private"):
+                snaps[ev["ref"]] = self._private_body(ev["ref"], ev)
+            else:
+                snaps[ev["ref"]] = ev.get("raw")
         return snaps
+
+    def private_bodies(self) -> dict[str, RawState]:
+        """Snapshot bodies for export, best-effort and never fail-the-stream.
+
+        The lenient sibling of :meth:`snapshots`, for the audit path: an
+        export must still describe a journal whose vault key is gone, so a
+        body that will not open is reported as absent rather than sinking
+        the whole stream. Callers redact what they get — this returns the
+        real bodies.
+        """
+        out: dict[str, RawState] = {}
+        for key, record in self._private_records().items():
+            if "sealed" in record:
+                try:
+                    out[key] = vault.unseal(record["sealed"], purpose=SNAPSHOT_PURPOSE)
+                except (vault.VaultOpenError, vault.VaultUnavailable):
+                    continue
+            else:
+                out[key] = record.get("raw")
+        return out
 
     def applied_refs(self) -> list[str]:
         """Ref keys whose apply started (APPLY_START), in order. Strict, for

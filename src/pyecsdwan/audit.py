@@ -8,9 +8,9 @@ or reverted, and what the server said. It just had no way out of
 This is that way out, and the whole of it is one decision:
 
 **Snapshot bodies are redacted by default.** ``journal.py`` opens its event log
-0600 because "snapshots can embed sensitive server config" — a SNAPSHOT event
-carries an entire appliance object, which is the point (it is what rollback
-restores from) and is also the one thing in the journal that is not metadata.
+0600 because "snapshots can embed sensitive server config" — a snapshot is an
+entire appliance object, which is the point (it is what rollback restores
+from) and is also the one thing in the journal that is not metadata.
 Exporting is *distribution*: to a file, a pipe, a SIEM. A default that shipped
 whole config bodies to a log aggregator would undo the 0600 without anyone
 deciding to.
@@ -21,9 +21,17 @@ same state — or that a restore matched what was captured — without ever seei
 the config. That is the pattern ``ec-cli api`` already uses for request bodies
 (``body_sha256``), applied to the other place a body appears.
 
-``--include-snapshots`` opts in. It is spelled as an opt-in rather than
-``--redact`` as an opt-out because the safe default should be the one you get
-by not thinking about it.
+Since #106 the journal itself keeps that promise on disk: a SNAPSHOT event
+carries only the digest and size, and the body lives in the transaction's
+rollback-private store. The export renders both generations identically —
+one marker shape whether the journal predates the split or not — so a SIEM's
+field mapping survives the upgrade.
+
+``--include-snapshots`` opts in to the bodies, and even then every
+secret-named field inside them is masked (:mod:`pyecsdwan.redaction`): the
+flag exists for restore verification, and verifying a restore never requires
+reading a password out of a log aggregator. What leaves this machine
+unredacted is nothing; the unredacted body stays rollback-private (#106).
 
 Every record is self-contained. An NDJSON line lands in a SIEM with no
 surrounding context, so ``txn_id``, ``orch_host`` and ``orch_origin`` are
@@ -40,11 +48,11 @@ decoded noun is recoverable from the key while the reverse is not.
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import json
 from collections.abc import Iterable, Iterator
 from typing import Any
 
+from pyecsdwan import redaction
 from pyecsdwan.journal import TxnJournal
 
 #: Event kind -> the fields carrying a whole server object rather than
@@ -58,9 +66,13 @@ REDACTED_MARKER = "redacted"
 
 
 def digest(value: Any) -> str:
-    """SHA-256 of a value's canonical JSON form."""
-    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    """SHA-256 of a value's canonical JSON form.
+
+    Delegates to :func:`pyecsdwan.redaction.digest`, which the journal's
+    snapshot split uses too — one definition is what makes an exported digest
+    and a journaled one comparable record for record.
+    """
+    return redaction.digest(value)
 
 
 def redact(event: dict[str, Any]) -> dict[str, Any]:
@@ -83,6 +95,42 @@ def redact(event: dict[str, Any]) -> dict[str, Any]:
             "sha256": digest(body),
             "bytes": len(canonical.encode("utf-8")),
         }
+    return out
+
+
+def _export_snapshot(
+    event: dict[str, Any],
+    bodies: dict[str, Any] | None,
+    include_snapshots: bool,
+) -> dict[str, Any]:
+    """One SNAPSHOT record in the export's stable shape.
+
+    A post-#106 event carries ``sha256``/``bytes``/``private`` instead of a
+    body; the export folds those back into the same ``raw`` marker a pre-split
+    journal produces, so both generations render identically. ``bodies`` is
+    the journal's private store, opened lazily by the caller — ``None`` until
+    someone actually asked for bodies.
+    """
+    if not event.get("private"):
+        # Pre-split event: the body (or its absence) is inline.
+        if include_snapshots:
+            out = dict(event)
+            if "raw" in out:
+                out["raw"] = redaction.redact_tree(out["raw"])
+            return out
+        return redact(event)
+    out = {k: v for k, v in event.items() if k not in ("sha256", "bytes", "private")}
+    marker = {
+        REDACTED_MARKER: True,
+        "sha256": event.get("sha256"),
+        "bytes": event.get("bytes"),
+    }
+    if include_snapshots and bodies is not None and event.get("ref") in bodies:
+        out["raw"] = redaction.redact_tree(bodies[event["ref"]])
+    else:
+        # Body withheld — or, with include_snapshots, unopenable (the vault
+        # key is gone). Either way the marker still proves what was captured.
+        out["raw"] = marker
     return out
 
 
@@ -131,8 +179,12 @@ def events(
     """
     for journal in txns:
         meta = journal.meta
+        bodies = journal.private_bodies() if include_snapshots else None
         for event in journal.events():
-            record = event if include_snapshots else redact(event)
+            if str(event.get("event", "")) in BODY_FIELDS:
+                record = _export_snapshot(event, bodies, include_snapshots)
+            else:
+                record = dict(event)
             # Stamped, not merged under a key, so a SIEM's flat field mapping
             # sees them. `txn_id`/`orch_host`/`orch_origin` are not event field
             # names, so there is nothing to collide with.
