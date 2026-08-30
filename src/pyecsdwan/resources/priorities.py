@@ -276,6 +276,11 @@ class OverlayPriority(Resource):
 
     # -- read side ------------------------------------------------------------
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The single overlay-priority object (#69). Orchestrator-wide, so the
+        path identifies it and no instance qualifier applies."""
+        return f"orchestrator {_OVERLAY_PRIORITY_PATH}"
+
     def fetch(self, ctx: Ctx, ref: Ref) -> RawState:
         raw = ctx.client.get(_OVERLAY_PRIORITY_PATH)
         return raw if isinstance(raw, dict) else {}
@@ -437,6 +442,12 @@ class TemplateGroupPriority(Resource):
     )
 
     # -- read side ------------------------------------------------------------
+
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The single template-group-priority object (#69). A separate object
+        from `OverlayPriority` in this module — same concept, different
+        endpoint, so the two are not a conflict."""
+        return f"orchestrator {_TEMPLATE_GROUP_PRIORITY_PATH}"
 
     def fetch(self, ctx: Ctx, ref: Ref) -> RawState:
         raw = ctx.client.get(_TEMPLATE_GROUP_PRIORITY_PATH)

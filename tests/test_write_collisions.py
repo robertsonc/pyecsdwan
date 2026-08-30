@@ -370,3 +370,110 @@ def test_the_overlap_really_does_lose_data_in_one_order(world: dict[str, Any]) -
         "expected the DHCP change to be overwritten — if this now passes, "
         "deployment.apply() has started re-reading and the refusal can soften"
     )
+
+
+# -- what every declared target must be (#69, T6) ----------------------------
+
+
+def _declaring_kinds() -> list[str]:
+    return [
+        kind
+        for kind in default_registry.kinds()
+        if type(default_registry.get(kind)).write_target is not Resource.write_target
+    ]
+
+
+class _TargetCtx:
+    """Enough context to ask for a target: nePk resolution and nothing else."""
+
+    class _Resolver:
+        @staticmethod
+        def ne_pk_for(name: str) -> str:
+            return {"BR1-EC": "1.NE", "BR2-EC": "2.NE"}[name]
+
+    resolver = _Resolver()
+
+
+def _targets_for(appliance: str) -> dict[str, str]:
+    out = {}
+    for kind in _declaring_kinds():
+        target = default_registry.get(kind).write_target(
+            _TargetCtx(), Ref(kind=kind, name="global", appliance=appliance)
+        )
+        if target is not None:
+            out[kind] = target
+    return out
+
+
+def test_a_declared_target_is_instance_scoped() -> None:
+    """The docstring's rule, enforced: a target names the object *and its
+    instance*. A target that ignored the appliance would make one legitimate
+    fan-out — the same setting pushed to two appliances — look like a
+    conflict, and refusing that is worse than the bug this prevents."""
+    first, second = _targets_for("BR1-EC"), _targets_for("BR2-EC")
+    for kind, target in first.items():
+        if not kind.startswith("appliance/"):
+            continue  # orchestrator singletons have one instance by definition
+        assert target != second[kind], (
+            f"{kind} returns the same target for two appliances, so two "
+            f"appliances would read as one object"
+        )
+
+
+def test_only_the_known_pair_collides_today() -> None:
+    """Guards against a *false* refusal, which is the failure mode a wave of
+    new declarations introduces. Every declaration added for #69 must leave
+    exactly the real overlap and invent no others; a new legitimate pair here
+    means someone's target string is too coarse."""
+    by_target: dict[str, set[str]] = {}
+    for appliance in ("BR1-EC", "BR2-EC"):
+        for kind, target in _targets_for(appliance).items():
+            by_target.setdefault(target, set()).add(kind)
+    shared = {t: sorted(k) for t, k in by_target.items() if len(k) > 1}
+    assert shared == {
+        "appliance 1.NE deployment": ["appliance/deployment", "appliance/dhcp"],
+        "appliance 2.NE deployment": ["appliance/deployment", "appliance/dhcp"],
+    }, shared
+
+
+def test_every_full_object_replacement_kind_declares_a_target() -> None:
+    """The completeness criterion #69 actually asks for.
+
+    Endpoint-sharing (above) only catches a kind that collides with one
+    *already declared*. A resource that replaces a whole server object nobody
+    else writes today still has to say so, or the first kind added alongside it
+    collides silently — the declaration is what makes the future pair visible,
+    and it cannot be added retroactively by whoever adds the second resource.
+    """
+    for kind in FULL_OBJECT_REPLACEMENT:
+        resource = default_registry.get(kind)
+        assert type(resource).write_target is not Resource.write_target, (
+            f"{kind} replaces a whole server object but declares no "
+            f"write_target(); a kind added alongside it would collide silently"
+        )
+
+
+#: Kinds whose `apply()` replaces a whole server object rather than patching
+#: fields, so a second writer of that object is a destructive overlap. Listed
+#: rather than derived because the property is semantic: it is what `apply()`
+#: does with the body, which no endpoint declaration records. Deriving it was
+#: tried and abandoned — `template-group` declares `/template/templateGroups`
+#: and `/template/templateCreate`, whose common prefix is the nonsense string
+#: `/template/template`, and a wrong target asserted mechanically is worse than
+#: an absent one.
+FULL_OBJECT_REPLACEMENT = (
+    "appliance/deployment",
+    "appliance/dhcp",
+    "appliance/banners",
+    "appliance/logging",
+    "appliance/mgmt-services",
+    "appliance/snmp",
+    "appliance/inbound-shaper",
+    "appliance/shaper",
+    "appliance/optimization-map",
+    "appliance/qos-map",
+    "appliance/route-map",
+    "internal-subnets",
+    "overlay-priority",
+    "template-group-priority",
+)

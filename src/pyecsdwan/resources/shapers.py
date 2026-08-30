@@ -212,6 +212,17 @@ class _Shapers(Resource):
 
     # -- read side -------------------------------------------------------------
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The ECOS object at ``ecos_path`` on one appliance (#69).
+
+        Each subclass replaces its whole object, and each has a distinct
+        ``ecos_path``, so one declaration here is correct for all of them
+        rather than copies that could drift apart. Scoped by nePk as well as
+        path: the same map on two appliances is two objects, and grouping them
+        would refuse a legitimate fan-out.
+        """
+        return f"appliance {self._ne_pk(ctx, ref)} {self.ecos_path}"
+
     def fetch(self, ctx: Ctx, ref: Ref) -> RawState:
         raw = ctx.client.appliance_request("GET", self._ne_pk(ctx, ref), self.ecos_path)
         if raw is None or isinstance(raw, dict):

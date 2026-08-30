@@ -300,6 +300,19 @@ class _ApplianceSetting(Resource):
             raise ValueError(f"{ref.kind} is appliance-scoped; ref.appliance is required")
         return ctx.resolver.ne_pk_for(ref.appliance)
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The ECOS object at ``ecos_path`` on one appliance (#69).
+
+        Every subclass replaces its whole object — GET, modify, POST back — so
+        each needs a target, and each has a distinct ``ecos_path``, which makes
+        one declaration here correct for all of them rather than nine copies
+        that could drift apart.
+
+        Scoped by nePk as well as path: the same setting on two appliances is
+        two objects, and grouping them would refuse a legitimate fan-out.
+        """
+        return f"appliance {self._ne_pk(ctx, ref)} {self.ecos_path}"
+
     # -- read side ------------------------------------------------------------
 
     def fetch(self, ctx: Ctx, ref: Ref) -> RawState:
