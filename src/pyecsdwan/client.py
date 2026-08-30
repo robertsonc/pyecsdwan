@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 import structlog
 
+from pyecsdwan import config
 from pyecsdwan.config import Settings
 from pyecsdwan.retry import Retry, effective_policy
 
@@ -85,12 +86,10 @@ class OrchClient:
         self.settings = settings
         #: Recent call latencies in ms; see `_record_latency`.
         self._latencies: list[float] = []
-        base = settings.orch_url
-        if not base.startswith(("http://", "https://")):
-            base = f"https://{base}"
-        base = base.rstrip("/")
-        if not base.endswith("/gms/rest"):
-            base = f"{base}/gms/rest"
+        # The one definition of the effective endpoint, shared with
+        # `config.canonical_origin` so the client and the identity that keys
+        # its state cannot disagree about what "the same Orchestrator" means.
+        base = config.api_base(settings.orch_url)
         if base.startswith("http://"):
             host = httpx.URL(base).host
             if host not in ("127.0.0.1", "::1", "localhost"):

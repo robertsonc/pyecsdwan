@@ -42,6 +42,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import errno
+import functools
 import json
 import os
 import re
@@ -100,7 +101,10 @@ class LockOwner:
 
     pid: int
     start_token: str
-    host: str
+    #: Canonical origin of the Orchestrator the lock is scoped to (#63), not
+    #: the display host — two tenants behind one hostname take two locks and
+    #: an operator reading `show locks` has to be able to tell them apart.
+    origin: str
     scope: str
     command: str
     acquired_utc: str
@@ -114,7 +118,9 @@ class LockOwner:
         return LockOwner(
             pid=int(data.get("pid", 0)),
             start_token=str(data.get("start_token", "")),
-            host=str(data.get("host", "")),
+            # `host` is the pre-#63 field name; a record written by an older
+            # process can still be on disk while that process holds the lock.
+            origin=str(data.get("origin", data.get("host", ""))),
             scope=str(data.get("scope", "")),
             command=str(data.get("command", "")),
             acquired_utc=str(data.get("acquired_utc", "")),
@@ -154,6 +160,13 @@ class LockOwner:
 lock_root = config.lock_root
 
 def _safe(component: str) -> str:
+    """Filename-safe form of a *scope* name — never of an identity.
+
+    Identities go through `config.origin_slug`, which keeps a digest of the
+    unsanitized origin. This sanitizer is lossy by construction (`orch:443`
+    and `orch_443` both become `orch_443`), which is fine for the fixed
+    vocabulary of scope names and was a collision for host names (#63).
+    """
     return re.sub(r"[^A-Za-z0-9._-]", "_", component)
 
 
@@ -183,21 +196,63 @@ class HostLock:
 
     def __init__(
         self,
-        host: str,
+        origin: str,
         scope: str,
         root: Path | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         txn_id: str | None = None,
     ):
-        self.host = host
+        # Canonicalized before it is stored, not just before the path is
+        # built: `self.origin` is what `show locks` and the busy message
+        # report, and reporting the raw spelling would show two names for
+        # the one lock two callers are actually contending for (#63).
+        self.origin = config.as_origin(origin)
         self.scope = scope
         self.timeout = timeout
         self.txn_id = txn_id
         root = root if root is not None else lock_root()
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.path = root / f"{_safe(host)}.{_safe(scope)}.lock"
+        self.path = root / f"{config.origin_slug(self.origin)}.{_safe(scope)}.lock"
+        #: The pre-#63 name for this same scope, taken as well while it exists.
+        #: See `_legacy_barrier`.
+        legacy_stem = _safe(config.display_host(self.origin))
+        self._legacy_path: Path | None = root / f"{legacy_stem}.{_safe(scope)}.lock"
+        self._init_state()
+
+    @classmethod
+    def _for_path(cls, path: Path, *, timeout: float = DEFAULT_TIMEOUT) -> HostLock:
+        """A lock bound to an existing file, for inspection rather than intent.
+
+        `active_locks` scans a directory and has to reopen exactly the files it
+        found. Rebuilding the path from the name is not possible by design: the
+        name carries a one-way digest of the origin (#63), so feeding it back
+        through the constructor would slug an already-slugged string and probe
+        a *different* file — reporting every lock as free and littering the
+        directory on every `show locks`.
+        """
+        lock = cls.__new__(cls)
+        stem = path.name[: -len(".lock")] if path.name.endswith(".lock") else path.name
+        _slug, _, scope = stem.rpartition(".")
+        # The origin is not recoverable from the name; the owner record carries
+        # it. Left empty rather than guessed, so nothing can mistake it for one.
+        lock.origin = ""
+        lock.scope = scope
+        lock.timeout = timeout
+        lock.txn_id = None
+        lock.path = path
+        # A probe inspects one file and takes no barrier: `active_locks` walks
+        # every file including the legacy ones, and a probe that acquired a
+        # second lock would contend with the very thing it is reporting on.
+        lock._legacy_path = None
+        lock._init_state()
+        return lock
+
+    def _init_state(self) -> None:
         self._key = str(self.path)
         self._fd: int | None = None
+        #: Legacy-named locks held alongside this one, innermost last, so a
+        #: nested acquire/release pairs correctly. See `_legacy_barrier`.
+        self._barriers: list[HostLock] = []
         #: How many times *this object* contributed to the process-wide depth,
         #: so an unbalanced release through one object cannot drop a lock
         #: another object is still relying on.
@@ -205,7 +260,55 @@ class HostLock:
 
     # -- acquisition ---------------------------------------------------------
 
+    def _legacy_barrier(self) -> HostLock | None:
+        """The pre-#63 lock for this scope, if a build that used it ran here.
+
+        Locks moved from the sanitized display host to an origin digest, so a
+        process from before that change and one from after take *different*
+        files and neither excludes the other — including a detached watchdog
+        that survives the upgrade and is about to revert. During the overlap
+        both names have to be held.
+
+        Only while the old file exists, which is what makes this a transition
+        and not a permanent tax: the file outlives the lock, so its presence
+        means an older build has run on this host, and a fresh install never
+        creates one. While it is there, two origins sharing a display host
+        serialize against each other — the pre-#63 behaviour they already had,
+        so it costs correctness nothing and is simply not yet the improvement.
+        Deleting the stale file when no old process remains ends it;
+        `show locks` marks them.
+        """
+        if self._legacy_path is None or self._legacy_path == self.path:
+            return None
+        if not self._legacy_path.exists():
+            return None
+        barrier = HostLock.__new__(HostLock)
+        barrier.origin = self.origin
+        barrier.scope = self.scope
+        barrier.timeout = self.timeout
+        barrier.txn_id = self.txn_id
+        barrier.path = self._legacy_path
+        barrier._legacy_path = None  # never recurses
+        barrier._init_state()
+        return barrier
+
     def acquire(self) -> None:
+        # Always the legacy name first, then the new one. A fixed order is
+        # what makes this deadlock-free, and an old process only ever holds
+        # the first, so there is no cycle to close.
+        barrier = self._legacy_barrier()
+        if barrier is not None:
+            barrier.acquire()
+            self._barriers.append(barrier)
+            try:
+                self._acquire_own()
+            except BaseException:
+                self._barriers.pop().release()
+                raise
+            return
+        self._acquire_own()
+
+    def _acquire_own(self) -> None:
         deadline = time.monotonic() + self.timeout
         while True:
             with _HELD_GUARD:
@@ -224,6 +327,11 @@ class HostLock:
             time.sleep(_POLL_INTERVAL)
 
     def release(self) -> None:
+        self._release_own()
+        if self._barriers:
+            self._barriers.pop().release()
+
+    def _release_own(self) -> None:
         with _HELD_GUARD:
             if not self._mine:
                 return
@@ -315,7 +423,7 @@ class HostLock:
         owner = LockOwner(
             pid=pid,
             start_token=proc_start_token(pid),
-            host=self.host,
+            origin=self.origin,
             scope=self.scope,
             command=_this_command(),
             acquired_utc=utcnow(),
@@ -351,65 +459,103 @@ class HostLock:
         owner = self.read_owner()
         who = owner.describe() if owner is not None else "another process"
         return (
-            f"{self.scope} lock for {self.host} is held by {who}. "
+            f"{self.scope} lock for {self.origin} is held by {who}. "
             f"Wait for it to finish, or investigate with `ec-cli show locks`."
         )
 
 
 @contextlib.contextmanager
 def candidate_lock(
-    host: str, root: Path | None = None, timeout: float = DEFAULT_TIMEOUT
+    origin: str, root: Path | None = None, timeout: float = DEFAULT_TIMEOUT
 ) -> Iterator[HostLock]:
-    """Serialize one candidate read-modify-write cycle for ``host``."""
-    lock = HostLock(host, "candidate", root=root, timeout=timeout)
+    """Serialize one candidate read-modify-write cycle for ``origin``."""
+    lock = HostLock(origin, "candidate", root=root, timeout=timeout)
     with lock:
         yield lock
 
 
 @contextlib.contextmanager
 def commit_lock(
-    host: str,
+    origin: str,
     root: Path | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     txn_id: str | None = None,
 ) -> Iterator[HostLock]:
-    """Serialize the commit/confirm/revert critical section for ``host``."""
-    lock = HostLock(host, "commit", root=root, timeout=timeout, txn_id=txn_id)
+    """Serialize the commit/confirm/revert critical section for ``origin``."""
+    lock = HostLock(origin, "commit", root=root, timeout=timeout, txn_id=txn_id)
     with lock:
         yield lock
 
 
-def active_locks(root: Path | None = None) -> list[tuple[str, LockOwner | None, bool]]:
-    """Every lock file on disk as ``(name, owner, held_now)``, for ``show locks``.
+#: A post-#63 lock file ends in the origin digest. Anything else was named by
+#: a build from before it.
+_DIGEST_SUFFIX = re.compile(r"-[0-9a-f]{32}$")
 
-    ``held_now`` is probed by trying to take the lock, which is the only
-    honest answer on the flock path: the file outlives the lock, so its mere
+
+def _is_legacy_name(name: str) -> bool:
+    stem = name[: -len(".lock")] if name.endswith(".lock") else name
+    slug, _, _scope = stem.rpartition(".")
+    return not _DIGEST_SUFFIX.search(slug)
+
+
+@dataclasses.dataclass(frozen=True)
+class LockState:
+    """One lock file as ``show locks`` reports it."""
+
+    #: File name on disk. Keyed by a one-way digest of the origin (#63), so it
+    #: identifies the lock but does not spell out what it locks.
+    name: str
+    #: ``candidate`` or ``commit`` — still readable in the file name.
+    scope: str
+    #: Which Orchestrator, read from the owner record. ``None`` for a lock file
+    #: that has never been held, where nothing on disk says.
+    origin: str | None
+    owner: LockOwner | None
+    held: bool
+    #: Named the way builds before #63 named locks. Held alongside the new
+    #: name while it exists (see `HostLock._legacy_barrier`); once no
+    #: pre-#63 process can still be running, deleting it ends the barrier.
+    legacy: bool = False
+
+
+def active_locks(root: Path | None = None) -> list[LockState]:
+    """Every lock file on disk, for ``show locks``.
+
+    ``held`` is probed by trying to take the lock, which is the only honest
+    answer on the flock path: the file outlives the lock, so its mere
     existence proves nothing.
     """
     root = root if root is not None else lock_root()
     if not root.exists():
         return []
-    out: list[tuple[str, LockOwner | None, bool]] = []
+    out: list[LockState] = []
     for entry in sorted(root.iterdir()):
         if not entry.is_file() or not entry.name.endswith(".lock"):
             continue
-        stem = entry.name[: -len(".lock")]
-        host, _, scope = stem.rpartition(".")
-        probe = HostLock(host, scope, root=root, timeout=0.0)
+        probe = HostLock._for_path(entry, timeout=0.0)
         owner = probe.read_owner()
+        origin = owner.origin if owner is not None and owner.origin else None
+        state = functools.partial(
+            LockState,
+            name=entry.name,
+            scope=probe.scope,
+            origin=origin,
+            owner=owner,
+            legacy=_is_legacy_name(entry.name),
+        )
         with _HELD_GUARD:
             ours = probe._key in _HELD
         if ours:
             # Acquiring would nest and report "free", which is the one answer
             # that is certainly wrong.
-            out.append((entry.name, owner, True))
+            out.append(state(held=True))
             continue
         try:
             probe.acquire()
         except LockBusy:
-            out.append((entry.name, owner, True))
+            out.append(state(held=True))
             continue
         # We got it, so nobody held it. Release without unlinking the record.
         probe.release()
-        out.append((entry.name, owner, False))
+        out.append(state(held=False))
     return out

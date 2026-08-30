@@ -63,7 +63,7 @@ def world(state_home: Any, mock_server: tuple[str, MockState]) -> dict[str, Any]
     return {
         "ctx": Ctx(client=client, resolver=Resolver(client)),
         "settings": settings,
-        "candidate": CandidateStore(settings.host),
+        "candidate": CandidateStore(settings.origin),
         "state": state,
         "port": base_url.rsplit(":", 1)[1],
     }

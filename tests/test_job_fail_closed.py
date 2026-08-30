@@ -70,7 +70,7 @@ def world(state_home: Any, mock_server: tuple[str, MockState]) -> dict[str, Any]
         "settings": settings,
         "state": state,
         "client": client,
-        "candidate": CandidateStore(settings.host),
+        "candidate": CandidateStore(settings.origin),
     }
 
 

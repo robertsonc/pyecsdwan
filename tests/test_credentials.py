@@ -21,7 +21,7 @@ stored a key was told they had not, and went looking in the wrong place.
 from __future__ import annotations
 
 import dataclasses
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -118,20 +118,67 @@ def test_a_broken_keyring_is_reported_not_swallowed(
     assert "no D-Bus session bus" in error
 
 
+def _keyring_holding(entries: dict[str, str]) -> Any:
+    class Stored:
+        asked: ClassVar[list[str]] = []
+
+        @staticmethod
+        def get_password(service: str, username: str) -> str | None:
+            assert service == config.KEYRING_SERVICE
+            Stored.asked.append(username)
+            return entries.get(username)
+
+    return Stored
+
+
 def test_a_stored_key_is_returned_with_no_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Guards the guard: a lookup wired to always fail would satisfy the test
     above and quietly break every keyring user."""
-
-    class Stored:
-        @staticmethod
-        def get_password(service: str, username: str) -> str:
-            assert service == config.KEYRING_SERVICE
-            assert username == "orch.example.com"
-            return SECRET
-
-    monkeypatch.setitem(__import__("sys").modules, "keyring", Stored)
+    stored = _keyring_holding({"https://orch.example.com": SECRET})
+    monkeypatch.setitem(__import__("sys").modules, "keyring", stored)
 
     assert config._keyring_api_key("https://orch.example.com") == (SECRET, None)
+    # Asked for the canonical origin, not the display host (#63).
+    assert stored.asked == ["https://orch.example.com"]
+
+
+def test_two_tenants_can_hold_separate_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The display host made these one entry, so a key for one tenant
+    authenticated against the other (#63)."""
+    stored = _keyring_holding(
+        {
+            "https://orch.example.com/tenant-a": "key-a",
+            "https://orch.example.com/tenant-b": "key-b",
+        }
+    )
+    monkeypatch.setitem(__import__("sys").modules, "keyring", stored)
+
+    assert config._keyring_api_key("https://orch.example.com/tenant-a")[0] == "key-a"
+    assert config._keyring_api_key("https://orch.example.com/tenant-b")[0] == "key-b"
+
+
+def test_a_key_stored_by_an_older_build_is_still_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older builds keyed the entry by the display host. Reading only the new
+    key would tell an operator who *has* stored a key that they have not —
+    which is the failure this whole function exists to avoid."""
+    stored = _keyring_holding({"orch.example.com": SECRET})
+    monkeypatch.setitem(__import__("sys").modules, "keyring", stored)
+
+    assert config._keyring_api_key("https://orch.example.com") == (SECRET, None)
+    assert stored.asked == ["https://orch.example.com", "orch.example.com"]
+
+
+def test_the_origin_key_wins_over_the_legacy_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Otherwise the fallback would quietly undo the fix for anyone who has
+    both, which is everyone mid-migration."""
+    stored = _keyring_holding(
+        {"https://orch.example.com": "new", "orch.example.com": "old"}
+    )
+    monkeypatch.setitem(__import__("sys").modules, "keyring", stored)
+
+    assert config._keyring_api_key("https://orch.example.com")[0] == "new"
 
 
 def test_a_missing_keyring_package_is_silent(monkeypatch: pytest.MonkeyPatch) -> None:

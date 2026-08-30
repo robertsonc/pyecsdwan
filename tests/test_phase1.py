@@ -38,7 +38,7 @@ def world(state_home: Any, mock_server: tuple[str, MockState]) -> dict[str, Any]
     client = OrchClient(settings)
     resolver = Resolver(client)
     ctx = Ctx(client=client, resolver=resolver)
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     return {
         "ctx": ctx, "settings": settings, "candidate": candidate,
         "state": state, "client": client,
@@ -191,7 +191,7 @@ def test_timeout_during_confirm_window_commit_reverts(
     )
     client = OrchClient(settings)
     ctx = Ctx(client=client, resolver=Resolver(client))
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
 
     state.template_groups["G1"] = {"name": "G1", "templates": []}
     state.template_association["3.NE"] = []

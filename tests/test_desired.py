@@ -279,7 +279,7 @@ def test_the_directory_and_the_candidate_agree_on_the_same_intent(
     ctx = world["ctx"]
     _write(tmp_path, "appliances/BR1-EC/banners/global.yaml", "login: same value\n")
 
-    candidate = CandidateStore(world["settings"].host)
+    candidate = CandidateStore(world["settings"].origin)
     candidate.set_desired(REF, {"login": "same value"})
 
     from_dir = drift.collect(

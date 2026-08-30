@@ -113,6 +113,44 @@ that server state had moved since compare, recompute the diff and carry on,
 folding another operator's change into this one's changeset; `--rebase` opts
 in and re-merges intent over current state. `show locks` reports holders.
 
+*One identity per Orchestrator (#63, second half).* Scoping is only as good as
+the key it scopes by, and the key was the *display host* — the URL with its
+scheme and everything after the first slash thrown away. So
+`https://orch/tenant-a` and `https://orch/tenant-b` were one identity, as were
+a plaintext and a TLS endpoint on one name; and the file names were that
+already-lossy string run through a sanitizer, which mapped `orch:443` and
+`orch_443` together too. Distinct targets then shared one candidate store, one
+lock, one resolver cache and one rollback history — and the guard against
+restoring one Orchestrator's snapshot into another compared display hosts, so
+for exactly these targets it compared equal and waved the restore through.
+Everything that persists or compares identity now keys by
+`Settings.origin`, a canonical `scheme://host[:port][/path]`, with file names
+carrying a digest of the *unsanitized* origin. `host` remains, for display
+only. Identity is derived from the *effective API base*, through the same function
+the client uses to build it, so `https://orch` and `https://orch/gms/rest` —
+one endpoint — cannot become two identities the way two independent
+definitions of URL equivalence let them.
+
+Journals record both fields and are matched on the origin. Ones written before
+it existed are **listed** on a hostname match and **authorize nothing**: a
+hostname is shared by the `http://` and `https://` endpoints on that name and
+by every tenant path under it, so it cannot establish which Orchestrator a
+transaction targeted — and confirming or restoring on that basis writes one
+fabric's state over another's. Warning after the fact does not help, because
+by then the write has gone out. The history is preserved and readable; the
+operator who knows which target it belongs to says so with `ec-cli adopt`,
+and that claim is recorded in the event log. The same rule covers staged
+changes written under the old name: surfaced, never claimed, because the file
+is keyed by a display host that several origins share and first-reader
+adoption would turn unknown provenance into asserted provenance. Locks are
+held under both the old and new names while a pre-#63 lock file exists, so a
+surviving old process cannot run alongside a new one. The rule
+that production never keys state by the lossy field is not a type — both are
+`str` — so it is a test over the source with a reasoned allowlist, covering
+the test tree as well: a test that stages by the display host while the code
+keys by the origin passes while asserting nothing, which is how nineteen of
+them stayed green against two different files.
+
 
 *Fabric-wide drift (#8).* `ec-cli drift` enumerates every instance of every
 kind and compares it against staged intent. The rows worth having are the ones
@@ -247,12 +285,86 @@ from the registry so it cannot drift again.
 | **Production hardening** (#9) | concurrency, MCP trust boundary, CI/packaging, async-job fail-closed, evidence ladder, retry policy | #62–#68 (#62–#67 ✅ shipped; #68 open) |
 | **CLI information architecture** (#70) ✅ | intent-separated command taxonomy, spec-driven design; constitution + design corpus + grammar, then the migration itself | #49, #71–#78 (all shipped; one flag decision open) |
 | **(v2) RBAC broker** (#10) | direct-to-appliance access, gated — explicitly out of v1 scope | in-epic checklist |
+| **(future) More than one Orchestrator** (#121) | named-target registry, a top-level selection noun, per-target fan-out with no cross-target atomicity — see the section below | in-epic checklist |
 
 The near-term epics (#3, #4, #5, #6) are sharded into child sub-issues; #5 and
 #6 are complete. #8's first tranche shipped as #54 (operational `show`
 commands, sub-issues #55–#59); the rest of #8 stays an in-epic checklist.
 the operational/v2 epics (#7–#10) carry their breakdown as checklists and get
 sharded into issues when their phase starts.
+
+## Planned — operating across more than one Orchestrator (#121)
+
+Unstarted. It is on this page because #63 changed what it would cost, and
+because the shape of the command surface has to be decided before any of it is
+built.
+
+**What #63 already settled.** Every piece of persisted state is keyed by a
+canonical origin — candidate store, advisory locks, journals and rollback
+history, resolver cache, keyring entry — and a candidate or a snapshot carries
+the origin it was staged against and is refused against any other. Two
+Orchestrators already cannot share state, and a snapshot from one cannot be
+restored into another. So this is no longer a data-model problem. What is
+missing is a way to *name* a target and a way to *choose* one.
+
+**A name.** A target is identified today only by its URL, from
+`ECSDWAN_ORCH_URL`. Operators need short names — `prod-emea`, `lab` — so a
+registry maps name to origin. It must *reference* credentials, never hold them:
+the keyring is already keyed per origin (#63), and "credentials never live in
+argv or in files" is the existing rule, not a new one.
+
+**The noun is `orchestrator` (Decision 9).** `fabric` was the obvious word and
+is already taken: `specs/001-cli-command-taxonomy/grammar.md` ratifies it as a
+scope noun meaning "every appliance, bounded fan-out", beside `appliance
+<name>` and the bare no-scope form that means *the Orchestrator itself*. `show
+fabric version` asks every appliance; it does not name a fabric. Spelling the
+selector `--fabric` would give one word two meanings one space apart
+(`ec-cli --fabric prod show fabric version`), which is the operator surprise
+Principle VI exists to prevent. `orchestrator` is the word the grammar already
+uses for that subject. Settled as a spec amendment under #75's workflow rather
+than as a flag someone added — grammar 0.4.0 — which also reserves
+`orchestrator` and `orchestrators` as kind aliases, because a kind claiming
+either would have to be renamed once the selector ships.
+
+Selecting an Orchestrator is deliberately **not** a fourth scope row: scope
+says what within a target a command is about, and every existing scope already
+presumes one target. The selector chooses the target, so it sits outside the
+scope position. The command shape that carries it is still open (spec 001 Q5):
+§2 puts CLI-state reads under bare `show`, which makes `show orchestrators` the
+consistent listing, but where the registry's mutations live is undecided.
+
+**Ambient selection is the failure mode.** The registry is the easy half. The
+dangerous half is a *sticky* selection: `kubectl config use-context` and
+`AWS_PROFILE` are the canonical demonstrations, where a persisted current
+target means a command typed in one terminal acts on whatever was last selected
+in another, and the operator's model and the tool's disagree at precisely the
+moment a write goes out. Junos has no analogue, because a Junos session *is*
+the device — the design corpus (#73) has no precedent to copy here, which is
+itself the finding. So: the shell may carry a **session-scoped** selection,
+because it shows it — the banner already prints the origin and the prompt can
+carry the name, and a selection you can see is not ambient. The scriptable CLI
+must **not infer one for anything that writes**: `commit`, `apply` and
+`rollback` with no explicit target refuse rather than pick. Failing closed
+costs one flag; guessing costs a change on the wrong fabric. No global mutable
+"current target" file shared by every terminal on the host.
+
+**Fan-out across targets.** The capability worth having is `drift` across every
+target, and one declaration applied to several. Three constraints, in the order
+they bite. There is **no cross-target atomicity and there will not be**: each
+target's commit is its own transaction with its own journal and confirm window,
+so partial success across targets is the *normal* outcome and the report has to
+make per-target state legible rather than collapse it into one exit code —
+promising two-phase commit across independent Orchestrators would be a claim
+the API cannot support. Fan-out is **explicit or it does not happen**, never
+inferred from a selection; Decision 7's cost-class treatment of appliance
+fan-out (confirm, then warn) is the precedent. And the confirm window is **per
+target and runs on wall-clock**, so arming ten from one command means ten
+independent watchdogs — stated before the first write, not discovered at the
+first revert.
+
+**Ordering.** After spec 003's T8 (per-resource safe materialization), because
+multi-target apply is only meaningful once single-target apply writes at all;
+alongside #106, which owns the credential half.
 
 ## Parity map (Orchestrator UI area → code status)
 

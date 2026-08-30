@@ -60,12 +60,40 @@ def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
 #: On-disk schema version for the candidate store. Bumped only alongside an
 #: entry in :data:`CANDIDATE_MIGRATIONS`; a file claiming anything higher was
 #: written by a newer binary and is refused rather than guessed at (#108).
-CANDIDATE_FORMAT = 1
+CANDIDATE_FORMAT = 2
 
 #: Older formats this binary knows how to read, mapped to the function that
-#: brings one forward. Empty because 1 is the first version — the mapping
-#: exists so adding version 2 is a change here rather than a new mechanism.
+#: brings one forward. Populated below, once the migrations are defined.
 CANDIDATE_MIGRATIONS: dict[int, Any] = {}
+
+
+def _legacy_name(origin: str) -> str:
+    """The file name a build before #63 would have used for this origin.
+
+    Reproduced rather than remembered: it was the display host run through a
+    lossy sanitizer, and reconstructing it here is what lets an upgrade find
+    work that is already staged.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "_", config.display_host(origin))
+
+
+def _migrate_1_to_2(data: dict[str, Any], origin: str) -> dict[str, Any]:
+    """Format 1 had no origin, because there was no canonical identity yet.
+
+    Adopting the file is safe: format 1 was keyed by the *display host*, so a
+    file this session can even see was staged against something sharing that
+    host — and this session's origin is the only one it can now belong to.
+    Where two origins genuinely shared a host, format 1 had already mixed
+    their staging into one file and no migration can separate what was never
+    recorded; the collision is exactly what version 2 stops happening again.
+
+    Idempotent, and it does not rewrite the file on read: the origin is
+    written on the next save like any other field.
+    """
+    return {**data, "origin": origin}
+
+
+CANDIDATE_MIGRATIONS[1] = _migrate_1_to_2
 
 #: Every mode `materialize_desired` knows how to honour. Anything else is an
 #: error: modes decide whether omitted keys keep their live values, and
@@ -162,18 +190,31 @@ class CandidateItem:
 class CandidateStore:
     def __init__(
         self,
-        host: str,
+        origin: str,
         root: Path | None = None,
         lock_root: Path | None = None,
         lock_timeout: float = DEFAULT_TIMEOUT,
     ):
         root = root if root is not None else config.candidate_root()
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        safe = re.sub(r"[^A-Za-z0-9._-]", "_", host)
-        self.path = root / f"{safe}.json"
-        self.host = host
+        # Keyed by the canonical origin. The old name was the display host run
+        # through a lossy sanitizer, so two tenants under one hostname — and
+        # `orch:443` and `orch_443` — shared one staging file (#63).
+        self.origin = config.as_origin(origin)
+        self.path = root / f"{config.origin_slug(self.origin)}.json"
+        # Where a build before #63 would have written this store. Read when the
+        # origin-keyed file does not exist yet, and removed once this session
+        # saves: an operator who upgrades with work staged must not be told
+        # they have none, which is how that work gets re-done or lost.
+        self._legacy_path = root / f"{_legacy_name(self.origin)}.json"
+        #: Set when staging exists under the pre-#63 name and has not been
+        #: adopted. Not loaded — see `_load` — but callers must say so rather
+        #: than report an empty candidate.
+        self.unadopted_legacy: Path | None = None
         self.items: dict[str, CandidateItem] = {}
-        self.lock = HostLock(host, "candidate", root=lock_root, timeout=lock_timeout)
+        self.lock = HostLock(self.origin, "candidate", root=lock_root, timeout=lock_timeout)
+        self._lock_root = lock_root
+        self._lock_timeout = lock_timeout
         self._load()
 
     # -- mutation ------------------------------------------------------------
@@ -195,7 +236,70 @@ class CandidateStore:
     def reload(self) -> None:
         """Discard the in-memory view and re-read from disk."""
         self.items = {}
+        self.unadopted_legacy = None
         self._load()
+
+    def legacy_pending(self) -> list[str]:
+        """Ref keys sitting in an unadopted pre-#63 file, for reporting.
+
+        Read without claiming: this is what lets a caller say "12 changes were
+        staged before the upgrade" instead of "no changes", which is the
+        difference between an operator adopting them and re-doing them.
+        """
+        if self.unadopted_legacy is None:
+            return []
+        try:
+            data = json.loads(self.unadopted_legacy.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        items = data.get("items", []) if isinstance(data, dict) else []
+        return [str(e.get("ref_key")) for e in items if isinstance(e, dict)]
+
+    def adopt_legacy(self) -> list[str]:
+        """Claim the pre-#63 file for this origin, on an operator's say-so.
+
+        Serialized on the *legacy* namespace, not this origin's: the race is
+        between two different origins that share a display host and therefore
+        compute the same legacy path, so a lock keyed by this origin would not
+        exclude the one that matters. The claim and the unlink both happen
+        under it, so the second origin to arrive finds nothing rather than a
+        second copy of the first one's work.
+        """
+        if self.unadopted_legacy is None:
+            return []
+        claim = HostLock(
+            config.display_host(self.origin),
+            "candidate-legacy",
+            root=self._lock_root,
+            timeout=self._lock_timeout,
+        )
+        with claim, self._mutate():
+            if not self._legacy_path.exists():
+                # Won by another origin between the scan and the claim.
+                self.unadopted_legacy = None
+                return []
+            data = json.loads(self._legacy_path.read_text(encoding="utf-8"))
+            adopted = []
+            for entry in data.get("items", []):
+                mode = entry.get("mode")
+                if mode not in SUPPORTED_MODES:
+                    raise CandidateFormatError(
+                        f"candidate store {self._legacy_path} holds item "
+                        f"{entry.get('ref_key')!r} with mode {mode!r}; expected one of "
+                        f"{', '.join(sorted(SUPPORTED_MODES))}. The file has not been "
+                        f"modified."
+                    )
+                item = CandidateItem(
+                    ref_key=entry["ref_key"],
+                    mode=mode,
+                    intent=entry.get("intent", {}),
+                    delete_paths=entry.get("delete_paths", []),
+                )
+                self.items[item.ref_key] = item
+                adopted.append(item.ref_key)
+            self._legacy_path.unlink(missing_ok=True)
+            self.unadopted_legacy = None
+            return adopted
 
     def set_path(self, ref: Ref, path: list[str], value: Any) -> None:
         with self._mutate():
@@ -312,23 +416,33 @@ class CandidateStore:
         return self.items[key]
 
     def _load(self) -> None:
-        if not self.path.exists():
+        source = self.path
+        if not source.exists():
+            # Nothing under the origin-keyed name. A build before #63 wrote
+            # this store under the *display host*, which more than one origin
+            # can share — so the file says work was staged and cannot say for
+            # which target. Surfaced, never loaded: reading it in would let
+            # the first session to look claim it, and two tenants under one
+            # hostname would each copy the same staging into their own store
+            # (#63). `adopt_legacy` is where an operator says which it is.
+            if self._legacy_path.exists():
+                self.unadopted_legacy = self._legacy_path
             return
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            data = json.loads(source.read_text(encoding="utf-8"))
         except OSError:
             return
         except json.JSONDecodeError as exc:
             # A corrupt candidate must not silently read as empty — that would
             # make commit report "no changes" and the next save overwrite the
             # evidence. Quarantine it and tell the operator.
-            corrupt = self.path.with_suffix(".corrupt")
+            corrupt = source.with_suffix(".corrupt")
             try:
-                self.path.replace(corrupt)
+                source.replace(corrupt)
             except OSError:
-                corrupt = self.path
+                corrupt = source
             raise CandidateCorruptError(
-                f"candidate store {self.path} is corrupt ({exc}); moved to {corrupt}. "
+                f"candidate store {source} is corrupt ({exc}); moved to {corrupt}. "
                 f"Re-stage your changes."
             ) from exc
         fmt = data.get("format", CANDIDATE_FORMAT)
@@ -337,13 +451,32 @@ class CandidateStore:
             # file: the newer binary that wrote it must still be able to use
             # it, which quarantining or rewriting would prevent.
             raise CandidateFormatError(
-                f"candidate store {self.path} is format {fmt!r}, but this build "
+                f"candidate store {source} is format {fmt!r}, but this build "
                 f"reads at most {CANDIDATE_FORMAT}; upgrade, or discard it with a "
                 f"build that understands it. The file has not been modified."
             )
         migrate = CANDIDATE_MIGRATIONS.get(fmt)
         if migrate is not None:
-            data = migrate(data)
+            data = migrate(data, self.origin)
+        stored = data.get("origin")
+        if stored != self.origin:
+            # Belt and braces behind the digest in the file name: if a file is
+            # ever moved, restored from a backup, or copied between machines,
+            # the identity travels with it and a mismatch is refused rather
+            # than staged against the wrong fabric.
+            #
+            # A *missing* origin is a mismatch too, not a pass. Every format
+            # this build reads either writes the field or has a migration that
+            # supplies it, so its absence means the file was tampered with or
+            # truncated — and the mutation sweep is what showed the difference:
+            # tolerating None made the format-1 migration a no-op that could be
+            # deleted with every test still green.
+            was = "no origin at all" if stored is None else repr(stored)
+            raise CandidateFormatError(
+                f"candidate store {source} carries {was}, but this session targets "
+                f"{self.origin!r}; refusing to apply one Orchestrator's staged work "
+                f"to another. The file has not been modified."
+            )
         for entry in data.get("items", []):
             mode = entry.get("mode")
             if mode not in SUPPORTED_MODES:
@@ -351,7 +484,7 @@ class CandidateStore:
                 # direction: it silently keeps live values the operator may
                 # have staged a replace to remove.
                 raise CandidateFormatError(
-                    f"candidate store {self.path} holds item "
+                    f"candidate store {source} holds item "
                     f"{entry.get('ref_key')!r} with mode {mode!r}; expected one of "
                     f"{', '.join(sorted(SUPPORTED_MODES))}. The file has not been "
                     f"modified."
@@ -367,6 +500,7 @@ class CandidateStore:
     def _save(self) -> None:
         payload = {
             "format": CANDIDATE_FORMAT,
+            "origin": self.origin,
             "items": [dataclasses.asdict(i) for i in self.items.values()],
         }
         # Unique temp name + fsync + 0o600: two shells staging against the same
@@ -387,3 +521,4 @@ class CandidateStore:
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
+

@@ -41,7 +41,7 @@ def state(state_home: Any, mock_server: tuple[str, MockState]) -> ShellState:
         registry=default_registry,
         settings=settings,
         console=Console(record=True),
-        candidate=CandidateStore(settings.host),
+        candidate=CandidateStore(settings.origin),
     )
 
 

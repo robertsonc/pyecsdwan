@@ -120,9 +120,14 @@ def test_orphaned_txns_scoped_by_host(state_home: Any) -> None:
     b = TxnJournal.create("orch-B", [Ref("interface-labels", "global")])
     b.set_state(TxnState.APPLIED_UNCONFIRMED)
 
-    a_only = orphaned_txns(host="orch-A")
-    assert [t.meta.orch_host for t in a_only] == ["orch-A"]
-    assert {t.meta.orch_host for t in orphaned_txns()} == {"orch-A", "orch-B"}
+    a_only = orphaned_txns(origin="orch-A")
+    # Canonical origins: hostnames are case-insensitive, so the identity is
+    # lowercased and carries the scheme it was reached over.
+    assert [t.meta.orch_origin for t in a_only] == ["https://orch-a"]
+    assert {t.meta.orch_origin for t in orphaned_txns()} == {
+        "https://orch-a",
+        "https://orch-b",
+    }
 
 
 def test_revert_refuses_cross_host(state_home: Any, settings: config.Settings) -> None:
@@ -136,7 +141,7 @@ def test_revert_refuses_cross_host(state_home: Any, settings: config.Settings) -
     from pyecsdwan.registry import default_registry
     from pyecsdwan.resolver import Resolver
 
-    client = OrchClient(settings)  # settings.host == orch.example.com
+    client = OrchClient(settings)  # settings.origin == https://orch.example.com
     ctx = Ctx(client=client, resolver=Resolver(client))
     report = txn.revert_txn_dir(other.dir, reason="test", ctx=ctx, registry=default_registry)
     assert not report.ok

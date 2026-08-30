@@ -91,7 +91,7 @@ def _applying(state: str = TxnState.APPLYING) -> TxnJournal:
 
 
 def _orphan_ids() -> list[str]:
-    return [t.meta.txn_id for t in orphaned_txns(host=HOST)]
+    return [t.meta.txn_id for t in orphaned_txns(origin=HOST)]
 
 
 # -- orphan classification ---------------------------------------------------
@@ -161,7 +161,7 @@ def test_a_dead_lock_owner_protects_nothing(state_home: Any) -> None:
             LockOwner(
                 pid=dead.pid,
                 start_token="stale",
-                host=HOST,
+                origin=HOST,
                 scope="commit",
                 command="ec-cli commit",
                 acquired_utc="2026-01-01T00:00:00+00:00",

@@ -179,6 +179,10 @@ def test_each_record_carries_its_transaction_and_host(state_home: Path) -> None:
     for record in _lines(_cli("--events").stdout):
         assert record["txn_id"] == journal.meta.txn_id
         assert record["orch_host"] == "orch.example.com"
+        # And the unambiguous identity, not only the display host: two tenants
+        # under one hostname share the latter, so an auditor reading shipped
+        # lines could not tell which fabric a change landed on (#63).
+        assert record["orch_origin"] == "https://orch.example.com"
         assert record["ts"]
 
 
@@ -246,6 +250,7 @@ def test_json_gives_summaries_without_bodies(state_home: Path) -> None:
     assert summary["state"] == TxnState.CONFIRMED
     assert summary["items"] == [REF.key()]
     assert summary["orch_host"] == "orch.example.com"
+    assert summary["orch_origin"] == "https://orch.example.com"
     assert "public-but-not-really" not in result.output
 
 

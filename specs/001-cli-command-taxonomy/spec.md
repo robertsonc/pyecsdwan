@@ -88,6 +88,18 @@ making one.
 | 6 | Resource-kind aliases | **Per-scope user-facing nouns**, registry keys internal. `zones` is the one live collision and is why the namespace is scoped, not flat (#77). |
 | 7 | Cost/freshness flags and defaults | **Fan-out warns about elapsed time**: prompt naming appliance count and expected duration where a TTY can answer it; the same two figures on stderr where it cannot. `--stale-ok` is **opt-in**. |
 | 8 | Exit codes and output schema | **Resolved** — `grammar.md` §5, from gNMI's taxonomy extended with the distributed cases (D-GNMI-2). |
+| 9 | Noun for selecting *which* Orchestrator a command addresses (#121) | **`orchestrator`.** `fabric` is the obvious word and is already taken: §3 defines it as a scope noun meaning *every appliance, bounded fan-out*, so `--fabric prod show fabric version` would carry two senses one space apart. `orchestrator` is the word §3 already uses for the bare no-scope subject — the Orchestrator itself. Reserves `orchestrator` and `orchestrators` as kind aliases (R12). |
+
+Decision 9 was escalated the same way 1 and 2 were, and answered by the owner.
+It settles the **noun only**; the command shape that carries it is Q5.
+
+It overlaps one existing use: `Scope.ORCHESTRATOR`, spelled `--scope
+orchestrator`, meaning *kinds that live at the Orchestrator rather than on an
+appliance*. That is a different question — which kinds, not which target — and
+the two are one flag apart rather than one space apart. kubectl does the same
+double duty, selecting with `--namespace` while also calling resources
+namespaced, and it does not confuse anyone. Accepted rather than worked
+around, and written down here so the overlap is on the record as considered.
 
 ## Open questions
 
@@ -97,6 +109,7 @@ making one.
 | Q2 | Fan-out cost behavior, and is `--stale-ok` opt-in? | was blocking | owner | **Answered: confirm then warn; `--stale-ok` opt-in.** Grammar 0.2.0. |
 | Q3 | Removal boundary for compatibility aliases | — | owner | **Answered: not needed.** pyecsdwan has not shipped to production, so old forms are removed rather than aliased. See `compatibility.md` 0.3.0. |
 | Q4 | Does `show fabric <domain>` warrant existing where the Orchestrator has a single-call answer, or should those stay unscoped (`show version`)? Currently inconsistent: `show version` is Orchestrator+fanout but unscoped, while `show flows summary` gains `fabric`. | No — resolvable during #74 | owner or implementer | open |
+| Q5 | Command shape for the orchestrator registry. §2 puts CLI-state *reads* under bare `show`, which makes `show orchestrators` the consistent listing; where the mutations live (a top-level `orchestrator` verb group, flags on an existing one, or a config file only) is unsettled. | No — #121 is unstarted | owner | open |
 
 **Nothing blocks the plan now.** One reading is flagged rather than assumed
 silently: "confirm, then warn" is implemented as *confirm where a prompt can be

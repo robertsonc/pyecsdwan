@@ -65,7 +65,7 @@ def shell(state_home: Any, mock_server: tuple[str, MockState]) -> Any:
             registry=default_registry,
             settings=settings,
             console=Console(record=True, width=200),
-            candidate=CandidateStore(settings.host),
+            candidate=CandidateStore(settings.origin),
         )
         dispatch_operational(line, state)
         return state
@@ -129,7 +129,7 @@ def test_the_question_mark_and_tab_give_the_same_answer(
         registry=default_registry,
         settings=settings,
         console=Console(record=True, width=200),
-        candidate=CandidateStore(settings.host),
+        candidate=CandidateStore(settings.origin),
     )
     completer = ShellCompleter(state)
 

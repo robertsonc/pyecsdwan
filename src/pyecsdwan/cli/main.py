@@ -155,9 +155,9 @@ def _configure_logging(debug: bool) -> None:
     )
 
 
-def _startup_scan(host: str) -> None:
-    """Warn (never block) about orphaned unconfirmed transactions for HOST."""
-    orphans = txn.pending_rollbacks(host=host)
+def _startup_scan(origin: str) -> None:
+    """Warn (never block) about orphaned unconfirmed transactions for ORIGIN."""
+    orphans = txn.pending_rollbacks(origin=origin)
     if orphans:
         err_console.print(
             Text(
@@ -177,7 +177,7 @@ def _bootstrap(state: _State) -> tuple[Ctx, Registry, config.Settings]:
         except RuntimeError as exc:
             _fail(str(exc))
         state.booted = (ctx, registry, settings)
-        _startup_scan(settings.host)
+        _startup_scan(settings.origin)
     return state.booted
 
 
@@ -370,7 +370,7 @@ def set_(
     ref = _make_ref(registry, kind, name, appliance)
     path, raw_value = list(args[:-1]), args[-1]
     value = _coerce_value(raw_value)
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     candidate.set_path(ref, path, value)
     console.print(f"staged: {ref.key()} {'.'.join(path)} = {value!r}")
 
@@ -393,7 +393,7 @@ def delete(
     state = _state(ctx)
     _rt, registry, settings = _bootstrap(state)
     ref = _make_ref(registry, kind, name, appliance)
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     candidate.delete(ref, list(path) if path else None)
     suffix = f" {'.'.join(path)}" if path else ""
     console.print(f"staged delete: {ref.key()}{suffix}")
@@ -431,7 +431,7 @@ def load(
         _fail(f"invalid YAML in {file}: {exc}")
     if not isinstance(data, dict):
         _fail(f"{file}: top-level YAML value must be a mapping")
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     if merge:
         for key, value in data.items():
             candidate.set_path(ref, [str(key)], value)
@@ -466,7 +466,7 @@ def diff_(ctx: typer.Context) -> None:
     """Compare candidate against live state; exit 1 when changes exist (CI drift check)."""
     state = _state(ctx)
     rt_ctx, registry, settings = _bootstrap(state)
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     plan = txn.build_plan(rt_ctx, registry, candidate)
     render.render_plan(console, plan)
     raise typer.Exit(0 if plan.empty else 1)
@@ -579,7 +579,7 @@ def apply_(
     # apply would commit changes the directory never declared, and the operator
     # would have no way to see which came from where. Clearing it is their
     # call, not this command's.
-    staged = CandidateStore(settings.host)
+    staged = CandidateStore(settings.origin)
     if len(staged):
         _fail(
             f"refusing: {len(staged)} item(s) staged in the candidate. A declarative "
@@ -674,7 +674,7 @@ def drift_(
         )
         intent = declared
     else:
-        intent = CandidateStore(settings.host)
+        intent = CandidateStore(settings.origin)
 
     _gate_fanout(rt_ctx, assume_yes, calls_each=_drift_calls_each(registry, kind))
     report = drift.collect(
@@ -751,11 +751,12 @@ def commit(
     """Apply the candidate changeset (a bare commit inside a confirm window confirms)."""
     state = _state(ctx)
     rt_ctx, registry, settings = _bootstrap(state)
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     unconfirmed = [
         t
         for t in list_txns()
-        if t.meta.state == TxnState.APPLIED_UNCONFIRMED and t.meta.orch_host == settings.host
+        if t.meta.state == TxnState.APPLIED_UNCONFIRMED
+        and journal_mod.targets(t, settings.origin)
     ]
     if unconfirmed:
         # A bare commit confirms the pending window. But if the user also
@@ -828,10 +829,94 @@ def discard(ctx: typer.Context) -> None:
     """Drop the entire candidate changeset."""
     state = _state(ctx)
     _rt, _registry, settings = _bootstrap(state)
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     count = len(candidate)
     candidate.clear()
     console.print(f"discarded {count} candidate item(s)")
+
+
+@app.command()
+def adopt(
+    ctx: typer.Context,
+    txn_id: Annotated[
+        str | None,
+        typer.Option("--txn", help="Bind one pre-#63 transaction to this Orchestrator."),
+    ] = None,
+    candidate: Annotated[
+        bool,
+        typer.Option("--candidate", help="Bind pre-#63 staged changes to this Orchestrator."),
+    ] = False,
+) -> None:
+    """Bind local state written before origins were recorded to this Orchestrator.
+
+    Older builds keyed state by a display hostname, which the http:// and
+    https:// endpoints on one name — and every tenant path under it — share.
+    Such state is still listed and still readable, but it cannot confirm,
+    restore or commit anything, because nothing in it establishes which
+    Orchestrator it belongs to and a hostname is not proof.
+
+    You are the proof. Connect to the Orchestrator the state belongs to and
+    run this; the choice is recorded in the journal's event log.
+
+    With no options it reports what is adoptable and changes nothing.
+    """
+    state = _state(ctx)
+    _rt, _registry, settings = _bootstrap(state)
+    store = CandidateStore(settings.origin)
+    unproven = [t for t in journal_mod.list_txns() if journal_mod.is_legacy(t)]
+
+    if not txn_id and not candidate:
+        _report_adoptable(settings, store, unproven)
+        return
+
+    if candidate:
+        adopted = store.adopt_legacy()
+        if adopted:
+            console.print(
+                f"adopted {len(adopted)} staged change(s) into {settings.origin}: "
+                f"{', '.join(sorted(adopted))}"
+            )
+        else:
+            console.print("no unadopted staged changes found")
+
+    if txn_id:
+        match = [t for t in unproven if t.meta.txn_id == txn_id]
+        if not match:
+            bound = [t for t in journal_mod.list_txns() if t.meta.txn_id == txn_id]
+            if bound:
+                _fail(
+                    f"transaction {txn_id} is already bound to "
+                    f"{bound[0].meta.orch_origin!r}; adoption cannot re-target a journal"
+                )
+            _fail(f"no unadopted transaction {txn_id!r} found")
+        journal_mod.adopt(match[0], settings.origin)
+        console.print(f"adopted transaction {txn_id} into {settings.origin}")
+
+
+def _report_adoptable(
+    settings: config.Settings, store: CandidateStore, unproven: list[Any]
+) -> None:
+    """The no-op form. Reporting before acting matters more here than usual:
+    adoption is an assertion about provenance that cannot be checked, so the
+    operator should see exactly what they would be claiming."""
+    staged = store.legacy_pending()
+    if not staged and not unproven:
+        console.print("nothing to adopt: all local state records which Orchestrator it targets")
+        return
+    console.print(f"adoptable into {settings.origin}:")
+    if staged:
+        console.print(f"  staged changes ({len(staged)}): {', '.join(sorted(staged))}")
+        console.print("    adopt with: ec-cli adopt --candidate")
+    for t in unproven:
+        console.print(
+            f"  transaction {t.meta.txn_id} [{t.meta.state}] "
+            f"recorded host {t.meta.orch_host!r}"
+        )
+        console.print(f"    adopt with: ec-cli adopt --txn {t.meta.txn_id}")
+    console.print(
+        "\nAdopt only what you know belongs to this Orchestrator: a hostname is "
+        "shared by its http:// and https:// endpoints and by every tenant path under it."
+    )
 
 
 @app.command()
@@ -850,7 +935,7 @@ def rollback(
     state = _state(ctx)
     rt_ctx, registry, settings = _bootstrap(state)
     if pending:
-        orphans = txn.pending_rollbacks(host=settings.host)
+        orphans = txn.pending_rollbacks(origin=settings.origin)
         if not orphans:
             console.print("no orphaned transactions")
             return
@@ -1031,31 +1116,46 @@ def _warn_corrupt_journal(names: list[str]) -> None:
     )
 
 
-def render_locks_table(
-    out: Console, rows: list[tuple[str, locking.LockOwner | None, bool]]
-) -> None:
-    """Render host-scoped lock state (#63). Shared by the subcommand and the shell."""
+def render_locks_table(out: Console, rows: list[locking.LockState]) -> None:
+    """Render origin-scoped lock state (#63). Shared by the subcommand and the shell."""
     if not rows:
         out.print("no locks")
         return
     table = Table(title=f"locks ({len(rows)})")
-    table.add_column("lock")
+    table.add_column("orchestrator")
+    table.add_column("scope")
     table.add_column("state")
     table.add_column("holder")
     table.add_column("since")
-    for name, owner, held in rows:
-        state_cell = Text("HELD", style="bold yellow") if held else Text("free", style="dim")
+    for row in rows:
+        state_cell = Text("HELD", style="bold yellow") if row.held else Text("free", style="dim")
+        owner = row.owner
         if owner is None:
             holder = _ABSENT
-        elif held:
+        elif row.held:
             holder = Text(owner.describe(), style="dim")
         else:
             # The file outlives the lock, so this is the *last* holder, not a
             # current one. Labelled, because an unlabelled pid reads as truth.
             holder = Text(f"(last: {owner.describe()})", style="dim")
         since = Text(owner.acquired_utc, style="dim") if owner is not None else _ABSENT
-        table.add_row(name, state_cell, holder, since)
+        # The file name carries a one-way digest, so it cannot be read back as
+        # an identity. Shown only when no owner record says which target it is.
+        which = row.origin if row.origin else Text(row.name, style="dim")
+        if row.legacy:
+            which = Text.assemble(which, ("  (pre-#63 name)", "dim yellow"))
+        table.add_row(which, row.scope, state_cell, holder, since)
     out.print(table)
+    if any(row.legacy for row in rows):
+        out.print(
+            Text(
+                "Locks marked (pre-#63 name) are also taken by this build, so a process "
+                "from before origin-keyed locks cannot run alongside one from after. "
+                "Once no such process can still be running, deleting those files ends "
+                "the barrier.",
+                style="dim",
+            )
+        )
 
 
 @show_app.command("locks")
@@ -1076,7 +1176,7 @@ def show_pending(ctx: typer.Context) -> None:
     # dangerous place for a corrupt directory to hide, because it is the one
     # answer an operator acts on by going home.
     corrupt = journal_mod.unreadable_txn_dirs()
-    orphans = txn.pending_rollbacks(host=settings.host)
+    orphans = txn.pending_rollbacks(origin=settings.origin)
     if not orphans:
         console.print("no pending transactions")
         _warn_corrupt_journal(corrupt)
@@ -1724,7 +1824,7 @@ def show_candidate(ctx: typer.Context) -> None:
     """Dump the staged candidate changeset (intent as YAML)."""
     state = _state(ctx)
     _rt, _registry, settings = _bootstrap(state)
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     items = candidate.ordered_items()
     if not items:
         console.print("candidate is empty")
@@ -2081,7 +2181,7 @@ def api(
     policy, reason = retry_mod.effective_policy(
         method_upper, path, retry_mod.Retry.NEVER, scope=scope
     )
-    journal = TxnJournal.create(settings.host, [Ref(kind="api", name=f"{method_upper} {path}")])
+    journal = TxnJournal.create(settings.origin, [Ref(kind="api", name=f"{method_upper} {path}")])
     journal.append(
         "RAW_API",
         method=method_upper,

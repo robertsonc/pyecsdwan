@@ -48,7 +48,7 @@ _TRY_ACQUIRE = """
 import sys
 from pyecsdwan.locking import HostLock, LockBusy
 try:
-    with HostLock({host!r}, {scope!r}, timeout={timeout!r}):
+    with HostLock({origin!r}, {scope!r}, timeout={timeout!r}):
         print("ACQUIRED")
 except LockBusy as exc:
     print("BUSY", exc)
@@ -89,28 +89,28 @@ def _await(path: Path, timeout: float = 20.0) -> None:
 
 def test_a_second_process_cannot_take_a_held_lock(state_home: Path) -> None:
     with HostLock(HOST, "commit"):
-        out = _run_child(state_home, _TRY_ACQUIRE.format(host=HOST, scope="commit", timeout=0.2))
+        out = _run_child(state_home, _TRY_ACQUIRE.format(origin=HOST, scope="commit", timeout=0.2))
     assert "BUSY" in out.stdout, out
 
 
 def test_the_lock_is_free_again_once_the_holder_exits(state_home: Path) -> None:
     with HostLock(HOST, "commit"):
         pass
-    out = _run_child(state_home, _TRY_ACQUIRE.format(host=HOST, scope="commit", timeout=0.2))
+    out = _run_child(state_home, _TRY_ACQUIRE.format(origin=HOST, scope="commit", timeout=0.2))
     assert "ACQUIRED" in out.stdout, out
 
 
 def test_locks_are_host_scoped(state_home: Path) -> None:
     # Work against one Orchestrator must never block work against another.
     with HostLock(HOST, "commit"):
-        out = _run_child(state_home, _TRY_ACQUIRE.format(host=OTHER, scope="commit", timeout=0.2))
+        out = _run_child(state_home, _TRY_ACQUIRE.format(origin=OTHER, scope="commit", timeout=0.2))
     assert "ACQUIRED" in out.stdout, out
 
 
 def test_scopes_are_independent(state_home: Path) -> None:
     with HostLock(HOST, "commit"):
         out = _run_child(
-            state_home, _TRY_ACQUIRE.format(host=HOST, scope="candidate", timeout=0.2)
+            state_home, _TRY_ACQUIRE.format(origin=HOST, scope="candidate", timeout=0.2)
         )
     assert "ACQUIRED" in out.stdout, out
 
@@ -126,7 +126,7 @@ def test_lock_nests_within_one_process(state_home: Path) -> None:
             assert outer.held and inner.held
         # Releasing the inner object must NOT drop the lock the outer holds.
         assert outer.held
-        out = _run_child(state_home, _TRY_ACQUIRE.format(host=HOST, scope="commit", timeout=0.2))
+        out = _run_child(state_home, _TRY_ACQUIRE.format(origin=HOST, scope="commit", timeout=0.2))
         assert "BUSY" in out.stdout, out
     assert not outer.held
 
@@ -178,7 +178,7 @@ def test_owner_liveness_requires_a_matching_start_token() -> None:
     live = LockOwner(
         pid=pid,
         start_token=locking.proc_start_token(pid),
-        host=HOST,
+        origin=HOST,
         scope="commit",
         command="ec-cli commit",
         acquired_utc="now",
@@ -190,7 +190,7 @@ def test_owner_liveness_requires_a_matching_start_token() -> None:
     recycled = LockOwner(
         pid=pid,
         start_token="0",
-        host=HOST,
+        origin=HOST,
         scope="commit",
         command="ec-cli commit",
         acquired_utc="then",
@@ -202,7 +202,7 @@ def test_owner_liveness_is_false_for_a_dead_pid() -> None:
     dead = subprocess.Popen([sys.executable, "-c", "pass"])
     dead.wait(timeout=10)
     owner = LockOwner(
-        pid=dead.pid, start_token="", host=HOST, scope="commit", command="x", acquired_utc="t"
+        pid=dead.pid, start_token="", origin=HOST, scope="commit", command="x", acquired_utc="t"
     )
     assert not owner.is_alive()
 
@@ -213,7 +213,7 @@ def test_lock_file_records_the_holder_without_leaking_arguments(state_home: Path
         owner = lock.read_owner()
     assert owner is not None
     assert owner.pid == os.getpid()
-    assert owner.host == HOST and owner.scope == "commit"
+    assert owner.origin == config.as_origin(HOST) and owner.scope == "commit"
     assert owner.start_token == locking.proc_start_token(os.getpid())
     # The command is argv[0] + subcommand only. Resource names and values an
     # operator staged are not diagnostics and have no business on disk here.
@@ -253,7 +253,7 @@ def test_fallback_breaks_a_dead_owners_lock(state_home: Path, no_flock: None) ->
     _write_lock_file(
         lock.path,
         LockOwner(
-            pid=dead.pid, start_token="", host=HOST, scope="commit", command="x", acquired_utc="t"
+            pid=dead.pid, start_token="", origin=HOST, scope="commit", command="x", acquired_utc="t"
         ),
     )
     with lock:  # the owner is provably gone, so the lock is ours to take
@@ -268,7 +268,7 @@ def test_fallback_will_not_break_a_live_owners_lock(state_home: Path, no_flock: 
         LockOwner(
             pid=pid,
             start_token=locking.proc_start_token(pid),
-            host=HOST,
+            origin=HOST,
             scope="commit",
             command="ec-cli commit",
             acquired_utc="t",
@@ -296,7 +296,7 @@ def test_fallback_does_not_break_a_lock_recorded_without_a_token(
     _write_lock_file(
         lock.path,
         LockOwner(
-            pid=os.getpid(), start_token="", host=HOST, scope="commit", command="x",
+            pid=os.getpid(), start_token="", origin=HOST, scope="commit", command="x",
             acquired_utc="t",
         ),
     )
@@ -378,30 +378,48 @@ def test_a_failed_mutation_does_not_persist_or_strand_the_lock(state_home: Path)
 # -- show locks --------------------------------------------------------------
 
 
+def _by_name(rows: list[locking.LockState]) -> dict[str, locking.LockState]:
+    return {row.name: row for row in rows}
+
+
 def test_active_locks_reports_held_and_free(state_home: Path) -> None:
     ready = state_home / "listme.ready"
     child = _spawn_holder(state_home, HOST, "commit", ready)
+    name = f"{config.origin_slug(config.as_origin(HOST))}.commit.lock"
     try:
         _await(ready)
-        rows = {name: (owner, held) for name, owner, held in locking.active_locks()}
-        name = f"{HOST}.commit.lock"
+        rows = _by_name(locking.active_locks())
         assert name in rows, rows
-        owner, held = rows[name]
-        assert held is True
-        assert owner is not None and owner.pid == child.pid
+        row = rows[name]
+        assert row.held is True
+        assert row.scope == "commit"
+        # Read back from the owner record: the file name is a one-way digest.
+        assert row.origin == config.as_origin(HOST)
+        assert row.owner is not None and row.owner.pid == child.pid
     finally:
         child.kill()
         child.wait(timeout=10)
-    rows2 = {name: held for name, _owner, held in locking.active_locks()}
-    assert rows2[f"{HOST}.commit.lock"] is False
+    assert _by_name(locking.active_locks())[name].held is False
+
+
+def test_active_locks_probes_the_file_it_found(state_home: Path) -> None:
+    """Rebuilding the path from the name would slug an already-slugged string
+    and probe a different file — reporting every lock free, and creating a new
+    lock file on every `show locks` (#63)."""
+    with HostLock(HOST, "commit"):
+        before = sorted(p.name for p in locking.lock_root().iterdir())
+        rows = locking.active_locks()
+    after = sorted(p.name for p in locking.lock_root().iterdir())
+    assert after == before
+    assert [r.name for r in rows] == before
 
 
 def test_active_locks_does_not_report_our_own_lock_as_free(state_home: Path) -> None:
     # Probing by acquisition would nest and answer "free", the one answer that
     # is certainly wrong.
     with HostLock(HOST, "commit"):
-        rows = {name: held for name, _owner, held in locking.active_locks()}
-    assert rows[f"{HOST}.commit.lock"] is True
+        rows = _by_name(locking.active_locks())
+    assert rows[f"{config.origin_slug(config.as_origin(HOST))}.commit.lock"].held is True
 
 
 def test_lock_root_lives_under_the_state_home(state_home: Path) -> None:

@@ -281,8 +281,23 @@ class ApplyResult:
 #: must decide whether ``<token>`` is a datastore, a scope noun, or a kind.
 #: While the token was mandatory the position was unambiguous and none of this
 #: was needed.
+#: ``orchestrator``/``orchestrators`` are reserved ahead of the feature that
+#: uses them (Decision 9, #121): the noun for selecting *which* Orchestrator a
+#: command addresses. ``fabric`` was the obvious word and is on this list
+#: already meaning something else — every appliance, fanned out — which is
+#: exactly why it could not be reused. Reserved now rather than when it ships,
+#: because a kind claiming the name would then have to be renamed, and renaming
+#: an operator-facing noun costs more than reserving one that is still free.
 RESERVED_CLI_WORDS: frozenset[str] = frozenset(
-    {"running", "candidate", "appliance", "fabric", "configuration"}
+    {
+        "running",
+        "candidate",
+        "appliance",
+        "fabric",
+        "configuration",
+        "orchestrator",
+        "orchestrators",
+    }
 )
 
 

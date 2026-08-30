@@ -52,7 +52,16 @@ from pyecsdwan.contract import (
     Reversibility,
     Tier,
 )
-from pyecsdwan.journal import TxnJournal, TxnState, committed_history, orphaned_txns, prune_history
+from pyecsdwan.journal import (
+    TxnJournal,
+    TxnState,
+    authorizes,
+    committed_history,
+    is_legacy,
+    orphaned_txns,
+    prune_history,
+    targets,
+)
 from pyecsdwan.locking import DEFAULT_TIMEOUT, HostLock
 from pyecsdwan.registry import Registry
 
@@ -262,9 +271,7 @@ def commit(
     # Held across snapshot, apply, verify and any auto-revert: a second commit
     # that interleaved with this one could snapshot state this commit is
     # midway through writing, and then "restore" it later.
-    with HostLock(
-        settings.host, "commit", root=lock_root, timeout=lock_timeout
-    ):
+    with HostLock(settings.origin, "commit", root=lock_root, timeout=lock_timeout):
         return _commit_locked(
             ctx,
             changed,
@@ -293,6 +300,31 @@ class StagedCommit:
     #: Ref keys another writer changed after this commit was planned, kept
     #: rather than acknowledged. The caller reports them.
     kept: tuple[str, ...] = ()
+
+
+def _guard_unadopted_staging(candidate: CandidateStore) -> None:
+    """Refuse "no changes" when there is staged work this build will not claim.
+
+    An operator who staged twelve changes, upgraded, and is told there is
+    nothing to commit concludes the work was lost and does it again. The
+    staging is right there — it is only its *target* that is unknown, and that
+    is a question with an answer the operator has and the file does not.
+
+    Raised here rather than at each interface: the scriptable CLI and the
+    shell both print "no changes" from their own code, and putting the check
+    on the shared path is the same lesson as the acknowledgement above.
+    """
+    pending = candidate.legacy_pending()
+    if not pending:
+        return
+    raise CommitError(
+        f"nothing staged for {candidate.origin}, but {len(pending)} change(s) staged by "
+        f"an older build are in {candidate.unadopted_legacy}. That file is keyed by a "
+        f"hostname, which this Orchestrator's http:// and https:// endpoints — and every "
+        f"tenant path under it — share, so this build will not assume the changes are "
+        f"yours. If they are, run 'ec-cli adopt --candidate'; 'ec-cli adopt' on its own "
+        f"lists them first."
+    )
 
 
 def commit_candidate(
@@ -335,6 +367,7 @@ def commit_candidate(
     staged = candidate.ordered_items()
     plan = build_plan(ctx, registry, candidate)
     if plan.empty:
+        _guard_unadopted_staging(candidate)
         return StagedCommit(plan=plan)
     if on_plan is not None:
         on_plan(plan)
@@ -379,13 +412,13 @@ def _guard_no_pending_confirm(
     blocking = [
         t
         for t in list_txns(journal_root)
-        if t.meta.orch_host == settings.host and t.meta.state in BLOCKING_STATES
+        if targets(t, settings.origin) and t.meta.state in BLOCKING_STATES
     ]
     if not blocking:
         return
     first = blocking[0]
     raise CommitError(
-        f"transaction {first.meta.txn_id} is {first.meta.state} on {settings.host}; "
+        f"transaction {first.meta.txn_id} is {first.meta.state} on {settings.origin}; "
         f"refusing to start another that it would revert away. Run 'ec-cli confirm' "
         f"or 'ec-cli rollback --pending' first."
     )
@@ -401,9 +434,7 @@ def _commit_locked(
     override_template: bool,
 ) -> CommitReport:
     _guard_no_pending_confirm(settings, journal_root)
-    journal = TxnJournal.create(
-        settings.host, [i.ref for i in changed], root=journal_root
-    )
+    journal = TxnJournal.create(settings.origin, [i.ref for i in changed], root=journal_root)
     report = CommitReport(ok=False, txn_id=journal.meta.txn_id)
 
     # Snapshot-before-write: re-fetch every resource at commit time so the
@@ -595,7 +626,7 @@ def _commit_locked(
         return report
 
     journal.set_state(TxnState.CONFIRMED)
-    prune_history(settings.rollback_history, root=journal_root, host=settings.host)
+    prune_history(settings.rollback_history, root=journal_root, origin=settings.origin)
     report.ok = True
     report.state = TxnState.CONFIRMED
     report.messages.append(f"commit complete: {len(applied)} change(s) applied")
@@ -800,10 +831,10 @@ def confirm_pending(
     lock_timeout: float = DEFAULT_TIMEOUT,
 ) -> CommitReport:
     """Bare ``commit`` inside a confirm window: claim the decision, write the
-    marker, stop the watchdog. Scoped to ``settings.host`` so a confirm against
+    marker, stop the watchdog. Scoped to ``settings.origin`` so a confirm against
     one Orchestrator can never finalize an unconfirmed change on another."""
 
-    with HostLock(settings.host, "commit", root=lock_root, timeout=lock_timeout):
+    with HostLock(settings.origin, "commit", root=lock_root, timeout=lock_timeout):
         return _confirm_locked(settings, journal_root, txn_id)
 
 
@@ -812,14 +843,29 @@ def _confirm_locked(
 ) -> CommitReport:
     from pyecsdwan.journal import list_txns
 
-    candidates = [
+    unconfirmed = [
         t
         for t in list_txns(journal_root)
         if t.meta.state == TxnState.APPLIED_UNCONFIRMED
-        and t.meta.orch_host == settings.host
+        and targets(t, settings.origin)
         and (txn_id is None or t.meta.txn_id == txn_id)
     ]
+    # Confirming writes a marker, kills the watchdog and marks the transaction
+    # CONFIRMED — it is what stops the fabric being put back. A hostname match
+    # is not enough to authorize that against a journal that might belong to
+    # another Orchestrator on the same name (#63).
+    candidates = [t for t in unconfirmed if authorizes(t, settings.origin)]
     if not candidates:
+        unproven = [t for t in unconfirmed if is_legacy(t)]
+        if unproven:
+            # Named rather than reported as "none found": an operator who can
+            # see the transaction in `show journal` and is told it does not
+            # exist goes looking in the wrong place.
+            return CommitReport(
+                ok=False,
+                state="NONE",
+                messages=[_unproven(unproven[0], "confirm")],
+            )
         return CommitReport(ok=False, state="NONE", messages=["no unconfirmed transaction found"])
     txn = candidates[0]
     # Win the decision atomically; if the watchdog already claimed 'revert',
@@ -850,13 +896,30 @@ def _confirm_locked(
             messages=[f"transaction {txn.meta.txn_id} was already {fresh.meta.state}"],
         )
     fresh.set_state(TxnState.CONFIRMED)
-    prune_history(settings.rollback_history, root=journal_root, host=settings.host)
+    prune_history(settings.rollback_history, root=journal_root, origin=settings.origin)
     return CommitReport(
         ok=True,
         txn_id=txn.meta.txn_id,
         state=TxnState.CONFIRMED,
         messages=[f"transaction {txn.meta.txn_id} confirmed"],
     )
+
+
+#: What to tell an operator holding a journal whose target cannot be proven.
+ADOPT_HINT = (
+    "Its target cannot be established from the file, and a hostname is not "
+    "proof: the http:// and https:// endpoints on one name, and every tenant "
+    "path under it, share it. If you know which Orchestrator it belongs to, "
+    "connect to that one and run 'ec-cli adopt --txn {txn_id}'."
+)
+
+
+def _unproven(txn: TxnJournal, action: str) -> str:
+    return (
+        f"refusing to {action} transaction {txn.meta.txn_id}: it was written before "
+        f"this build recorded which Orchestrator a transaction targets, and records "
+        f"only the hostname {txn.meta.orch_host!r}. "
+    ) + ADOPT_HINT.format(txn_id=txn.meta.txn_id)
 
 
 def revert_txn_dir(
@@ -879,8 +942,21 @@ def revert_txn_dir(
     applied.
     """
     journal = TxnJournal.open(txn_dir)
-    host = journal.meta.orch_host
-    with HostLock(host, "commit", root=lock_root, timeout=lock_timeout, txn_id=journal.meta.txn_id):
+    if is_legacy(journal):
+        # Refused before any lock is taken, because none can be named: the
+        # journal records no origin, and a guessed one is a *different* lock
+        # from the one a live commit against the actual target holds — so the
+        # guess would not even serialize against the thing it must (#63).
+        return CommitReport(
+            ok=False,
+            txn_id=journal.meta.txn_id,
+            state="NONE",
+            messages=[_unproven(journal, "restore")],
+        )
+    origin = journal.meta.orch_origin
+    with HostLock(
+        origin, "commit", root=lock_root, timeout=lock_timeout, txn_id=journal.meta.txn_id
+    ):
         # Re-open *inside* the lock. The journal above was read before the
         # wait, and waiting is exactly when it goes stale: recovery blocks on
         # the lock a live commit is holding, that commit finishes and marks
@@ -920,18 +996,33 @@ def _revert_txn_dir_locked(
         from pyecsdwan.runtime import bootstrap
 
         ctx, registry, _settings = bootstrap()
-    # Never restore one Orchestrator's snapshot into another.
-    client_host = getattr(getattr(ctx.client, "settings", None), "host", None)
-    if client_host is not None and journal.meta.orch_host != client_host:
+    # Never restore one Orchestrator's snapshot into another. Compared on the
+    # canonical origin: the display host collapses two tenants under one
+    # hostname onto the same string, so this guard used to wave through the
+    # single worst thing the tool can do (#63).
+    client_origin = getattr(getattr(ctx.client, "settings", None), "origin", None)
+    if client_origin is not None and not authorizes(journal, client_origin):
+        # `authorizes`, not `targets`: a hostname match is enough to *list* a
+        # transaction and not nearly enough to restore one, and this is the
+        # path that writes another fabric's snapshots over live config.
+        if is_legacy(journal):
+            return CommitReport(
+                ok=False,
+                txn_id=journal.meta.txn_id,
+                state="NONE",
+                messages=[_unproven(journal, "restore")],
+            )
         return CommitReport(
             ok=False,
             txn_id=journal.meta.txn_id,
             state="NONE",
             messages=[
-                f"refusing: transaction targets Orchestrator {journal.meta.orch_host!r} "
-                f"but the session is connected to {client_host!r}"
+                f"refusing: transaction targets Orchestrator "
+                f"{journal.meta.orch_origin!r} but the session is connected to "
+                f"{client_origin!r}"
             ],
         )
+    caveats: list[str] = []
     applied = journal.applied_refs()
     if not applied:
         # A journal with zero APPLY_START events (e.g. an interrupted Tier-0
@@ -944,10 +1035,10 @@ def _revert_txn_dir_locked(
             ok=True,
             txn_id=journal.meta.txn_id,
             state=TxnState.AUDIT_ONLY,
-            messages=["nothing to revert (no changes were applied)"],
+            messages=[*caveats, "nothing to revert (no changes were applied)"],
         )
     journal.append("REVERT_TRIGGERED", reason=reason)
-    report = CommitReport(ok=False, txn_id=journal.meta.txn_id)
+    report = CommitReport(ok=False, txn_id=journal.meta.txn_id, messages=list(caveats))
     snapshots = journal.snapshots()
     items: list[PlanItem] = []
     for key in reversed(applied):
@@ -984,7 +1075,7 @@ def rollback_history_txn(
 
     Under the same commit lock as everything else that writes to the fabric —
     a rollback racing a commit would snapshot and restore half of it."""
-    with HostLock(settings.host, "commit", root=lock_root, timeout=lock_timeout):
+    with HostLock(settings.origin, "commit", root=lock_root, timeout=lock_timeout):
         return _rollback_locked(ctx, registry, settings, n, journal_root)
 
 
@@ -995,7 +1086,7 @@ def _rollback_locked(
     n: int,
     journal_root: Path | None,
 ) -> CommitReport:
-    history = committed_history(journal_root, host=settings.host)
+    history = committed_history(journal_root, origin=settings.origin)
     if n < 1 or n > len(history):
         return CommitReport(
             ok=False,
@@ -1013,7 +1104,7 @@ def _rollback_locked(
     snapshots = source.snapshots()
 
     refs = [Ref.from_key(k) for k in applied]
-    journal = TxnJournal.create(settings.host, refs, root=journal_root)
+    journal = TxnJournal.create(settings.origin, refs, root=journal_root)
     journal.append("ROLLBACK_OF", source_txn=source.meta.txn_id, n=n)
     report = CommitReport(ok=False, txn_id=journal.meta.txn_id)
 
@@ -1048,17 +1139,17 @@ def _rollback_locked(
         report.messages.append(
             f"restored {len(report.applied)} resource(s) from transaction {source.meta.txn_id}"
         )
-        prune_history(settings.rollback_history, root=journal_root, host=settings.host)
+        prune_history(settings.rollback_history, root=journal_root, origin=settings.origin)
     return report
 
 
 def pending_rollbacks(
-    journal_root: Path | None = None, host: str | None = None
+    journal_root: Path | None = None, origin: str | None = None
 ) -> list[TxnJournal]:
     """Orphaned unconfirmed transactions (CLI/watchdog died) for
-    ``rollback --pending`` and the startup scan, scoped to ``host`` so
+    ``rollback --pending`` and the startup scan, scoped to ``origin`` so
     recovery never touches another Orchestrator's transactions."""
-    return orphaned_txns(journal_root, host=host)
+    return orphaned_txns(journal_root, origin=origin)
 
 
 def format_report(report: CommitReport) -> str:

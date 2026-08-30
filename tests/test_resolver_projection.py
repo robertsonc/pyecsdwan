@@ -229,3 +229,68 @@ def test_overlays_are_deliberately_not_projected(
     # Plain dicts, and wider than {id, name}.
     assert not isinstance(overlays[0], ApplianceRecord)
     assert set(overlays[0]) - {"id", "name"}
+
+
+# -- which fabric the cache came from (#63) ----------------------------------
+
+
+def test_the_cache_records_the_origin_it_was_built_against(
+    resolved: tuple[Resolver, Path],
+) -> None:
+    res, cache_dir = resolved
+    res.appliances()
+    written = json.loads(next(cache_dir.glob("*.json")).read_text(encoding="utf-8"))
+    assert written[Resolver.ORIGIN_KEY] == res.client.settings.origin
+
+
+def test_a_cache_from_another_origin_is_discarded_not_used(
+    state_home: Any, mock_server: tuple[str, MockState], tmp_path: Path
+) -> None:
+    """The file name carries a digest of the origin, so this only fires for a
+    cache moved, restored from a backup, or written before #63. It still has
+    to fire: a stale name -> nePk mapping is what the next write is aimed at,
+    so using another fabric's cache means writing to another fabric's
+    appliance."""
+    base_url, state = mock_server
+    state.reset()
+    state.appliances.append(dict(NOISY_ROW))
+    cache_dir = tmp_path / "cache"
+    settings = config.Settings(orch_url=base_url, api_key="test-key")
+    res = Resolver(OrchClient(settings), cache_dir=cache_dir)
+    res.appliances()
+    cache_file = next(cache_dir.glob("*.json"))
+
+    poisoned = json.loads(cache_file.read_text(encoding="utf-8"))
+    poisoned[Resolver.ORIGIN_KEY] = "https://some-other-orchestrator.example.com"
+    poisoned["appliances"]["value"] = [
+        {"nePk": "666.NE", "id": "666.NE", "hostName": "BR9-EC"}
+    ]
+    cache_file.write_text(json.dumps(poisoned), encoding="utf-8")
+
+    fresh = Resolver(OrchClient(settings), cache_dir=cache_dir)
+    # Discarded and refetched, so the name resolves against *this* fabric.
+    assert fresh.ne_pk_for("BR9-EC") == "9.NE"
+
+
+def test_a_cache_written_before_origins_were_recorded_is_discarded(
+    state_home: Any, mock_server: tuple[str, MockState], tmp_path: Path
+) -> None:
+    """No marker at all is a mismatch, not a pass: it is exactly the case
+    where nothing on disk says which fabric the mapping came from."""
+    base_url, state = mock_server
+    state.reset()
+    state.appliances.append(dict(NOISY_ROW))
+    cache_dir = tmp_path / "cache"
+    settings = config.Settings(orch_url=base_url, api_key="test-key")
+    res = Resolver(OrchClient(settings), cache_dir=cache_dir)
+    res.appliances()
+    cache_file = next(cache_dir.glob("*.json"))
+
+    legacy = json.loads(cache_file.read_text(encoding="utf-8"))
+    del legacy[Resolver.ORIGIN_KEY]
+    legacy["appliances"]["value"] = [
+        {"nePk": "666.NE", "id": "666.NE", "hostName": "BR9-EC"}
+    ]
+    cache_file.write_text(json.dumps(legacy), encoding="utf-8")
+
+    assert Resolver(OrchClient(settings), cache_dir=cache_dir).ne_pk_for("BR9-EC") == "9.NE"

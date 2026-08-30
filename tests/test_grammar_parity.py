@@ -82,7 +82,7 @@ def both(state_home: Any, mock_server: tuple[str, MockState]) -> Any:
             registry=default_registry,
             settings=settings,
             console=Console(record=True, width=200),
-            candidate=CandidateStore(settings.host),
+            candidate=CandidateStore(settings.origin),
         )
         dispatch_operational(line, state)
         result = runner.invoke(cli_main.app, ["--mock", port, *line.split()])

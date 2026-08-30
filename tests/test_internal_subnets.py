@@ -299,7 +299,7 @@ def world(state_home: Any, mock_server: tuple[str, MockState]) -> dict[str, Any]
     settings = config.Settings(orch_url=base_url, api_key="test-key", job_timeout=5.0)
     client = OrchClient(settings)
     ctx = Ctx(client=client, resolver=Resolver(client))
-    candidate = CandidateStore(settings.host)
+    candidate = CandidateStore(settings.origin)
     return {"ctx": ctx, "settings": settings, "candidate": candidate, "state": state}
 
 

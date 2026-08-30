@@ -614,7 +614,7 @@ def shell_state(world: dict[str, Any]) -> ShellState:
         registry=default_registry,
         settings=world["settings"],
         console=Console(record=True, width=200),
-        candidate=CandidateStore(world["settings"].host),
+        candidate=CandidateStore(world["settings"].origin),
     )
 
 
@@ -724,9 +724,9 @@ def test_show_run_leaves_no_candidate_journal_or_transaction(
     assert result.exit_code == 0, result.output
 
     assert journal.list_txns() == []
-    assert txn.pending_rollbacks(host=world["settings"].host) == []
+    assert txn.pending_rollbacks(origin=world["settings"].origin) == []
     assert len(shell_state.candidate) == 0
-    assert len(CandidateStore(world["settings"].host)) == 0
+    assert len(CandidateStore(world["settings"].origin)) == 0
     # The mock flags any appliance a write reached; the report reached none.
     assert not any(a.get("hasUnsavedChanges") for a in world["state"].appliances)
 
