@@ -369,15 +369,19 @@ alongside #106, which owns the credential half.
 ## Parity map (Orchestrator UI area → code status)
 
 **What ✅ means here, precisely (#66).** It means the code shipped and is green
-against the bundled mock Orchestrator. As of 2026-08-30, 38 of the 41 curated
-resources are also **`live-read-verified`** against Orchestrator 9.7.0.43282 /
-ECOS 9.7.0.0_109184: `fetch()` and `normalize()` were run on a real fabric,
+against the bundled mock Orchestrator. As of 2026-08-30, five curated resources are
+**`live-no-op-write-verified`** and 33 more are **`live-read-verified`**,
+against Orchestrator 9.7.0.43282 / ECOS 9.7.0.0_109184: `fetch()` and `normalize()` were run on a real fabric,
 normalize is idempotent on those payloads, and a canonical state diffed against
-itself is empty (`docs/sitrep/2026-08-30-live-read.md`). The three that are not
+itself is empty. The five at level 4 also had current state staged back
+through `load` and produced an empty diff, so they do not manufacture phantom
+drift (`docs/sitrep/2026-08-30-live-read.md`). The three that are not
 — `appliance/vrrp`, `security-policy`, `ip-service-group` — had nothing of that
 kind configured to read.
 
-It still does **not** mean anyone has run a write against real gear. **No
+It still does **not** mean anyone has run a write against real gear — level 4
+included, since a no-op round trip produces an empty plan and an empty plan
+writes nothing. **No
 resource in this tool has live change-and-rollback evidence**: not one write
 path has been executed and rolled back on a fabric at a recorded version. That
 remains the state of all 41, which is why it is stated once here rather than

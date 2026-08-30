@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "note": "38 curated resources are live-read-verified against Orchestrator 9.7.0.43282 / ECOS 9.7.0.0_109184 (2026-08-30): fetch() and normalize() were run against a real fabric, normalize is idempotent on those payloads, and a canonical state diffed against itself is empty. That is level 3 and nothing more \u2014 no write path has been executed and rolled back on real gear, so every write here is still code that has never met a fabric. Three kinds (appliance/vrrp, security-policy, ip-service-group) stay at mock-verified because nothing of that kind is configured on the observed fabric, so there was nothing to read. Two Tier-1 stubs are not curated and cannot be promoted. docs/live-validation.md is the protocol for levels 4 and above.",
+  "note": "Five curated resources are live-no-op-write-verified and 33 more are live-read-verified, against Orchestrator 9.7.0.43282 / ECOS 9.7.0.0_109184 (2026-08-30). Level 4 means current state was staged back through `load` and produced an empty diff \u2014 the resource does not manufacture phantom drift \u2014 and that `commit` then wrote nothing. It does NOT mean the write path works: an empty plan writes nothing, so no write path in this repository has been executed and verified on real gear. Level 5 is the floor for calling one supported and nothing has reached it. A programmatic equivalent of the level-4 check passed for 33 write-capable kinds with zero phantom drift, but only the five that were run through the documented CLI procedure are promoted; the rest are recorded as supporting evidence in docs/sitrep/2026-08-30-live-read.md. Three kinds stay at mock-verified because nothing of that kind is configured on the observed fabric. docs/live-validation.md is the protocol for level 5.",
   "support": {
     "orchestrator": [],
     "ecos": [],
@@ -49,27 +49,29 @@
     },
     {
       "kind": "appliance/banners",
-      "level": "live-read-verified",
+      "level": "live-no-op-write-verified",
       "orchestrator": "9.7.0.43282",
       "ecos": "9.7.0.0_109184",
       "auth_mode": "api-key",
       "observed": "2026-08-30",
       "behaviors": [
-        "live-read"
+        "live-read",
+        "no-op-round-trip"
       ],
       "source": "docs/sitrep/2026-08-30-live-read.md",
-      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
+      "notes": "Level 4 by the documented procedure (docs/live-validation.md): show -> load -> diff empty -> commit -> diff still empty, with no transaction journaled because the plan was empty. Shape: simple settings dict."
     },
     {
       "kind": "appliance/bgp",
-      "level": "live-read-verified",
-      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only.",
+      "level": "live-no-op-write-verified",
+      "notes": "Level 4 by the documented procedure (docs/live-validation.md): show -> load -> diff empty -> commit -> diff still empty, with no transaction journaled because the plan was empty. Shape: nested system + peer-keyed neighbours.",
       "orchestrator": "9.7.0.43282",
       "ecos": "9.7.0.0_109184",
       "auth_mode": "api-key",
       "observed": "2026-08-30",
       "behaviors": [
-        "live-read"
+        "live-read",
+        "no-op-round-trip"
       ],
       "source": "docs/sitrep/2026-08-30-live-read.md"
     },
@@ -205,16 +207,17 @@
     },
     {
       "kind": "appliance/qos-map",
-      "level": "live-read-verified",
+      "level": "live-no-op-write-verified",
       "orchestrator": "9.7.0.43282",
       "ecos": "9.7.0.0_109184",
       "auth_mode": "api-key",
       "observed": "2026-08-30",
       "behaviors": [
-        "live-read"
+        "live-read",
+        "no-op-round-trip"
       ],
       "source": "docs/sitrep/2026-08-30-live-read.md",
-      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
+      "notes": "Level 4 by the documented procedure (docs/live-validation.md): show -> load -> diff empty -> commit -> diff still empty, with no transaction journaled because the plan was empty. Shape: prio-keyed map (the structure L2 ownership reasons about)."
     },
     {
       "kind": "appliance/route-map",
@@ -270,15 +273,16 @@
     },
     {
       "kind": "appliance/snmp",
-      "level": "live-read-verified",
-      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only.",
+      "level": "live-no-op-write-verified",
+      "notes": "Level 4 by the documented procedure (docs/live-validation.md): show -> load -> diff empty -> commit -> diff still empty, with no transaction journaled because the plan was empty. Shape: settings dict with communities.",
       "source": "docs/sitrep/2026-08-30-live-read.md",
       "orchestrator": "9.7.0.43282",
       "ecos": "9.7.0.0_109184",
       "auth_mode": "api-key",
       "observed": "2026-08-30",
       "behaviors": [
-        "live-read"
+        "live-read",
+        "no-op-round-trip"
       ]
     },
     {
@@ -336,16 +340,17 @@
     },
     {
       "kind": "interface-labels",
-      "level": "live-read-verified",
+      "level": "live-no-op-write-verified",
       "orchestrator": "9.7.0.43282",
       "ecos": "n/a",
       "auth_mode": "api-key",
       "observed": "2026-08-30",
       "behaviors": [
-        "live-read"
+        "live-read",
+        "no-op-round-trip"
       ],
       "source": "docs/sitrep/2026-08-30-live-read.md",
-      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
+      "notes": "Level 4 by the documented procedure (docs/live-validation.md): show -> load -> diff empty -> commit -> diff still empty, with no transaction journaled because the plan was empty. Shape: orchestrator-scope, id-keyed lan/wan tables."
     },
     {
       "kind": "internal-subnets",

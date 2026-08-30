@@ -246,18 +246,43 @@ def test_the_ledger_note_says_what_the_live_reads_do_and_do_not_buy() -> None:
     assert "no write path" in note.lower()
 
 
-def test_no_record_claims_a_write_level() -> None:
+def test_no_record_claims_a_verified_write_path() -> None:
     """The claim the parity map makes, enforced against the data.
 
-    Level 4 and above are claims that a write reached real gear and was
-    verified. Nothing here has earned one, and a ledger that quietly acquired
-    one would make `show coverage --evidence` lie to an operator."""
+    The threshold is level **5**, not 4, and the difference matters because
+    level 4 is named `live-no-op-write-verified` and verifies no write path at
+    all: a no-op round trip produces an empty plan, and an empty plan writes
+    nothing. It proves the resource does not invent phantom drift. Only level 5
+    — a real change, verified, rolled back and persisted — says the write path
+    works, and `docs/live-validation.md` calls it "the floor for calling a
+    write path supported".
+
+    A ledger that quietly acquired a level-5 entry would make
+    `show coverage --evidence` tell an operator their write paths were tested
+    on real gear when they were not.
+    """
     written = [
         r.kind
         for r in evidence.ledger().records.values()
-        if r.level >= evidence.Evidence.LIVE_NO_OP_WRITE_VERIFIED
+        if r.level >= evidence.Evidence.LIVE_CHANGE_AND_ROLLBACK_VERIFIED
     ]
     assert written == [], f"{written} claim a verified write path"
+
+
+def test_a_level_four_record_does_not_imply_a_working_write_path() -> None:
+    """Guards the distinction above rather than leaving it to a docstring.
+
+    Every level-4 entry must witness `no-op-round-trip` and must NOT witness
+    `real-change`: the two are different observations, and the name of the
+    level invites conflating them.
+    """
+    for record in evidence.ledger().records.values():
+        if record.level is not evidence.Evidence.LIVE_NO_OP_WRITE_VERIFIED:
+            continue
+        assert "no-op-round-trip" in record.behaviors, record.kind
+        assert "real-change" not in record.behaviors, (
+            f"{record.kind} is level 4 but claims a real change was applied"
+        )
 
 
 # -- degradation --------------------------------------------------------------
