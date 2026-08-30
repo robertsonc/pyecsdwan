@@ -73,12 +73,23 @@ _FAILURE_RESULT_TOKENS = frozenset(
 #: * ``success`` — field-verified: ``docs/research/expert-repo.md`` records the
 #:   working test as ``taskStatus == "COMPLETED" and
 #:   result.startswith("Success")``, against Orchestrator 9.3/9.4.
+#: * ``saved change on appliance successfully`` — observed live on
+#:   Orchestrator 9.7.0.43282 / ECOS 9.7.0.0_109184 (2026-08-30), emitted by
+#:   ``POST /appliance/saveChanges`` after a BGP write. It is the whole string,
+#:   not a shortened prefix: the success word sits at the *end* here, where the
+#:   prefix rule's resistance to negation does not apply, so "saved change on
+#:   appliance" alone would also admit a future "...partially" or "...with
+#:   warnings". A variant will report itself as UNKNOWN and can be added then,
+#:   which is the growth path this list is designed around.
 #:
 #: Unrecognised shapes are reported as UNKNOWN with their exact text, so this
 #: list grows from observation rather than from guessing.
 #: ``docs/research/job-shapes.md`` is the table of what has been observed, and
 #: the procedure for adding to it.
-SUCCESS_RESULT_SHAPES: tuple[str, ...] = ("success",)
+SUCCESS_RESULT_SHAPES: tuple[str, ...] = (
+    "success",
+    "saved change on appliance successfully",
+)
 
 
 def _is_in_flight(status: str) -> bool:

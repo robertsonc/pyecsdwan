@@ -47,6 +47,15 @@ QOS_REF = Ref(kind="appliance/qos-map", name="global", appliance="BR1-EC")
 
 
 class _StubResolver:
+
+    def cached(self, name, fetch):
+        """Match `Resolver.cached`: call through, no caching.
+
+        Ownership reads the Orchestrator's template vocabulary through this in
+        the real resolver; a stub that lacks it fails with an AttributeError
+        that says nothing about the behaviour under test.
+        """
+        return fetch()
     def ne_pk_for(self, name: str) -> str:
         return {"BR1-EC": "3.NE", "HUB1-EC": "1.NE", "BR2-EC": "5.NE"}.get(name, name)
 
@@ -600,7 +609,7 @@ def test_e2e_list_refs_covers_every_appliance(world: dict[str, Any]) -> None:
     not os.environ.get("ECSDWAN_ORCH_URL"),
     reason="live Orchestrator smoke test; set ECSDWAN_ORCH_URL (and auth) to run",
 )
-def test_live_policy_maps_read_only() -> None:
+def test_live_policy_maps_read_only(readable_refs) -> None:
     """Read-only probe of all five #33 surfaces against a real Orchestrator.
 
     Credentials come from the ambient config/keyring — never hardcoded here.
@@ -611,13 +620,16 @@ def test_live_policy_maps_read_only() -> None:
     from pyecsdwan.resolver import Resolver
     from pyecsdwan.resources.shapers import InboundShapers, Shapers
 
-    settings = config.load_settings()
+    settings = config.settings_from_env()
     client = OrchClient(settings)
     ctx = Ctx(client=client, resolver=Resolver(client))
 
+    probed = 0
     for res in (QosMaps(), OptimizationMaps(), RouteMaps(), Shapers(), InboundShapers()):
-        for ref in res.list_refs(ctx):
-            canonical = res.normalize(res.fetch(ctx, ref))
+        for ref, raw in readable_refs(res, ctx):
+            canonical = res.normalize(raw)
             assert res.normalize(canonical) == canonical, f"{ref} is not idempotent"
             if isinstance(canonical, dict) and canonical.get("activeMap"):
                 assert res.normalize(canonical)["activeMap"] == canonical["activeMap"]
+            probed += 1
+    assert probed, "no appliance answered; the probe proved nothing"

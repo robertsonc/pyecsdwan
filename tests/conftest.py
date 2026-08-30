@@ -129,3 +129,30 @@ def wide_fabric():
         return added
 
     return _grow
+
+@pytest.fixture
+def readable_refs():
+    """Skip appliances that cannot answer, for live read-only probes."""
+    return _readable_refs
+
+
+def _readable_refs(res, ctx):
+    """Refs for appliances that actually answer, for live read-only probes.
+
+    A real fabric has unreachable appliances — the lab this was written against
+    had two in maintenance. `list_refs` deliberately returns them all, because
+    `drift` must report them as `unreadable` rather than quietly shrink the
+    universe it claims to have checked; that behaviour is correct and has its
+    own coverage. A read-only smoke probe wants the opposite: it exercises
+    normalize/idempotency on real payloads, and an appliance whose tunnel is
+    down carries no payload to exercise.
+
+    Returns (ref, raw) pairs so the caller does not fetch twice.
+    """
+    out = []
+    for ref in res.list_refs(ctx):
+        try:
+            out.append((ref, res.fetch(ctx, ref)))
+        except Exception:  # noqa: BLE001 - unreachable appliance is not a defect
+            continue
+    return out

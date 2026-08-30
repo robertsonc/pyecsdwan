@@ -372,8 +372,12 @@ def test_ownership_join(world: dict[str, Any]) -> None:
     owns = ownership.owning_group(ctx, "appliance/security-policy", "3.NE")
     assert owns.state is Owned.OWNED
     assert owns.owner == "template-group SecStd"
-    # SecStd is associated but selects no "bgp" section — and "bgp" is a
-    # guessed name, so a non-match distinguishes nothing (#20).
-    assert ownership.owning_group(ctx, "appliance/bgp", "3.NE").state is Owned.UNKNOWN
+    # SecStd is associated but selects no "bgp" section. `bgp` is now a
+    # live-confirmed name (9.7 reports it in the template vocabulary), so a
+    # non-match is a clean negative rather than "we may have asked wrongly".
+    assert ownership.owning_group(ctx, "appliance/bgp", "3.NE").state is Owned.UNOWNED
+    # An unverified name still cannot support a negative — `vrrp` is spelled
+    # after the ECOS path and has never been seen selected (#20).
+    assert ownership.owning_group(ctx, "appliance/vrrp", "3.NE").state is Owned.UNKNOWN
     # 5.NE has no associated group at all: the one clean negative.
     assert ownership.owning_group(ctx, "appliance/security-policy", "5.NE").state is Owned.UNOWNED

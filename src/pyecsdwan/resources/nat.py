@@ -481,14 +481,14 @@ class NatMaps(Resource):
 
     # -- ownership ------------------------------------------------------------
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+    def managed_by(self, ctx: Ctx, ref: Ref, diff: Diff | None = None) -> Ownership:
         ne_pk = _ne_pk_for(ctx, ref)
         # Per-rule precision first (routes.py's pattern): a rule the fabric
         # itself flagged gms_marked is server-owned regardless of what any
         # template happens to select.
         if _has_gms_marked(self.fetch(ctx, ref)):
             return Ownership.owned("gms (gms_marked NAT rule present on this appliance)")
-        return ownership.owning_group(ctx, self.kind, ne_pk)
+        return ownership.resolve(ctx, self, ne_pk, diff)
 
 
 # == appliance/nat-pools =======================================================
@@ -630,10 +630,10 @@ class NatPools(Resource):
 
     # -- ownership ------------------------------------------------------------
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+    def managed_by(self, ctx: Ctx, ref: Ref, diff: Diff | None = None) -> Ownership:
         # NATPool declares no gms_marked flag (unlike BrNatPriority /
         # natmapspolicy rules), so the template join is all there is.
-        return ownership.owning_group(ctx, self.kind, _ne_pk_for(ctx, ref))
+        return ownership.resolve(ctx, self, _ne_pk_for(ctx, ref), diff)
 
 
 # == snat-maps (orchestrator scope) ============================================

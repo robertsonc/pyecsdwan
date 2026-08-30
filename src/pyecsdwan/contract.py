@@ -436,8 +436,28 @@ class Resource:
         """
         return None
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+    #: Top-level subtrees of this resource's canonical state that its template
+    #: section governs (spec 004, L3). Empty means "the template governs the
+    #: whole resource, or governs it per entry" — see
+    #: `ownership.governs_change`, which only narrows on positive evidence.
+    #:
+    #: `bgp` declares ``("system",)``: the template carries timers and per-peer
+    #: defaults and no peer key at any depth, so peer *existence* is local
+    #: while peer *behaviour* is not. Verified against a live 9.7 template
+    #: body; this is a statement about a vendor template, not a preference.
+    template_governs: tuple[str, ...] = ()
+
+    def managed_by(self, ctx: Ctx, ref: Ref, diff: Diff | None = None) -> Ownership:
         """Would a template push revert a direct write to this instance?
+
+        ``diff`` is the change being asked about (spec 004, D1). Passing it
+        lets the answer be about *this change* rather than about the kind:
+        adding a BGP peer is locally significant even though the `bgp` template
+        is selected, because that template governs timers and not peers.
+
+        ``None`` asks the coarse question — "could a template revert anything
+        here" — which is the right question for a display surface with no
+        change in hand, and is what every caller asked before D1.
 
         Appliance-scope plugins must override, normally by delegating to
         :func:`pyecsdwan.ownership.owning_group` (after any per-object

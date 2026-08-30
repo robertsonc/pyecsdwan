@@ -19,6 +19,8 @@ selection read, then the verification status of the name being compared.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -35,19 +37,28 @@ NE_PK = "3.NE"
 
 ASSOCIATION = f"{BASE}/template/applianceAssociation"
 SELECTION = f"{BASE}/template/templateSelection"
+GROUPS = f"{BASE}/template/templateGroups"
 
 #: A kind whose section names are live-confirmed, and one whose names are
 #: spelled after the ECOS path and never observed. The difference between them
 #: is the whole point of `Sections.verified`.
 VERIFIED_KIND = "appliance/routes"
-GUESSED_KIND = "appliance/bgp"
+GUESSED_KIND = "appliance/vrrp"
 
 
 @pytest.fixture
-def ctx() -> Iterator[Ctx]:
+def ctx(tmp_path: Path) -> Iterator[Ctx]:
+    """A resolver with a per-test cache directory.
+
+    `Resolver` persists to `~/.pyecsdwan/cache/<origin>.json` and holds entries
+    for its TTL, so without this every test in the file shares one cached
+    template vocabulary — the first to run decides what the rest see — and the
+    run writes into the developer's real state directory. Both were latent
+    until ownership started reading a cached section.
+    """
     settings = config.Settings(orch_url="https://orch.example.com", api_key="k")
     client = OrchClient(settings)
-    yield Ctx(client=client, resolver=Resolver(client))
+    yield Ctx(client=client, resolver=Resolver(client, cache_dir=tmp_path))
 
 
 def _associated(*groups: str) -> None:
@@ -58,6 +69,29 @@ def _associated(*groups: str) -> None:
 
 def _selects(*sections: str) -> None:
     respx.get(SELECTION).mock(return_value=httpx.Response(200, json=list(sections)))
+
+
+def _vocabulary(*names: str) -> None:
+    """What the Orchestrator says its template sections are *called*.
+
+    Read only on a non-match, where a name the fabric has never heard of and a
+    section nobody selected produce the same silence. These tests are about
+    the second case, so the vocabulary here contains every name under test —
+    a kind whose names are absent is `test_a_name_the_fabric_never_heard_of_
+    is_unknown`.
+    """
+    respx.get(GROUPS).mock(
+        return_value=httpx.Response(
+            200,
+            json=[{"name": "g", "templates": [{"name": n} for n in names]}],
+        )
+    )
+
+
+def _text(verdict) -> str:
+    """Every human-facing string on an Ownership, whatever field carries it."""
+    import dataclasses
+    return " ".join(str(v) for v in dataclasses.asdict(verdict).values() if v)
 
 
 # -- the table itself --------------------------------------------------------
@@ -199,6 +233,7 @@ def test_a_non_match_on_a_verified_name_is_unowned(ctx: Ctx) -> None:
     select it genuinely does not own static routes."""
     _associated("Branch-Std")
     _selects("dns", "snmp")
+    _vocabulary("subnets", "routes", "bgp", "dns", "snmp")
     owns = ownership.owning_group(ctx, VERIFIED_KIND, NE_PK)
     assert owns.state is Owned.UNOWNED
     assert not owns.blocks_write
@@ -206,12 +241,18 @@ def test_a_non_match_on_a_verified_name_is_unowned(ctx: Ctx) -> None:
 
 @respx.mock
 def test_a_non_match_on_a_guessed_name_is_unknown(ctx: Ctx) -> None:
-    """The subtle one. "bgp" is spelled after the ECOS path and has never been
-    seen in a selected-section list, so a group that does not select "bgp" may
-    still own BGP under a name we never compared against. "Not selected" and
-    "wrong name" are indistinguishable from here."""
+    """The subtle one. "vrrp" is spelled after the ECOS path and has never
+    been seen in a *selected* list, so a group that does not select it may
+    still own VRRP under a name we never compared against. "Not selected" and
+    "wrong name" are indistinguishable from here.
+
+    The vocabulary deliberately contains "vrrp": the fabric knows the name, so
+    this is the unverified-non-match branch and not the stale-name one. (On
+    9.7 that is exactly true — `vrrp` is a real section that no group on the
+    lab fabric happened to select.)"""
     _associated("Branch-Std")
     _selects("dns", "snmp")
+    _vocabulary("subnets", "routes", "vrrp", "dns", "snmp")
     owns = ownership.owning_group(ctx, GUESSED_KIND, NE_PK)
     assert owns.state is Owned.UNKNOWN
     assert owns.blocks_write
@@ -223,7 +264,7 @@ def test_a_match_on_a_guessed_name_is_still_owned(ctx: Ctx) -> None:
     """Asymmetry on purpose: a guess that matches was a correct guess. Only the
     negative answer depends on the name being right."""
     _associated("Branch-Std")
-    _selects("bgp")
+    _selects("vrrp")
     owns = ownership.owning_group(ctx, GUESSED_KIND, NE_PK)
     assert owns.state is Owned.OWNED
     assert owns.owner == "template-group Branch-Std"
@@ -309,3 +350,215 @@ def test_the_plan_renderer_shows_both_blocking_states() -> None:
     # And nothing at all for the state that needs no action.
     unowned = _render(Ownership.unowned("no group associated"))
     assert "managed-by" not in unowned and "ownership-unknown" not in unowned
+
+
+# -- a name the fabric never heard of (#20, live-found on 9.7) ---------------
+
+
+@respx.mock
+def test_a_name_the_fabric_never_heard_of_is_unknown(ctx: Ctx) -> None:
+    """The fail-open this closes, found live.
+
+    `appliance/optimization-map` looked for a section called
+    `optimizationMaps`. The real name on Orchestrator 9.7 is `optmap`, that
+    section is selected, and it demonstrably pushes to the appliance — its four
+    entries match the live config byte-for-byte by comment.
+
+    A name nothing can match produces exactly the same non-match as a resource
+    no template governs, and the old code answered both with "unowned". One of
+    those answers permits a write the template silently reverts, which is the
+    operator surprise ownership exists to prevent.
+    """
+    _associated("Branch-Std")
+    _selects("optmap", "qosMaps")
+    _vocabulary("optmap", "qosMaps", "bgp")
+
+    # `appliance/zones` looks for a section called `zones`. The live 9.7
+    # vocabulary has 46 names and none of them is `zones`, so the mapping can
+    # never match — the same silence a resource no template governs produces.
+    verdict = ownership.owning_group(ctx, "appliance/zones", NE_PK)
+    assert verdict.state is Owned.UNKNOWN
+    assert "no section by any of those names" in _text(verdict)
+
+
+@respx.mock
+def test_an_unreadable_vocabulary_does_not_invent_staleness(ctx: Ctx) -> None:
+    """The vocabulary is an *extra* signal, never a prerequisite.
+
+    If the read fails the answer must be whatever it was before this check
+    existed — turning one unreadable endpoint into UNKNOWN for every kind at
+    once is fail-closed in the letter and useless in practice.
+    """
+    _associated("Branch-Std")
+    _selects("dns", "snmp")
+    respx.get(GROUPS).mock(return_value=httpx.Response(500, text="boom"))
+
+    verdict = ownership.owning_group(ctx, VERIFIED_KIND, NE_PK)
+    assert verdict.state is Owned.UNOWNED
+
+
+@respx.mock
+def test_an_empty_vocabulary_does_not_invent_staleness(ctx: Ctx) -> None:
+    """A read that succeeds and returns nothing is not evidence either. It is
+    far more likely a shape this parse did not understand — the mock reports
+    groups without their template lists, for one."""
+    _associated("Branch-Std")
+    _selects("dns", "snmp")
+    respx.get(GROUPS).mock(return_value=httpx.Response(200, json=[]))
+
+    verdict = ownership.owning_group(ctx, VERIFIED_KIND, NE_PK)
+    assert verdict.state is Owned.UNOWNED
+
+
+@respx.mock
+def test_a_partly_stale_mapping_can_still_match(ctx: Ctx) -> None:
+    """Only an *entirely* unknown mapping is refused. A kind naming two
+    sections where one is real is still usable, and `inbound-shaper` is exactly
+    that: `shaper` is real and selected, `inboundShapers` is not a section at
+    all."""
+    _associated("Branch-Std")
+    _selects("shaper")
+    _vocabulary("shaper", "qosMaps")
+
+    verdict = ownership.owning_group(ctx, "appliance/inbound-shaper", NE_PK)
+    assert verdict.state is Owned.OWNED
+
+
+# -- spec 004: ownership is about the change ---------------------------------
+
+
+class _Res:
+    """Minimal stand-in carrying just what `resolve` reads off a resource."""
+
+    def __init__(self, kind: str, governs: tuple[str, ...] = ()) -> None:
+        self.kind = kind
+        self.template_governs = governs
+
+
+class _Diff:
+    def __init__(self, *paths: tuple[str, ...]) -> None:
+        self.entries = [SimpleNamespace(path=p) for p in paths]
+
+
+@respx.mock
+def test_a_local_subtree_change_is_not_owned(ctx: Ctx) -> None:
+    """R1, the case that started spec 004.
+
+    The `bgp` section is selected, so the coarse verdict is OWNED. The `bgp`
+    template governs timers and per-peer defaults and declares no peer, so
+    adding one is locally significant and must not need --override-template.
+    """
+    _associated("Branch-Std")
+    _selects("bgp")
+    verdict = ownership.resolve(
+        ctx, _Res("appliance/bgp", ("system",)), NE_PK,
+        _Diff(("neighbors", "192.0.2.77")),
+    )
+    assert verdict.state is Owned.UNOWNED
+    assert not verdict.blocks_write
+
+
+@respx.mock
+def test_a_governed_subtree_change_is_still_owned(ctx: Ctx) -> None:
+    """R2. The same template that does not govern peers does govern `ka`."""
+    _associated("Branch-Std")
+    _selects("bgp")
+    verdict = ownership.resolve(
+        ctx, _Res("appliance/bgp", ("system",)), NE_PK, _Diff(("system", "ka")),
+    )
+    assert verdict.state is Owned.OWNED
+    assert verdict.blocks_write
+
+
+@respx.mock
+def test_a_change_spanning_both_refuses_whole(ctx: Ctx) -> None:
+    """D3. `bgp` POSTs the whole object, so a partial apply has no wire
+    representation — one governed path makes the changeset governed."""
+    _associated("Branch-Std")
+    _selects("bgp")
+    verdict = ownership.resolve(
+        ctx, _Res("appliance/bgp", ("system",)), NE_PK,
+        _Diff(("neighbors", "192.0.2.77"), ("system", "ka")),
+    )
+    assert verdict.state is Owned.OWNED
+
+
+@respx.mock
+def test_without_a_declaration_nothing_narrows(ctx: Ctx) -> None:
+    """The fail-closed default. No declared subtree and no derived priorities
+    is *no evidence*, and absence of evidence must not read as 'local'."""
+    _associated("Branch-Std")
+    _selects("bgp")
+    _vocabulary("bgp")
+    respx.get(GROUPS).mock(
+        return_value=httpx.Response(
+            200, json=[{"name": "Branch-Std", "templates": [{"name": "bgp", "value": {}}]}]
+        )
+    )
+    verdict = ownership.resolve(
+        ctx, _Res("appliance/bgp"), NE_PK, _Diff(("neighbors", "192.0.2.77")),
+    )
+    assert verdict.state is Owned.OWNED
+
+
+@respx.mock
+def test_no_diff_asks_the_coarse_question(ctx: Ctx) -> None:
+    """A display surface with no change in hand still gets an answer, and it is
+    the conservative one every caller got before D1."""
+    _associated("Branch-Std")
+    _selects("bgp")
+    assert ownership.resolve(ctx, _Res("appliance/bgp", ("system",)), NE_PK).state is Owned.OWNED
+
+
+@respx.mock
+def test_priorities_are_derived_from_the_template_not_a_fixed_band(ctx: Ctx) -> None:
+    """D2. `optmap` asserts 1000/1490/1500/1510 on 9.7, so a change to 1490 is
+    governed and one to 20000 is local — and so is 1600, which a hard-coded
+    1000-9999 band would refuse even though the template never pushes it."""
+    _associated("Branch-Std")
+    _selects("optmap")
+    respx.get(GROUPS).mock(
+        return_value=httpx.Response(200, json=[{
+            "name": "Branch-Std",
+            "templates": [{"name": "optmap", "value": {"data": {"map1": {"prio": {
+                "1000": {}, "1490": {}, "1500": {}, "1510": {}}}}}}],
+        }])
+    )
+    res = _Res("appliance/optimization-map")
+    governed = ownership.resolve(ctx, res, NE_PK, _Diff(("data", "map1", "prio", "1490")))
+    assert governed.state is Owned.OWNED
+
+    for local in ("20000", "1600"):
+        verdict = ownership.resolve(ctx, res, NE_PK, _Diff(("data", "map1", "prio", local)))
+        assert verdict.state is Owned.UNOWNED, f"prio {local} should be local"
+
+
+def test_ownership_does_not_share_a_cache_key_with_the_resolver() -> None:
+    """Both read `/template/templateGroups` and keep different shapes of it.
+
+    `Resolver.template_groups()` caches a list of group *names*;
+    `ownership._template_groups` caches the full group objects, because it
+    needs the section bodies. They cached under the same key for one commit,
+    and whichever ran first won: `template-group.list_refs` then built refs
+    whose name was an entire group object, and the fetch after it raised
+    `InvalidURL: URL component 'query' too long`.
+
+    Nothing in the type system stops this — both are `list` — and no mock test
+    hit it, because it needs the two callers in one process against one cache.
+    The live read sweep is where the orderings finally met.
+    """
+    assert ownership._GROUP_BODIES_KEY != "template_groups"
+
+
+@respx.mock
+def test_the_two_readers_do_not_poison_each_other(ctx: Ctx) -> None:
+    """The behaviour, not just the constant: ask both, in the order that broke."""
+    groups = [{"name": "Branch-Std", "templates": [{"name": "bgp", "value": {}}]}]
+    respx.get(GROUPS).mock(return_value=httpx.Response(200, json=groups))
+
+    ownership.known_sections(ctx)  # ownership first — the poisoning order
+    names = ctx.resolver.template_groups()
+
+    assert names == ["Branch-Std"], (
+        f"resolver got {names!r}; a group object leaked through a shared key"
+    )

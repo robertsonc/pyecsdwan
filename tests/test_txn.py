@@ -194,7 +194,7 @@ def test_unknown_ownership_is_refused_just_as_owned_is(world: dict[str, Any]) ->
     told apart were the same situation."""
 
     class OpaqueResource(FakeResource):
-        def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+        def managed_by(self, ctx: Ctx, ref: Ref, diff: object = None) -> Ownership:
             return Ownership.unknown("template selection unreadable (403)")
 
     world["registry"].register(OpaqueResource(world["server"], kind="opaque"))
@@ -255,7 +255,9 @@ def test_an_item_with_no_diff_does_not_trip_the_guard(world: dict[str, Any]) -> 
     asked to change."""
 
     class OpaqueResource(FakeResource):
-        def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:  # pragma: no cover
+        def managed_by(  # pragma: no cover
+            self, ctx: Ctx, ref: Ref, diff: object = None
+        ) -> Ownership:
             raise AssertionError("managed_by must not be called for an unchanged item")
 
     world["registry"].register(OpaqueResource(world["server"], kind="opaque2"))
@@ -279,7 +281,7 @@ def test_ownership_is_rechecked_before_the_write(world: dict[str, Any]) -> None:
     flips: dict[str, bool] = {"owned": False}
 
     class FlipResource(FakeResource):
-        def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+        def managed_by(self, ctx: Ctx, ref: Ref, diff: object = None) -> Ownership:
             if flips["owned"]:
                 return Ownership.owned("template-group Late-Arrival")
             flips["owned"] = True  # ... owned from the second call onward
@@ -305,7 +307,7 @@ def test_the_recheck_is_skipped_when_overriding(world: dict[str, Any]) -> None:
     calls: list[str] = []
 
     class CountingResource(FakeResource):
-        def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+        def managed_by(self, ctx: Ctx, ref: Ref, diff: object = None) -> Ownership:
             calls.append(ref.key())
             return Ownership.owned("template-group Branch-Std")
 
@@ -329,7 +331,7 @@ def test_the_journal_records_which_ownership_the_write_went_ahead_under(
     to be answerable from the journal alone (#20)."""
 
     class OwnedResource(FakeResource):
-        def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+        def managed_by(self, ctx: Ctx, ref: Ref, diff: object = None) -> Ownership:
             return Ownership.owned("template-group Branch-Std")
 
     world["registry"].register(OwnedResource(world["server"], kind="journaled"))
@@ -346,7 +348,7 @@ def test_the_journal_records_which_ownership_the_write_went_ahead_under(
 
 def test_ownership_refused_without_override(world: dict[str, Any]) -> None:
     class OwnedResource(FakeResource):
-        def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+        def managed_by(self, ctx: Ctx, ref: Ref, diff: object = None) -> Ownership:
             return Ownership.owned("template-group Branch-Std")
 
     owned = OwnedResource(world["server"], kind="owned")

@@ -105,6 +105,12 @@ SHAPES: list[tuple[str, dict[str, Any], str]] = [
     ("Invalid configuration", {"taskStatus": "Completed", "result": "Invalid config"}, "FAILED"),
     ("Rejected", {"taskStatus": "Completed", "result": "Rejected by appliance"}, "FAILED"),
     ("Cancelled status", {"taskStatus": "Cancelled", "result": ""}, "FAILED"),
+    # -- live-observed (Orchestrator 9.7.0.43282 / ECOS 9.7.0.0_109184) --
+    (
+        "saveChanges success, live 9.7",
+        {"taskStatus": "COMPLETED", "result": "Saved change on appliance successfully"},
+        "SUCCESS",
+    ),
     # -- unrecognised: neither list matches, so the answer is "cannot tell" --
     ("localized success", {"taskStatus": "Completed", "result": "Configuracion OK"}, "UNKNOWN"),
     ("plausible English prose", {"taskStatus": "Completed", "result": "pushed"}, "UNKNOWN"),
@@ -454,3 +460,42 @@ def test_the_same_outcome_with_appliance_evidence_is_confirmed() -> None:
     )
     assert result.ok
     assert "template push confirmed" in result.message
+
+
+def test_the_live_9_7_savechanges_shape_is_recognised() -> None:
+    """The shape that cost a real transaction to find (2026-08-30).
+
+    A BGP neighbor write reached a live fabric and was saved; the poller could
+    not confirm it, so the engine auto-reverted — and the revert hit the *same*
+    unrecognised shape and reported REVERT_FAILED. The fabric was correct at
+    every point: both the apply and the revert really happened. The tool could
+    report neither, which is the fail-closed design working exactly as
+    specified and is why this shape now has a row in
+    `docs/research/job-shapes.md` with the versions it came from.
+    """
+    record = {"taskStatus": "COMPLETED", "result": "Saved change on appliance successfully"}
+    assert jobs._record_state(record) == "SUCCESS"
+
+
+def test_the_new_shape_is_matched_whole_not_as_a_loose_prefix() -> None:
+    """`Success` is safe as a prefix because a sentence starting with it cannot
+    be a negation. This shape carries its success word at the *end*, where that
+    protection is gone — so the entry is the whole string, and a wording that
+    merely starts the same way must still fail closed."""
+    for variant in (
+        "Saved change on appliance partially",
+        "Saved change on appliance with warnings",
+        "Saved change on appliance",
+    ):
+        assert jobs._record_state({"taskStatus": "COMPLETED", "result": variant}) == "UNKNOWN", (
+            f"{variant!r} must not be read as a confirmed push"
+        )
+
+
+def test_a_negated_success_word_still_fails_closed() -> None:
+    """The hazard in matching on a success word anywhere in the string:
+    "unsuccessful" contains "success"."""
+    for variant in ("unsuccessful", "was not successful", "completed unsuccessfully"):
+        assert jobs._record_state({"taskStatus": "COMPLETED", "result": variant}) == "UNKNOWN", (
+            f"{variant!r} must not be read as a confirmed push"
+        )

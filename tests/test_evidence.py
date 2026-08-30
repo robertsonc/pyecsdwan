@@ -230,13 +230,76 @@ def test_the_support_matrix_is_empty_and_that_is_the_honest_answer() -> None:
     )
 
 
-def test_the_ledger_note_explains_why_the_live_reads_do_not_count() -> None:
-    """The ledger has to carry its own reasoning: someone reading it will see
-    live-read history in the sitreps and every record at mock-verified, and
-    the resolution of that has to be in the file, not in a commit message."""
+def test_the_ledger_note_says_what_the_live_reads_do_and_do_not_buy() -> None:
+    """The ledger carries its own reasoning, and the reasoning changed.
+
+    It used to explain why the 2026-08-26 live reads counted for nothing: none
+    recorded the Orchestrator version. The 2026-08-30 sweep recorded it, so 38
+    resources are `live-read-verified` — and the note now has a harder job,
+    because a reader who sees "live" anywhere is one step from believing the
+    write paths were tested. They were not. The note must say both.
+    """
     note = evidence.ledger().note
-    assert "version" in note
+    assert "live-read-verified" in note
     assert "docs/live-validation.md" in note
+    # The limit, stated in the file rather than left to be inferred. It is no
+    # longer "no write path has been verified" — one has — so the note must
+    # scope the claim instead of dropping it.
+    lowered = note.lower()
+    assert "live-change-and-rollback-verified" in lowered
+    assert "every other write" in lowered or "no other write" in lowered
+
+
+def test_every_verified_write_path_is_backed_by_its_four_behaviours() -> None:
+    """The guard changed shape when the first write path was verified.
+
+    It used to assert nothing reached level 5. `appliance/banners` did on
+    2026-08-30, so the useful invariant is no longer "nothing claims it" but
+    "anything claiming it can show the work": a real change applied, verified
+    against freshly fetched state, rolled back, and persisted to flash.
+
+    `Record.validate()` enforces the same thing at load. This says it again
+    where a reader will look, because the failure it prevents — a resource
+    quietly promoted without the rollback half — is the one that makes
+    `show coverage --evidence` tell an operator their write path is supported
+    when only the apply was ever tried.
+    """
+    required = {"real-change", "post-apply-verification", "rollback", "save-persistence"}
+    for record in evidence.ledger().records.values():
+        if record.level < evidence.Evidence.LIVE_CHANGE_AND_ROLLBACK_VERIFIED:
+            continue
+        missing = required - set(record.behaviors)
+        assert not missing, f"{record.kind} claims level 5 without witnessing {missing}"
+        assert record.source, f"{record.kind} claims level 5 with no source to re-read"
+
+
+def test_nothing_claims_production_supported() -> None:
+    """Level 6 needs the four failure paths — reboot persistence, a
+    template-owned refusal, an injected job failure, a permission denial.
+    None has been exercised, and the ladder's top rung is the one most likely
+    to be claimed by momentum."""
+    top = [
+        r.kind
+        for r in evidence.ledger().records.values()
+        if r.level >= evidence.Evidence.PRODUCTION_SUPPORTED
+    ]
+    assert top == [], f"{top} claim production-supported"
+
+
+def test_a_level_four_record_does_not_imply_a_working_write_path() -> None:
+    """Guards the distinction above rather than leaving it to a docstring.
+
+    Every level-4 entry must witness `no-op-round-trip` and must NOT witness
+    `real-change`: the two are different observations, and the name of the
+    level invites conflating them.
+    """
+    for record in evidence.ledger().records.values():
+        if record.level is not evidence.Evidence.LIVE_NO_OP_WRITE_VERIFIED:
+            continue
+        assert "no-op-round-trip" in record.behaviors, record.kind
+        assert "real-change" not in record.behaviors, (
+            f"{record.kind} is level 4 but claims a real change was applied"
+        )
 
 
 # -- degradation --------------------------------------------------------------

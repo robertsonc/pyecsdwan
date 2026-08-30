@@ -51,6 +51,15 @@ SNAT_REF = Ref(kind="snat-maps", name="global")
 
 
 class _StubResolver:
+
+    def cached(self, name, fetch):
+        """Match `Resolver.cached`: call through, no caching.
+
+        Ownership reads the Orchestrator's template vocabulary through this in
+        the real resolver; a stub that lacks it fails with an AttributeError
+        that says nothing about the behaviour under test.
+        """
+        return fetch()
     def ne_pk_for(self, name: str) -> str:
         return {"BR1-EC": "3.NE", "HUB1-EC": "1.NE", "BR2-EC": "5.NE"}.get(name, name)
 
@@ -882,10 +891,10 @@ def test_e2e_dnat_view_is_read_only(world: dict[str, Any]) -> None:
     not os.environ.get("ECSDWAN_ORCH_URL"),
     reason="live Orchestrator smoke test; set ECSDWAN_ORCH_URL (and auth) to run",
 )
-def test_live_nat_read_only() -> None:
+def test_live_nat_read_only(readable_refs) -> None:
     """Read-only probe against a real Orchestrator. Credentials come from the
     ambient config/keyring — never hardcoded here."""
-    settings = config.load_settings()
+    settings = config.settings_from_env()
     client = OrchClient(settings)
     ctx = Ctx(client=client, resolver=Resolver(client))
 
@@ -893,7 +902,10 @@ def test_live_nat_read_only() -> None:
     canonical = snat.normalize(snat.fetch(ctx, SNAT_REF))
     assert snat.normalize(canonical) == canonical  # idempotency, on real payloads
 
+    probed = 0
     for res in (NatMaps(), NatPools()):
-        for ref in res.list_refs(ctx):
-            once = res.normalize(res.fetch(ctx, ref))
+        for _ref, raw in readable_refs(res, ctx):
+            once = res.normalize(raw)
             assert res.normalize(once) == once
+            probed += 1
+    assert probed, "no appliance answered; the probe proved nothing"

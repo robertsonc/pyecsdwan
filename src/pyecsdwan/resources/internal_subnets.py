@@ -230,6 +230,14 @@ class InternalSubnets(Resource):
 
     # -- read side ------------------------------------------------------------
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The single orchestrator-wide internal-subnets object (#69).
+
+        A full-object replace of a singleton: one per Orchestrator, so the
+        path alone identifies it.
+        """
+        return f"orchestrator {_PATH}"
+
     def fetch(self, ctx: Ctx, ref: Ref) -> RawState:
         raw = ctx.client.get(_PATH)
         return raw if isinstance(raw, dict) else None

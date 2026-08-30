@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "note": "Every curated resource sits at mock-verified: green against the bundled mock, and nothing more. This repository does have live-read history \u2014 Phase-2/3 plugins carry payload shapes captured against a real lab Orchestrator, and six template-section names were confirmed against a real Default Template Group (docs/sitrep/2026-08-26-fanout.md, docs/sitrep/2026-08-26-handoff.md) \u2014 but not one of those observations recorded the Orchestrator version it was made against, so none of them can promote a resource past mock-verified. That is the finding, not a gap in the tooling: an observation without a version tells the next operator nothing about their fabric. docs/live-validation.md is the protocol for producing evidence that does count.",
+  "note": "One curated resource \u2014 appliance/banners \u2014 is live-change-and-rollback-verified against Orchestrator 9.7.0.43282 / ECOS 9.7.0.0_109184 (2026-08-30): a real change applied, verified on the appliance, confirmed, rolled back, and persisted to flash at both ends. Four more are live-no-op-write-verified and 33 are live-read-verified. Level 5 is the floor for calling a write path supported, so exactly one write path in this repository has met that floor; every other write is still code that has not been applied and rolled back on real gear. A programmatic equivalent of the level-4 check passed for 33 write-capable kinds with zero phantom drift, recorded as supporting evidence in docs/sitrep/2026-08-30-live-read.md rather than promoted, because the ledger records levels by the procedure actually run. Three kinds stay at mock-verified because nothing of that kind is configured on the observed fabric. docs/live-validation.md is the protocol, including the four failure paths level 6 needs and that none has exercised.",
   "support": {
     "orchestrator": [],
     "ecos": [],
@@ -10,104 +10,284 @@
   "records": [
     {
       "kind": "app-express-association",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "app-express-group",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "appliance/acl",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "appliance/banners",
-      "level": "mock-verified"
+      "level": "live-change-and-rollback-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read",
+        "no-op-round-trip",
+        "real-change",
+        "post-apply-verification",
+        "rollback",
+        "save-persistence"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Full level-5 cycle on S1-ecv-02 (13.NE): motd changed under a 10-minute confirm window, verified present on the appliance with `issue` untouched, confirmed, rolled back, and the result byte-identical to the pre-change baseline. hasUnsavedChanges was False after both the apply and the rollback, so both reached flash. Template-owned, so the write needed --override-template: the `banners` template body IS the banner text, which is ownership being correct rather than over-scoped. The endpoint rejects non-ASCII (400 on an em-dash)."
     },
     {
       "kind": "appliance/bgp",
-      "level": "mock-verified",
-      "notes": "read+diff only; `apply()` raises \u2014 no modeled write endpoint in either vendored spec (#16 Stage 2)"
+      "level": "live-no-op-write-verified",
+      "notes": "Level 4 by the documented procedure (docs/live-validation.md): show -> load -> diff empty -> commit -> diff still empty, with no transaction journaled because the plan was empty. Shape: nested system + peer-keyed neighbours.",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read",
+        "no-op-round-trip"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md"
     },
     {
       "kind": "appliance/deployment",
-      "level": "mock-verified",
-      "notes": "payload shape (incl. the `vifs` key) captured live 2026-08-26; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
-      "source": "docs/sitrep/2026-08-26-fanout.md"
+      "level": "live-read-verified",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only.",
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ]
     },
     {
       "kind": "appliance/dhcp",
-      "level": "mock-verified",
-      "notes": "confirmed live 2026-08-26 to live inside the deployment object rather than its own endpoint; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
-      "source": "docs/sitrep/2026-08-26-fanout.md"
+      "level": "live-read-verified",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only.",
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ]
     },
     {
       "kind": "appliance/inbound-shaper",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "appliance/logging",
-      "level": "mock-verified",
-      "notes": "`logging` confirmed live 2026-08-26 as a real template section name; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
-      "source": "docs/sitrep/2026-08-26-fanout.md"
+      "level": "live-read-verified",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only.",
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ]
     },
     {
       "kind": "appliance/loopback",
-      "level": "mock-verified",
-      "notes": "read+diff only; no per-appliance loopback write endpoint is documented (#18)"
+      "level": "live-read-verified",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only.",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md"
     },
     {
       "kind": "appliance/mgmt-services",
-      "level": "mock-verified",
-      "notes": "`mgmtServices` confirmed live 2026-08-26 as a real template section name; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
-      "source": "docs/sitrep/2026-08-26-fanout.md"
+      "level": "live-read-verified",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only.",
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ]
     },
     {
       "kind": "appliance/nat-maps",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "appliance/nat-pools",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "appliance/optimization-map",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "appliance/ospf",
-      "level": "mock-verified",
-      "notes": "read+diff only; `apply()` raises \u2014 no modeled write endpoint in either vendored spec (#17 Stage 2)"
+      "level": "live-read-verified",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only.",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md"
     },
     {
       "kind": "appliance/qos-map",
-      "level": "mock-verified"
+      "level": "live-no-op-write-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read",
+        "no-op-round-trip"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Level 4 by the documented procedure (docs/live-validation.md): show -> load -> diff empty -> commit -> diff still empty, with no transaction journaled because the plan was empty. Shape: prio-keyed map (the structure L2 ownership reasons about)."
     },
     {
       "kind": "appliance/route-map",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "appliance/routes",
-      "level": "mock-verified",
-      "notes": "`routes` confirmed live 2026-08-26 as a real template section name; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
-      "source": "docs/sitrep/2026-08-26-fanout.md"
+      "level": "live-read-verified",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only.",
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ]
     },
     {
       "kind": "appliance/security-maps",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "appliance/shaper",
-      "level": "mock-verified",
-      "notes": "`shaper` confirmed live 2026-08-26 as a real template section name; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
-      "source": "docs/sitrep/2026-08-26-fanout.md"
+      "level": "live-read-verified",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only.",
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ]
     },
     {
       "kind": "appliance/snmp",
-      "level": "mock-verified",
-      "notes": "`snmp` confirmed live 2026-08-26 as a real template section name; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
-      "source": "docs/sitrep/2026-08-26-fanout.md"
+      "level": "live-no-op-write-verified",
+      "notes": "Level 4 by the documented procedure (docs/live-validation.md): show -> load -> diff empty -> commit -> diff still empty, with no transaction journaled because the plan was empty. Shape: settings dict with communities.",
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read",
+        "no-op-round-trip"
+      ]
     },
     {
       "kind": "appliance/vrrp",
@@ -115,17 +295,42 @@
     },
     {
       "kind": "appliance/zones",
-      "level": "mock-verified",
-      "notes": "confirmed live 2026-08-26 to have no Default/id-0 row; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
-      "source": "docs/sitrep/2026-08-26-fanout.md"
+      "level": "live-read-verified",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only.",
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "9.7.0.0_109184",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ]
     },
     {
       "kind": "bio",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "bio-association",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "generated/appliance_post_virtualif_vti_by_vti_name",
@@ -139,15 +344,43 @@
     },
     {
       "kind": "interface-labels",
-      "level": "mock-verified"
+      "level": "live-no-op-write-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read",
+        "no-op-round-trip"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Level 4 by the documented procedure (docs/live-validation.md): show -> load -> diff empty -> commit -> diff still empty, with no transaction journaled because the plan was empty. Shape: orchestrator-scope, id-keyed lan/wan tables."
     },
     {
       "kind": "internal-subnets",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "ip-address-group",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "ip-service-group",
@@ -155,27 +388,81 @@
     },
     {
       "kind": "loopback-orch",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "overlay-priority",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "region",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "region-association",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "regional-overlay",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "schedule-timezone",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "security-policy",
@@ -183,27 +470,68 @@
     },
     {
       "kind": "snat-maps",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "template-association",
-      "level": "mock-verified",
-      "notes": "read live 2026-08-26 while grounding template ownership; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
-      "source": "docs/sitrep/2026-08-26-fanout.md"
+      "level": "live-read-verified",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only.",
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ]
     },
     {
       "kind": "template-group",
-      "level": "mock-verified",
-      "notes": "a real Default Template Group's selected-section list read live 2026-08-26; version unrecorded \u2014 docs/sitrep/2026-08-26-fanout.md",
-      "source": "docs/sitrep/2026-08-26-fanout.md"
+      "level": "live-read-verified",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only.",
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ]
     },
     {
       "kind": "template-group-priority",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     },
     {
       "kind": "zones",
-      "level": "mock-verified"
+      "level": "live-read-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-08-30",
+      "behaviors": [
+        "live-read"
+      ],
+      "source": "docs/sitrep/2026-08-30-live-read.md",
+      "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
     }
   ]
 }

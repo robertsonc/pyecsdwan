@@ -49,6 +49,7 @@ from typing import Any
 
 import structlog
 
+from pyecsdwan import ownership
 from pyecsdwan.contract import (
     ApplyResult,
     CanonicalState,
@@ -62,7 +63,6 @@ from pyecsdwan.contract import (
     Scope,
     Tier,
 )
-from pyecsdwan.ownership import owning_group
 from pyecsdwan.registry import register
 
 log = structlog.get_logger("pyecsdwan.resources.vrrp")
@@ -162,6 +162,12 @@ def _entry(raw: Any) -> dict[str, Any]:
 
 
 class Vrrp(Resource):
+    #: The `vrrp` template governs `advTimer`, `priority`, `preempt` and `auth`
+    #: and declares no vrid or virtual address, so which VRRP groups exist is
+    #: local (spec 004 L3, live 9.7 template body — note the section was not
+    #: selected on the observed fabric, so the *name* is still unverified and
+    #: `owning_group` answers UNKNOWN before this ever narrows).
+    template_governs = ("system",)
     kind = "appliance/vrrp"
     scope = Scope.APPLIANCE
     reversibility = Reversibility.REVERSIBLE
@@ -279,9 +285,9 @@ class Vrrp(Resource):
 
     # -- ownership --------------------------------------------------------------
 
-    def managed_by(self, ctx: Ctx, ref: Ref) -> Ownership:
+    def managed_by(self, ctx: Ctx, ref: Ref, diff: Diff | None = None) -> Ownership:
         ne_pk = self._ne_pk(ctx, ref)
-        return owning_group(ctx, self.kind, ne_pk)
+        return ownership.resolve(ctx, self, ne_pk, diff)
 
 
 register(Vrrp())

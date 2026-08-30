@@ -67,7 +67,20 @@ from pyecsdwan.registry import Registry
 
 
 class CommitError(Exception):
-    """Commit refused or failed; message is operator-facing."""
+    """Commit refused or failed; message is operator-facing.
+
+    ``collisions`` carries the shared-write-target conflicts structurally when
+    that is why the commit refused (#69). The message says the same thing in
+    prose, and prose is what an operator reads — but "conflicts are found
+    before the first API write" is worth nothing to a pipeline that can only
+    regex an error string, so the objects travel with it. Rendering them into
+    a command's JSON output is T12's, which owns the shared result schema;
+    this is the data that surface will carry.
+    """
+
+    def __init__(self, message: str, collisions: tuple[Collision, ...] = ()) -> None:
+        super().__init__(message)
+        self.collisions = collisions
 
 
 #: The detached watchdog's revert waits far longer for the commit lock than an
@@ -119,6 +132,16 @@ class Collision:
 
     def __str__(self) -> str:
         return f"{self.target}: {', '.join(self.refs)}"
+
+    def as_json(self) -> dict[str, Any]:
+        """The stable machine-readable form (#69).
+
+        Both fields, always: the target alone does not say what conflicts, and
+        the refs alone do not say what they conflict *over*. ``refs`` is a list
+        and stays sorted by `_write_collisions`, so a consumer diffing two runs
+        sees a real change rather than dict ordering.
+        """
+        return {"target": self.target, "refs": list(self.refs)}
 
 
 @dataclasses.dataclass
@@ -193,8 +216,12 @@ def build_plan(ctx: Ctx, registry: Registry, candidate: IntentSource) -> Plan:
         # template push because there is nothing to revert. An unchanged item
         # keeps the UNOWNED default rather than the UNKNOWN one, so it never
         # trips the guard on a check that was deliberately skipped.
+        # The diff goes with the question (spec 004 D1): "would a template
+        # revert *this*" is answerable where "does a template govern this kind"
+        # is not. Adding a BGP peer is local even on an appliance whose `bgp`
+        # section is selected, because that template governs timers, not peers.
         ownership = (
-            resource.managed_by(ctx, ref)
+            resource.managed_by(ctx, ref, diff)
             if diff.entries
             else Ownership.unowned("no change staged for this instance")
         )
@@ -475,7 +502,9 @@ def _commit_locked(
         # accept the risk, and this costs two round trips per item.
         fresh_ownership = item.ownership
         if not override_template:
-            fresh_ownership = item.resource.managed_by(ctx, item.ref)
+            # Re-checked under the lock with the same diff, so the answer is
+            # about the same change the first check saw.
+            fresh_ownership = item.resource.managed_by(ctx, item.ref, item.diff)
             if fresh_ownership.blocks_write:
                 newly_blocked.append((item.ref.key(), fresh_ownership))
         work.append(
@@ -653,7 +682,8 @@ def _guard(
             + "; ".join(str(c) for c in collisions)
             + ". Whichever applies second overwrites the first (deployment posts the "
             "whole object it computed at plan time, so ordering does not save it). "
-            "Commit them separately."
+            "Commit them separately.",
+            collisions=tuple(collisions),
         )
 
     # `blocks_write`, not `state is OWNED`: UNKNOWN refuses on exactly the same
