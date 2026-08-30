@@ -240,6 +240,11 @@ class Vrrp(Resource):
 
     # -- write side -------------------------------------------------------------
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The whole VRRP instance list on one appliance (#69): apply posts
+        the complete list, so an instance's absence is its deletion."""
+        return f"appliance {self._ne_pk(ctx, ref)} {_VRRP_PATH}"
+
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:
             return ApplyResult.noop()

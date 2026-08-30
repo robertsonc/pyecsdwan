@@ -666,6 +666,13 @@ class ScheduleTimezone(Resource):
         out.update(_passthrough(data, _TIMEZONE_KNOWN))
         return _ordered(out)
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The single schedule-timezone object (#69): apply posts the whole
+        (one-field) object. Not covered by the appliance-scoped declaration
+        the ECOS settings in this module share, because this one is
+        Orchestrator-wide."""
+        return f"orchestrator {_SCHEDULE_TIMEZONE_PATH}"
+
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:
             return ApplyResult.noop()

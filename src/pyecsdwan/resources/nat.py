@@ -416,6 +416,11 @@ class NatMaps(Resource):
 
     # -- write side -----------------------------------------------------------
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The whole NAT maps object on one appliance (#69): ``_replace``
+        posts the complete table with ``merge: false``."""
+        return f"appliance {_ne_pk_for(ctx, ref)} {_NAT_MAPS_PATH}"
+
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:
             return ApplyResult.noop()
@@ -569,6 +574,13 @@ class NatPools(Resource):
 
     # -- write side -----------------------------------------------------------
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The whole NAT pools object on one appliance (#69): removed ids are
+        deleted individually and then the complete object is posted, which is
+        a full replacement whichever way the spec's silent merge question
+        falls."""
+        return f"appliance {_ne_pk_for(ctx, ref)} {_NAT_POOLS_PATH}"
+
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:
             return ApplyResult.noop()
@@ -716,6 +728,11 @@ class SnatMaps(Resource):
         return {"maps": {key: pairs[key] for key in ordered}}
 
     # -- write side -----------------------------------------------------------
+
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The single Orchestrator-wide S-NAT table (#69): a full-table
+        replace by the vendored SDK's own warning."""
+        return f"orchestrator {_SNAT_MAPS_PATH}"
 
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:

@@ -446,6 +446,12 @@ class Acls(Resource):
 
     # -- write side -------------------------------------------------------------
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The whole ACL table on one appliance (#69): ``_replace`` posts the
+        complete table with ``merge: false``, so a second writer of it is a
+        destructive overlap. Instance-scoped by nePk."""
+        return f"appliance {self._ne_pk(ctx, ref)} {_ACLS_PATH}"
+
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:
             return ApplyResult.noop()
@@ -1039,6 +1045,12 @@ class AppExpressAssociation(Resource):
                 record["nePk"] = ctx.resolver.ne_pk_for(str(appliance))
             resolved.append(record)
         return self.normalize({"associations": resolved})
+
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """The single Orchestrator-wide association table (#69): ``_replace``
+        posts the complete list, so absence is deletion and a second writer
+        would be overwritten wholesale."""
+        return f"orchestrator {_APPEXPRESS_ASSOCIATION_PATH}"
 
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:

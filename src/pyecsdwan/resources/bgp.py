@@ -291,6 +291,19 @@ class Bgp(Resource):
             ),
         )
 
+    def write_target(self, ctx: Ctx, ref: Ref) -> str | None:
+        """One appliance's whole BGP configuration (#69).
+
+        ``_write`` replaces two server objects in one apply —
+        ``bgp/config/system`` (with the neighbor mirror re-attached) and
+        ``bgp/config/neighbor`` — and the target string names that *set* as
+        one opaque identity, because the contract compares strings for
+        equality only. A future kind that writes either endpoint must reuse
+        this exact string (or split both declarations), which is a review
+        obligation this docstring exists to hand over.
+        """
+        return f"appliance {self._ne_pk(ctx, ref)} bgp config"
+
     def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
         if diff.empty:
             return ApplyResult.noop()
