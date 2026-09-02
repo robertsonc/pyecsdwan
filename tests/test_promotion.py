@@ -26,11 +26,11 @@ check evaluates the behavior the checklist demands
 
 Sample states come from a two-rung ladder, per kind:
 
-``enumerated`` (39/41 kinds)
+``enumerated`` (40/42 kinds)
     ``list_refs()`` against the bundled mock Orchestrator, taking the first ref
     whose ``fetch()`` canonicalizes to something with actual content. The
     resource's own read path is exercised, on the mock's realistic fixtures.
-``probe-ref`` (2/41 kinds)
+``probe-ref`` (2/42 kinds)
     Kinds that do not implement ``list_refs()`` at all, named in
     :data:`PROBE_REFS` with a reason. Same fetch-from-the-mock check, just with
     the ref supplied instead of discovered.

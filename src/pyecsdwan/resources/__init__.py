@@ -8,6 +8,7 @@ any other kind, show up in ``ec-cli show coverage`` at tier 1, and refuse to
 
 from pyecsdwan.resources import (
     acls,
+    appliance_info,
     appliance_zones,
     bgp,
     common_settings,
@@ -33,6 +34,7 @@ from pyecsdwan.resources import (
 
 __all__ = [
     "acls",
+    "appliance_info",
     "appliance_zones",
     "bgp",
     "common_settings",

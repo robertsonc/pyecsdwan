@@ -398,7 +398,7 @@ class _TargetCtx:
 
 #: Declaring kinds whose ref *name* is the appliance (their apply() resolves
 #: ne_pk from ref.name, so their write_target must too).
-_APPLIANCE_NAMED = frozenset({"template-association", "region-association"})
+_APPLIANCE_NAMED = frozenset({"template-association", "region-association", "appliance-info"})
 
 
 def _targets_for(appliance: str) -> dict[str, str]:
@@ -581,6 +581,7 @@ FULL_OBJECT_REPLACEMENT = (
     "interface-labels",          # full-replace POST of the label table
     "loopback-orch",             # full structure, never partial
     "region-association",        # per-appliance PUT replaces the association
+    "appliance-info",            # per-appliance POST replaces the extraInfo object
     "schedule-timezone",         # whole (one-field) singleton object
     "security-policy",           # complete policy per segment pair, merge: false
     "snat-maps",                 # full-table replace per the SDK's own warning
