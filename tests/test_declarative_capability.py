@@ -12,7 +12,7 @@ checked against.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +27,10 @@ from pyecsdwan.contract import (
     MaterializationBlocked,
     Ref,
     Resource,
+    Reversibility,
+    Tier,
 )
-from pyecsdwan.registry import default_registry
+from pyecsdwan.registry import Registry, default_registry
 from pyecsdwan.resolver import Resolver
 
 pytest.importorskip("pyecsdwan.mock.server")
@@ -137,6 +139,64 @@ def test_the_base_materializer_refuses_with_the_kind_named() -> None:
         resource.materialize_declared(
             Ref(kind="interface-labels", name="global"), {"wan": {}}, {}
         )
+
+
+def test_declarations_without_a_registry_materialize_nothing(tmp_path: Path) -> None:
+    """A hand-built `Declared` has no way to reach any kind's proof. The
+    fallback used to be replace semantics — the partial write D7 forbids,
+    reachable by whoever forgot the argument."""
+    _write(tmp_path, "appliances/BR1-EC/banners/global.yaml", "issue: new")
+    loaded = desired.load(default_registry, tmp_path)
+    bare = desired.Declared(
+        items=loaded.items, origins=loaded.origins, declarations=loaded.declarations
+    )
+    item = next(iter(bare.items.values()))
+    with pytest.raises(MaterializationBlocked, match="without a registry"):
+        bare.desired_for(item, {"issue": "old", "motd": "keep"})
+
+
+class _Contradiction(Resource):
+    """Says UNSUPPORTED, but carries a materializer that would happily write."""
+
+    kind = "contradiction"
+    cli_name = "contradiction"
+    scope_name = "orchestrator"
+    tier = Tier.CURATED
+    reversibility = Reversibility.REVERSIBLE
+    declarative = DeclarativeCapability.UNSUPPORTED
+
+    def fetch(self, ctx: Ctx, ref: Ref) -> Any:
+        return {"live": "state"}
+
+    def normalize(self, raw: Any) -> Any:
+        return dict(raw) if isinstance(raw, dict) else None
+
+    def materialize_declared(self, ref: Ref, spec: Mapping[str, Any], current: Any) -> Any:
+        return dict(spec)
+
+    def apply(self, ctx: Ctx, diff: Any) -> Any:  # pragma: no cover - never reached
+        raise AssertionError("a blocked reference must never be applied")
+
+    def rollback(self, ctx: Ctx, ref: Ref, snapshot: Any) -> Any:  # pragma: no cover
+        raise AssertionError("a blocked reference must never be rolled back")
+
+
+def test_a_kind_declaring_unsupported_cannot_write_through_its_own_override(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    """The declaration is the contract, the override is not: a kind that says
+    UNSUPPORTED is held to the base materializer even if it ships one of its
+    own, so the claim cannot be walked around from inside the class."""
+    registry = Registry()
+    registry.register(_Contradiction())
+    _write(tmp_path, "fabric/contradiction/one.yaml", "live: rewritten")
+
+    declared = desired.load(registry, tmp_path)
+    plan = txn.build_plan(world["ctx"], registry, declared)
+
+    (blocked,) = plan.blocked_items
+    assert "not declaratively writable" in (blocked.blocked or "")
+    assert not plan.changed_items
 
 
 # -- materialization: complete target from current + declaration --------------

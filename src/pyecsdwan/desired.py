@@ -101,7 +101,7 @@ from typing import Any
 import structlog
 import yaml
 
-from pyecsdwan.candidate import CandidateItem, materialize_desired
+from pyecsdwan.candidate import CandidateItem
 from pyecsdwan.contract import Ref, Scope
 from pyecsdwan.registry import Registry
 
@@ -240,8 +240,11 @@ class Declared:
     #: The parsed declarations, in ref order.
     declarations: tuple[Declaration, ...] = ()
     #: The registry the declarations were resolved against. Carried so
-    #: ``desired_for`` can reach each kind's materializer; None only in
-    #: hand-built test fixtures, which then get replace semantics.
+    #: ``desired_for`` can reach each kind's materializer. None is a
+    #: hand-built ``Declared`` with no way to reach any proof, and it
+    #: materializes nothing — falling back to replace semantics there would
+    #: be the partial write D7 forbids, reachable by whoever forgot the
+    #: argument.
     registry: Registry | None = None
 
     def ordered_items(self) -> list[CandidateItem]:
@@ -268,7 +271,11 @@ class Declared:
         )
 
         if self.registry is None:
-            return materialize_desired(item, current)
+            raise MaterializationBlocked(
+                f"{item.ref_key}: declarations loaded without a registry cannot "
+                f"be materialized — no kind's preservation proof is reachable, "
+                f"and replace semantics are not a fallback (D7)"
+            )
         markers = redaction.find_markers(item.intent)
         if markers:
             where = ", ".join(markers[:5])

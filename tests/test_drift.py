@@ -488,3 +488,21 @@ def test_no_note_when_nothing_is_unsaved(world: dict[str, Any]) -> None:
     assertion above would pass without the probe working at all."""
     report = _collect(world, kinds=[KIND])
     assert not any("unsaved running-config" in n for n in report.notes)
+
+
+def test_a_declaration_that_cannot_materialize_is_unsupported_not_a_crash(
+    world: dict[str, Any], tmp_path: Any
+) -> None:
+    """`drift --from` on a kind with no materialization proof (spec 003 T8):
+    the row says what `apply` would say — unsupported, with the reason — and
+    the run is inconclusive, so it cannot exit as if it had compared."""
+    declared = _declaring(tmp_path, "fabric/interface-labels/global.yaml", "wan: {}")
+
+    report = drift.collect(
+        world["ctx"], default_registry, declared, kinds=["interface-labels"]
+    )
+
+    (row,) = [r for r in report.rows if r.kind == "interface-labels"]
+    assert row.status is drift.Status.UNSUPPORTED
+    assert "not declaratively writable" in row.detail
+    assert report.exit_code != 0

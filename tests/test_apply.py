@@ -725,3 +725,19 @@ def test_ownership_still_refuses_through_apply(
     ok = _cli(world, "commit", "--override-template")
     assert ok.exit_code == 0, ok.output
     assert _live_banners(world)["issue"] == "should never land"
+
+
+def test_a_dry_run_shows_a_blocked_reference_and_exits_nonzero(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    """The command-level seam of T8: a directory whose only reference is a
+    kind that cannot be materialized must not preview as "nothing to do".
+    The blocker is printed where the plan is, and the exit code says the
+    directory asked for something this build refuses (Principle II)."""
+    _write(tmp_path, "fabric/interface-labels/global.yaml", "wan: {}")
+
+    result = _cli(world, "apply", "--from", str(tmp_path), "--dry-run")
+
+    assert result.exit_code != 0, result.output
+    assert "[blocked interface-labels:global]" in result.output
+    assert "not declaratively writable" in result.output

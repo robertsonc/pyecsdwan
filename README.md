@@ -212,8 +212,11 @@ behind a per-appliance banner is `appliance/banners`, and a path separator in a
 directory name would silently become two levels.
 
 The declaration format above is the ratified `specs/003-declarative-apply`
-(1.0.0); the per-resource materialization it requires before any write is
-still being built.
+(1.0.0). Materialization is per resource and defaults to unsupported: a
+declared kind that has not proved it can build a complete write from a
+partial declaration shows as *blocked* in the plan, and today only
+`appliance/banners` has. Writing from a directory still waits on the shared
+preflight and single-transaction commit (T10, T13).
 
 ## Tier-1 spec pipeline (`tools/`)
 
