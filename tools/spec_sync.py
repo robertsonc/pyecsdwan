@@ -25,6 +25,13 @@ Both sides of a diff are sanitized in memory before comparing, and
 placeholders the current baselines use, so a real Orchestrator hostname can
 never land in the repo (and never shows up as spurious drift).
 
+A URL source is fetched **unauthenticated**. ``--with-api-key`` sends
+``ECSDWAN_API_KEY`` as ``X-Auth-Token`` — and only to the Orchestrator that
+``ECSDWAN_ORCH_URL`` names: the source's origin (scheme, host, port) must match
+it exactly, and it must be https. A redirect is followed only within that same
+origin; anything else is refused and reported rather than followed (#99). The
+credential never appears in output.
+
 Exit codes: 0 in sync / updated, 1 drift detected, 2 error or nothing to do.
 
 The tool is standalone on purpose (stdlib only; httpx imported lazily for URL
@@ -53,7 +60,10 @@ PLACEHOLDER_HOST = {t: f"{t}.example.com" for t in TARGETS}
 # Same env conventions as pyecsdwan.config, duplicated as literals so the
 # tool keeps working without the package installed.
 ENV_API_KEY = "ECSDWAN_API_KEY"
+ENV_ORCH_URL = "ECSDWAN_ORCH_URL"
 ENV_INSECURE = "ECSDWAN_INSECURE"
+#: Redirect hops followed within one origin before giving up.
+MAX_REDIRECTS = 5
 
 HTTP_METHODS = ("get", "put", "post", "delete", "options", "head", "patch", "trace")
 #: Top-level fields compared as spec metadata (dotted = nested lookup).
@@ -64,6 +74,8 @@ METADATA_FIELDS = (
 MAX_LISTED = 50
 
 JsonDict = dict[str, Any]
+#: (scheme, host, port) — what "the same Orchestrator" means here (#63, #99).
+Origin = tuple[str, str, int]
 
 
 class SpecSyncError(Exception):
@@ -74,10 +86,20 @@ class SpecSyncError(Exception):
 # Loading
 
 
-def load_spec(source: str, *, timeout: float, insecure: bool) -> JsonDict:
-    """Load an OpenAPI/Swagger JSON document from a URL or a local file."""
-    if source.startswith(("http://", "https://")):
-        raw = _fetch_url(source, timeout=timeout, insecure=insecure)
+def is_url(source: str) -> bool:
+    return source.startswith(("http://", "https://"))
+
+
+def load_spec(
+    source: str, *, timeout: float, insecure: bool, api_key: str | None = None
+) -> JsonDict:
+    """Load an OpenAPI/Swagger JSON document from a URL or a local file.
+
+    ``api_key`` is sent as ``X-Auth-Token`` when given; nothing decides here
+    whether it *should* be — see :func:`authenticated_key` for that.
+    """
+    if is_url(source):
+        raw = _fetch_url(source, timeout=timeout, insecure=insecure, api_key=api_key)
     else:
         path = Path(source)
         if not path.is_file():
@@ -92,28 +114,105 @@ def load_spec(source: str, *, timeout: float, insecure: bool) -> JsonDict:
     return spec
 
 
-def _fetch_url(url: str, *, timeout: float, insecure: bool) -> str:
+def url_origin(url: str) -> Origin:
+    """``(scheme, host, port)`` of an absolute http(s) URL, normalized: the host
+    case-folded, the default port filled in. Refuses userinfo — ``user@host``
+    is how a URL smuggles one host into a string that reads as another — and
+    anything that is not plainly http or https."""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise SpecSyncError(f"not an http(s) URL: {redacted(url)}")
+    if parts.username is not None or parts.password is not None:
+        raise SpecSyncError(f"refusing a URL that carries userinfo: {redacted(url)}")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise SpecSyncError(f"invalid port in {redacted(url)}") from exc
+    return parts.scheme, parts.hostname, port or (443 if parts.scheme == "https" else 80)
+
+
+def redacted(url: str) -> str:
+    """A URL as it may appear in a message: userinfo, if any, removed."""
+    return re.sub(r"//[^/@]*@", "//", url)
+
+
+def _fmt(origin: Origin) -> str:
+    scheme, host, port = origin
+    default = 443 if scheme == "https" else 80
+    return f"{scheme}://{host}" + ("" if port == default else f":{port}")
+
+
+def authenticated_key(source: str) -> str:
+    """The API key to send to ``source``, or the reason there is none.
+
+    The key belongs to exactly one Orchestrator — the one ``ECSDWAN_ORCH_URL``
+    names — and goes nowhere else: not to another host, not to the same host
+    over http or on another port. A hostname is not enough, for the reason
+    #63 gives: two tenants and two schemes share it.
+    """
+    key = os.environ.get(ENV_API_KEY)
+    if not key:
+        raise SpecSyncError(f"--with-api-key: {ENV_API_KEY} is not set")
+    configured = os.environ.get(ENV_ORCH_URL)
+    if not configured:
+        raise SpecSyncError(
+            f"--with-api-key: {ENV_ORCH_URL} must name the Orchestrator the key belongs to"
+        )
+    if "://" not in configured:
+        configured = "https://" + configured  # what pyecsdwan.config assumes
+    target, home = url_origin(source), url_origin(configured)
+    if target != home:
+        raise SpecSyncError(
+            f"--with-api-key: refusing to send the API key to {_fmt(target)}; "
+            f"it belongs to {_fmt(home)} ({ENV_ORCH_URL})"
+        )
+    if target[0] != "https":
+        raise SpecSyncError(
+            "--with-api-key: refusing to send the API key over http; "
+            "reach the Orchestrator over https"
+        )
+    return key
+
+
+def _fetch_url(url: str, *, timeout: float, insecure: bool, api_key: str | None) -> str:
     # Lazy import so file-based runs need no third-party packages at all.
     try:
         import httpx
     except ImportError as exc:  # pragma: no cover - venv always has httpx
         raise SpecSyncError("fetching a URL requires httpx (pip install httpx)") from exc
-    headers = {}
-    api_key = os.environ.get(ENV_API_KEY)
-    if api_key:
-        headers["X-Auth-Token"] = api_key
+    headers = {"X-Auth-Token": api_key} if api_key else {}
+    origin = url_origin(url)
     try:
-        response = httpx.get(
-            url,
-            headers=headers,
-            timeout=timeout,
-            verify=not insecure,
-            follow_redirects=True,
-        )
-        response.raise_for_status()
+        # Redirects are followed by hand, and only within the origin the
+        # operator named. httpx strips Authorization across origins but not a
+        # custom header, so left to itself a 302 to another host would carry
+        # the token there (#99). Unauthenticated fetches get the same rule:
+        # a spec that turns up somewhere else is a spec the operator did not
+        # point at, and the fix is to point at it.
+        with httpx.Client(
+            timeout=timeout, verify=not insecure, follow_redirects=False
+        ) as client:
+            for _hop in range(MAX_REDIRECTS + 1):
+                response = client.get(url, headers=headers)
+                if not response.is_redirect:
+                    response.raise_for_status()
+                    return response.text
+                nxt = response.next_request
+                target = str(nxt.url) if nxt is not None else response.headers.get("location", "")
+                if not target:
+                    raise SpecSyncError(f"redirect from {redacted(url)} names no location")
+                if url_origin(target) != origin:
+                    raise SpecSyncError(
+                        f"refusing to follow a redirect off {_fmt(origin)}: "
+                        f"{redacted(url)} -> {redacted(target)}; point --source at "
+                        f"the final URL if that is where the spec lives"
+                    )
+                url = target
+            raise SpecSyncError(
+                f"too many redirects (more than {MAX_REDIRECTS}) fetching {redacted(url)}"
+            )
     except httpx.HTTPError as exc:
-        raise SpecSyncError(f"fetch failed: {url}: {exc}") from exc
-    return response.text
+        raise SpecSyncError(f"fetch failed: {redacted(url)}: {exc}") from exc
 
 
 def find_baseline(specs_dir: Path, target: str) -> Path | None:
@@ -387,6 +486,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--timeout", type=float, default=30.0, help="HTTP timeout, seconds")
     parser.add_argument(
+        "--with-api-key",
+        action="store_true",
+        help=(
+            f"send {ENV_API_KEY} as X-Auth-Token — only to the Orchestrator {ENV_ORCH_URL} "
+            f"names, over https, never across a redirect (default: unauthenticated)"
+        ),
+    )
+    parser.add_argument(
         "--insecure",
         action="store_true",
         default=os.environ.get(ENV_INSECURE, "") == "1",
@@ -418,7 +525,18 @@ def main(argv: list[str] | None = None) -> int:
                     f"{target}: skipped (no source; pass --source or set {ENV_SOURCE[target]})"
                 )
                 continue
-            fetched = load_spec(source, timeout=args.timeout, insecure=args.insecure)
+            api_key = None
+            if args.with_api_key and is_url(source):
+                api_key = authenticated_key(source)
+                if args.insecure:
+                    print(
+                        "spec_sync: warning: --insecure sends the API key over an "
+                        "unverified TLS connection",
+                        file=sys.stderr,
+                    )
+            fetched = load_spec(
+                source, timeout=args.timeout, insecure=args.insecure, api_key=api_key
+            )
             if args.update:
                 dest, touched, superseded = write_baseline(fetched, target, args.specs_dir)
                 report["targets"][target] = {

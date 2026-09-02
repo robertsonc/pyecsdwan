@@ -219,6 +219,7 @@ still being built.
 
 ```bash
 python tools/spec_sync.py --diff                  # spec drift vs specs/
+python tools/spec_sync.py --diff --source URL --with-api-key   # key goes only to ECSDWAN_ORCH_URL's origin
 python tools/postman_sync.py --diff               # vendor payload examples
 python tools/gen_models.py  --scope appliance --method POST --path /bgp/config/system
 python tools/gen_plugin.py  --scope appliance --method POST --path /bgp/config/system
