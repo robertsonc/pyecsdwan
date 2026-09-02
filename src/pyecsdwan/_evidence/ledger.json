@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "note": "Two curated resources \u2014 appliance/banners and appliance/bgp \u2014 are live-change-and-rollback-verified against Orchestrator 9.7.0.43282 / ECOS 9.7.0.0_109184 (2026-08-30): a real change applied, verified on the appliance, confirmed, rolled back, and persisted to flash at both ends. Three more are live-no-op-write-verified and 33 are live-read-verified. Level 5 is the floor for calling a write path supported, so exactly two write paths in this repository have met that floor; every other write is still code that has not been applied and rolled back on real gear. A programmatic equivalent of the level-4 check passed for 33 write-capable kinds with zero phantom drift, recorded as supporting evidence in docs/sitrep/2026-08-30-live-read.md rather than promoted, because the ledger records levels by the procedure actually run. Three kinds stay at mock-verified because nothing of that kind is configured on the observed fabric. docs/live-validation.md is the protocol, including the four failure paths level 6 needs and that none has exercised.",
+  "note": "Three curated resources are live-change-and-rollback-verified against Orchestrator 9.7.0.43282: appliance/banners and appliance/bgp (ECOS 9.7.0.0_109184, 2026-08-30) \u2014 a real change applied, verified on the appliance, confirmed, rolled back, and persisted to flash at both ends \u2014 and appliance-info (2026-09-02), an Orchestrator-side object changed, verified, rolled back byte-identical and re-read from a fresh session. Three more are live-no-op-write-verified and 33 are live-read-verified. Level 5 is the floor for calling a write path supported, so exactly three write paths in this repository have met that floor; every other write is still code that has not been applied and rolled back on real gear. A programmatic equivalent of the level-4 check passed for 33 write-capable kinds with zero phantom drift, recorded as supporting evidence in docs/sitrep/2026-08-30-live-read.md rather than promoted, because the ledger records levels by the procedure actually run. Three kinds stay at mock-verified because nothing of that kind is configured on the observed fabric. docs/live-validation.md is the protocol, including the four failure paths level 6 needs and that none has exercised.",
   "support": {
     "orchestrator": [],
     "ecos": [],
@@ -536,6 +536,24 @@
       ],
       "source": "docs/sitrep/2026-08-30-live-read.md",
       "notes": "Read sweep across every curated kind: fetch() + normalize() on all reachable appliances, normalize idempotent and a canonical state diffed against itself empty (no phantom drift). Read-only."
+    },
+    {
+      "kind": "appliance-info",
+      "level": "live-change-and-rollback-verified",
+      "orchestrator": "9.7.0.43282",
+      "ecos": "n/a",
+      "auth_mode": "api-key",
+      "observed": "2026-09-02",
+      "behaviors": [
+        "live-read",
+        "no-op-round-trip",
+        "real-change",
+        "post-apply-verification",
+        "rollback",
+        "save-persistence"
+      ],
+      "source": "docs/sitrep/2026-09-02-appliance-info-live.md",
+      "notes": "Orchestrator-scope, one object per appliance (/appliance/extraInfo?nePk=). Read sweep over 18 appliances clean; no-op round trip planned empty; on S2-EC-01 the country was changed and verified with every other field untouched, then rolled back byte-identical to the baseline, and a fresh session re-read the same. Persistence is the Orchestrator's own database (no appliance flash, no saveChanges in the path); the fresh-session re-read is the persistence evidence this object admits. Live objects carry null for never-set fields; the canonical form treats null and \"\" alike."
     }
   ]
 }

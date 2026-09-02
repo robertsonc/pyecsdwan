@@ -39,7 +39,8 @@ pools and SNAT maps (#32); QoS/optimization/route maps + shapers (#33);
 regions, region associations and regional overlays (#35); overlay and
 template-group priorities (#36); internal subnets (#37); SNMP, logging,
 mgmt-services, banners and schedule-timezone (#38); interface-label advanced
-constraints (#39). Service orchestration (#34) is deferred — see the scope
+constraints (#39); appliance extra info — location, contact and overlay
+settings, one object per appliance. Service orchestration (#34) is deferred — see the scope
 comment on that issue.
 
 **The epic's headline finding: "orchestrator-scope breadth" was a
@@ -190,8 +191,8 @@ replace the same server object (`appliance/deployment` and `appliance/dhcp`
 both POST `/deployment`), and ordering is not a fix. Planning refuses the
 pair before the first write, the refusal carries structured
 `Collision` objects, and both entry points reach the check through
-`build_plan`. As of 2026-08-30 the decision is *total*: all 41 curated kinds
-are partitioned — 31 declare the object their `apply()` replaces
+`build_plan`. As of 2026-08-30 the decision is *total*: all 42 curated kinds
+are partitioned — 32 declare the object their `apply()` replaces
 (`write_target()`), 10 record why a target would be wrong for them
 (per-entry editors, delta reconcilers, one read-modify-write splicer, one
 unimplemented write path) — and `tests/test_write_collisions.py` refuses a
@@ -385,7 +386,8 @@ alongside #106, which owns the credential half.
 
 **What ✅ means here, precisely (#66).** It means the code shipped and is green
 against the bundled mock Orchestrator. As of 2026-08-30 two curated resources — `appliance/banners` and
-`appliance/bgp` — are **`live-change-and-rollback-verified`**, three more are
+`appliance/bgp` — are **`live-change-and-rollback-verified`** (a third, `appliance-info`, joined them on
+2026-09-02 — `docs/sitrep/2026-09-02-appliance-info-live.md`), three more are
 **`live-no-op-write-verified`**, and 33 are **`live-read-verified`**,
 against Orchestrator 9.7.0.43282 / ECOS 9.7.0.0_109184: `fetch()` and `normalize()` were run on a real fabric,
 normalize is idempotent on those payloads, and a canonical state diffed against
@@ -395,10 +397,10 @@ drift (`docs/sitrep/2026-08-30-live-read.md`). The three that are not
 — `appliance/vrrp`, `security-policy`, `ip-service-group` — had nothing of that
 kind configured to read.
 
-For every row except `appliance/banners` and `appliance/bgp` it still does
+For every row except `appliance/banners`, `appliance/bgp` and `appliance-info` it still does
 **not** mean anyone has run a write against real gear — level 4 included, since a no-op round trip
-produces an empty plan and an empty plan writes nothing. **Exactly two
-resources have live change-and-rollback evidence.** Thirty-nine of the 41 write
+produces an empty plan and an empty plan writes nothing. **Exactly three
+resources have live change-and-rollback evidence.** Thirty-nine of the 42 write
 paths have still never been executed and rolled back on a fabric at a recorded
 version. That remains the state of nearly all of them, which is why it is stated once here rather than
 repeated in every cell — a per-row claim maintained by hand is a claim that
@@ -430,6 +432,7 @@ write path as code that has never met a fabric.
 | Route / optimization / QoS policy + shapers | ✅ shipped (#33; all five appliance-scope — orchestrator exposes them GET-only) |
 | Service orchestration associations | ⛔ deferred (#34 — ~100 endpoints across 8+ vendor integrations; an epic, not an issue. See the scope comment on the issue.) |
 | Regions / regional overlays / priorities | ✅ shipped (#35, #36) |
+| Appliance extra info (location / contact / overlay port) | ✅ shipped (orchestrator-scope, one object per appliance; `live-change-and-rollback-verified` 2026-09-02) |
 | Internal subnets | ✅ shipped (#37; subnet-sharing options not modelable — write-only endpoint, no read path) |
 | Common settings (SNMP/logging/mgmt-services/banners/timezone) | ✅ shipped (#38; appliance-scope. DNS proxy/cache, `logging/remote`, NTP deferred) |
 | Appliance lifecycle (discovery/upgrade/backup/preconfig) | ⚙️ Epic #7 |
