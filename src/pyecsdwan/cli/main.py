@@ -549,19 +549,19 @@ def apply_(
     except desired.DesiredError as exc:
         _fail(str(exc))
 
-    # The loader is done (T7); safe materialization is not (T8). A declaration
-    # is *typed partial intent* under the ratified spec (D7), and no resource
-    # has yet proved it can build a complete target without erasing unknown,
-    # unmodeled or write-only fields (D8/R12). Until it has, this path would
-    # send the declaration as a full replacement — so it refuses rather than
-    # writing under semantics the spec does not sanction. `--dry-run` is left
-    # open: it writes nothing, and seeing the plan is how you find out whether
-    # the directory says what you meant.
+    # The loader (T7) and per-resource materialization with its capability
+    # gate (T8) are done; the shared preflight, outcome mapping and the
+    # single-transaction directory commit (T10, T12, T13) are not. The plan
+    # below is already built through the T8 seam — a declared reference
+    # either materializes into a complete write or shows as blocked — but the
+    # command still refuses to *write* until the tasks that own revalidation
+    # under the commit lock and the shared result schema land. `--dry-run`
+    # writes nothing either way.
     if not dry_run:
         _fail(
-            "apply --from is not enabled yet: the declaration format is ratified "
-            "(T7) but per-resource safe materialization is not (T8), so writing a "
-            "partial declaration would replace fields nobody declared. Use "
+            "apply --from cannot write yet: declarations and per-resource "
+            "materialization are in place (T7, T8), but the shared preflight "
+            "and single-transaction directory commit are not (T10, T13). Use "
             "`--dry-run` to see the plan, or `ec-cli drift --from` to compare"
         )
     commit_only = [
@@ -609,13 +609,15 @@ def apply_(
     plan = txn.build_plan(rt_ctx, registry, declared)
     render.render_plan(console, plan)
     # Only the preview exists today. The commit half was removed rather than
-    # left unreachable behind the T8 guard above: dead code that looks like a
-    # working write path is how someone re-enables it without the per-resource
-    # materialization proof it is waiting for. T13 restores it.
+    # left unreachable behind the guard above: dead code that looks like a
+    # working write path is how someone re-enables it without the shared
+    # preflight it is waiting for. T13 restores it.
     #
-    # Same exit convention as `diff`: nonzero means "this would change things",
-    # which is what a CI gate keys on.
-    raise typer.Exit(0 if plan.empty else 1)
+    # Same exit convention as `diff`: nonzero means "this would change
+    # things" — and a blocked reference exits nonzero too, because "could not
+    # do what the directory asks" must never share an exit with "nothing to
+    # do" (T8, Principle II).
+    raise typer.Exit(0 if plan.empty and not plan.blocked_items else 1)
 
 
 @app.command("drift")

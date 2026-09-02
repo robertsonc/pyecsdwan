@@ -44,7 +44,14 @@ from typing import Any
 import structlog
 
 from pyecsdwan.candidate import IntentSource
-from pyecsdwan.contract import Ctx, NotCurated, Ref, Resource, Tier
+from pyecsdwan.contract import (
+    Ctx,
+    MaterializationBlocked,
+    NotCurated,
+    Ref,
+    Resource,
+    Tier,
+)
 from pyecsdwan.jobs import UNSAVED_FIELD
 from pyecsdwan.registry import Registry
 from pyecsdwan.reports.fanout import DEFAULT_CONCURRENCY, fan_out
@@ -324,6 +331,15 @@ def _row(
             else resource.canonicalize_desired(ctx, ref, desired_input)
         )
         diff = resource.diff(ref, current, desired)
+    except MaterializationBlocked as exc:
+        # The kind was read fine; it is the *declaration* that cannot be
+        # turned into a target (spec 003 T8). Unsupported, so the row says
+        # what apply will say, and inconclusive either way: this run did not
+        # compare the instance and must not exit as if it had.
+        return Row(
+            noun=noun, kind=ref.kind, name=ref.name, appliance=appliance,
+            status=Status.UNSUPPORTED, detail=str(exc),
+        )
     except Exception as exc:  # noqa: BLE001 - same reasoning as the fetch above
         return Row(
             noun=noun, kind=ref.kind, name=ref.name, appliance=appliance,

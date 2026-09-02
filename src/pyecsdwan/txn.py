@@ -45,6 +45,7 @@ from pyecsdwan.contract import (
     Ctx,
     Diff,
     JobOutcome,
+    MaterializationBlocked,
     Owned,
     Ownership,
     RawState,
@@ -119,6 +120,12 @@ class PlanItem:
     #: without it a rebase would re-apply a desired state computed from the
     #: pre-drift world and silently drop the concurrent change it merged over.
     candidate_item: CandidateItem | None = None
+    #: Why this reference cannot be written, or None (spec 003 T8). A blocked
+    #: item has an empty diff — nothing *plannable* changed — but it is not a
+    #: no-op: commit refuses the whole changeset while one stands, because
+    #: silently applying the rest would collapse "could not do what you asked"
+    #: into "did it" (Principle II).
+    blocked: str | None = None
 
     @property
     def changed(self) -> bool:
@@ -160,7 +167,14 @@ class Plan:
         return [i for i in self.items if i.changed]
 
     @property
+    def blocked_items(self) -> list[PlanItem]:
+        return [i for i in self.items if i.blocked is not None]
+
+    @property
     def empty(self) -> bool:
+        """No applicable change — deliberately not "nothing to report": a
+        plan can be empty *and* carry blocked items, and callers deciding an
+        exit code must look at both or a blocked apply reads as clean."""
         return not self.changed_items
 
 
@@ -206,7 +220,28 @@ def build_plan(ctx: Ctx, registry: Registry, candidate: IntentSource) -> Plan:
             )
         current_raw = resource.fetch(ctx, ref)
         current = resource.normalize(current_raw)
-        desired_input = candidate.desired_for(cand, current)
+        try:
+            desired_input = candidate.desired_for(cand, current)
+        except MaterializationBlocked as exc:
+            # A blocker, not an error: the plan must show every refused
+            # reference next to every applicable one, or a CI dry-run reports
+            # a smaller intent set than the directory declares (T8, R22).
+            warnings.append(f"{ref}: blocked — {exc}")
+            items.append(
+                PlanItem(
+                    ref=ref,
+                    resource=resource,
+                    delete=cand.mode == "delete",
+                    current_raw=current_raw,
+                    current=current,
+                    desired=None,
+                    diff=Diff(ref=ref, entries=[], desired=None, current=current),
+                    ownership=Ownership.unowned("blocked before ownership check"),
+                    candidate_item=cand,
+                    blocked=str(exc),
+                )
+            )
+            continue
         desired: CanonicalState
         if desired_input is None:
             desired = None
@@ -291,6 +326,17 @@ def commit(
     lock_root: Path | None = None,
     lock_timeout: float = DEFAULT_TIMEOUT,
 ) -> CommitReport:
+    if plan.blocked_items:
+        # Before the empty-plan return, deliberately: a plan whose only items
+        # are blocked is not "no changes", it is "nothing could be done", and
+        # those must never share an answer (T8, Principle II).
+        names = "; ".join(
+            f"{i.ref.key()}: {i.blocked}" for i in plan.blocked_items
+        )
+        raise CommitError(
+            f"refusing: {len(plan.blocked_items)} reference(s) blocked at "
+            f"preflight — {names}"
+        )
     changed = plan.changed_items
     if not changed:
         return CommitReport(ok=True, state="NO_CHANGES", messages=["no changes"])

@@ -293,21 +293,23 @@ def test_the_directory_and_the_candidate_agree_on_the_same_intent(
     assert from_dir.exit_code == from_candidate.exit_code
 
 
-def test_an_undeclared_non_default_value_is_drift(
+def test_an_undeclared_field_is_outside_the_declarations_authority(
     world: dict[str, Any], tmp_path: Path
 ) -> None:
-    """The safety property replace mode buys, stated precisely.
+    """The semantics T8 replaced, inverted deliberately.
 
-    An omitted key does *not* mean "leave whatever is there" — it takes the
-    value `normalize()` supplies for an absent key. So a box holding a
-    non-default value for something nobody declared is drift. Under merge it
-    would take the live value and report in sync, which would make an
-    incomplete declaration indistinguishable from a complete one.
-
-    Written against a *deliberately non-default* live value, because banners'
-    `normalize()` fills omitted keys with `""` and the mock's seed is `""` too
-    — declaring a subset of an all-default object is genuinely in sync, and a
-    test that used it would assert the opposite of the truth.
+    This test used to assert the opposite — that an undeclared non-default
+    value is drift — which was replace semantics: an omitted key took the
+    value `normalize()` supplies for an absent one. The ratified spec
+    rejected that reading (D7: a declaration is typed *partial* intent;
+    alternative 5 in the plan rejects whole-document replacement by name),
+    and #126's live example showed why drift's old answer was a lie about
+    apply: "motd would be removed" described a write the engine must never
+    perform. Under the banners materializer the undeclared field takes its
+    live value into the complete target, so the box is in sync — and a field
+    the operator *did* declare still drifts, which the second half keeps
+    honest. D1's doctrine, applied at field grain: a declaration carries no
+    authority over what it does not mention.
     """
     ctx, state = world["ctx"], world["state"]
     state.appliance_ecos["3.NE"]["banners"] = {"login": "declared", "motd": "nobody asked for this"}
@@ -318,20 +320,29 @@ def test_an_undeclared_non_default_value_is_drift(
         ctx, default_registry, desired.load(default_registry, tmp_path), kinds=[KIND]
     )
     row = next(r for r in report.rows if r.appliance == "BR1-EC")
-    assert row.status is drift.Status.DRIFT, (
-        "an undeclared non-default value must show as drift; merge would hide it"
+    assert row.status is drift.Status.IN_SYNC, (
+        "an undeclared field is out of the declaration's scope; reporting it "
+        "as drift would describe a removal apply refuses to perform"
     )
-    assert "motd" in row.detail
+
+    # The declared field's authority is intact: change what *was* declared
+    # and the same file drifts.
+    state.appliance_ecos["3.NE"]["banners"]["login"] = "changed behind our back"
+    report = drift.collect(
+        ctx, default_registry, desired.load(default_registry, tmp_path), kinds=[KIND]
+    )
+    row = next(r for r in report.rows if r.appliance == "BR1-EC")
+    assert row.status is drift.Status.DRIFT
+    assert "login" in row.detail
 
 
 def test_declaring_a_subset_of_an_all_default_object_is_in_sync(
     world: dict[str, Any], tmp_path: Path
 ) -> None:
-    """The other side, and the reason the test above needs its non-default
-    fixture: where `normalize()` fills an omitted key with the same value the
-    appliance reports, a partial declaration really is complete. Minimal files
-    are a feature — replace mode does not force an operator to restate every
-    default.
+    """The companion case: a minimal file over an all-default object is
+    simply in sync. Minimal files are a feature — materialization completes
+    the target from live state, so an operator never restates a default just
+    to avoid erasing it.
 
     Note `issue`, not `login`: the mock's banners object carries `issue` and
     `motd`, and declaring a key it does not have *adds* one — drift for a real
@@ -367,13 +378,13 @@ def test_materialized_intent_does_not_alias_the_declaration(tmp_path: Path) -> N
     item = declared.item_for(REF)
     assert item is not None
 
-    materialized = declared.desired_for(item, None)
-    assert materialized == item.intent
+    materialized = declared.desired_for(item, {})
+    assert materialized["nested"] == item.intent["nested"]
     materialized["nested"]["inner"] = "mutated by a consumer"
     assert item.intent["nested"]["inner"] == "original", "the declaration was aliased"
 
     # And a second read is unaffected by the first consumer.
-    assert declared.desired_for(item, None)["nested"]["inner"] == "original"
+    assert declared.desired_for(item, {})["nested"]["inner"] == "original"
 
 
 def test_the_same_directory_always_builds_the_same_order(tmp_path: Path) -> None:

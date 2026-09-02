@@ -45,7 +45,10 @@ import functools
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pyecsdwan.contract import DeclarativeCapability
 
 #: Environment override for the ledger directory, mirroring ``ECSDWAN_SPECS_DIR``.
 ENV_EVIDENCE_DIR = "ECSDWAN_EVIDENCE_DIR"
@@ -291,6 +294,38 @@ class Ledger:
     def level(self, kind: str) -> Evidence | None:
         record = self.records.get(kind)
         return record.level if record else None
+
+
+def declarative_gate(
+    kind: str, declared: DeclarativeCapability
+) -> tuple[DeclarativeCapability, str | None]:
+    """The capability a kind may *exercise*: its claim, capped by its evidence.
+
+    #126's fourth criterion: capability must match recorded evidence, not
+    intent. A resource whose class says ``PRESENT_ONLY`` while the ledger has
+    never seen its write path run on real gear is advertising beyond its
+    evidence — the exact conflation of "shipped" and "seen working" this
+    module exists to end. The registry coverage test catches that at build
+    time for packaged kinds; this gate catches it at plan time for everything,
+    including a plugin loaded at runtime or a ledger swapped underneath the
+    binary. Fail-closed: capped to UNSUPPORTED, with the reason returned for
+    the plan to show.
+    """
+    from pyecsdwan.contract import DeclarativeCapability as _Cap
+
+    if declared is _Cap.UNSUPPORTED:
+        return declared, None
+    level = ledger().level(kind)
+    if level is None or level < WRITE_SUPPORTED_FLOOR:
+        recorded = level.label if level is not None else "no ledger entry"
+    else:
+        return declared, None
+    return _Cap.UNSUPPORTED, (
+        f"{kind} claims declarative capability {declared.value!r} but the "
+        f"evidence ledger records {recorded} — below the write-supported floor "
+        f"({WRITE_SUPPORTED_FLOOR.label}). Capability follows evidence, never "
+        f"intent; the claim is ignored until the ledger says otherwise."
+    )
 
 
 def evidence_dir() -> Path:
