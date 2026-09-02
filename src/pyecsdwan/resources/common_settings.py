@@ -156,7 +156,9 @@ from pyecsdwan.contract import (
     ApplyResult,
     CanonicalState,
     Ctx,
+    DeclarativeCapability,
     Diff,
+    MaterializationBlocked,
     Ownership,
     RawState,
     Ref,
@@ -606,6 +608,39 @@ class Banners(_ApplianceSetting):
         "appliance GET /banners",
         "appliance POST /banners",
     )
+    #: The first — and so far only — declaratively writable kind (spec 003
+    #: T8). The claim rests on three provable properties, each load-bearing:
+    #: the object is a singleton that always exists, so a declaration never
+    #: *creates* and the server-defaults trap of #126's live example cannot
+    #: arise; ``normalize()`` passes unknown fields through, so merging a
+    #: declaration over current state preserves what the model does not know;
+    #: and the ledger records live-change-and-rollback evidence at a real
+    #: version. The registry coverage test re-checks the last one on every
+    #: run, and the evidence gate re-checks it at plan time.
+    declarative = DeclarativeCapability.PRESENT_ONLY
+
+    def materialize_declared(
+        self, ref: Ref, spec: Mapping[str, Any], current: CanonicalState
+    ) -> CanonicalState:
+        """Complete target = declared fields over current state (D7).
+
+        The merge is what makes a partial declaration safe here: a YAML file
+        that sets only ``issue`` carries the live ``motd`` — and any
+        passthrough field the server added — into the full-object POST,
+        instead of erasing them the way replace semantics would.
+        """
+        from pyecsdwan.candidate import deep_merge
+
+        if not isinstance(current, dict):
+            # Cannot happen for a singleton whose fetch succeeded; if it does,
+            # a merge over nothing would be exactly the partial write D8
+            # forbids, so refuse rather than degrade.
+            raise MaterializationBlocked(
+                f"{ref}: no current state to materialize over — a banners "
+                f"declaration is partial intent and needs the live object to "
+                f"complete it"
+            )
+        return deep_merge(current, dict(spec))
 
     def normalize(self, raw: RawState) -> CanonicalState:
         data = _document(raw, "banners")

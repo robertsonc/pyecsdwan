@@ -56,6 +56,29 @@ class Reversibility(str, enum.Enum):
     IRREVERSIBLE = "irreversible"
 
 
+class DeclarativeCapability(str, enum.Enum):
+    """What a YAML declaration may safely do to this kind (spec 003, T8).
+
+    A declaration is *typed partial intent* (D7): posting it as a document
+    replaces fields nobody declared, and the live worked example on #126 —
+    a partial BGP peer that applied and then failed post-apply verification
+    because the appliance defaulted the fields the client did not send — is
+    what happens even when it "works". So the default is UNSUPPORTED, and a
+    resource earns a higher answer by proving two things: a materialization
+    that builds a complete target from current state plus the declaration
+    (D8), and recorded live evidence at or above the write-supported floor
+    (D16) — the registry coverage test holds both.
+    """
+
+    #: The default. A declared reference of this kind is blocked at preflight.
+    UNSUPPORTED = "unsupported"
+    #: ``state: present`` declarations can be materialized and applied.
+    PRESENT_ONLY = "present-only"
+    #: ``state: absent`` too — requires live delete-and-restore evidence (T11);
+    #: no kind may claim this yet, and the coverage test refuses one that does.
+    PRESENT_AND_ABSENT = "present-and-absent"
+
+
 class Tier(enum.IntEnum):
     #: Raw passthrough (``ec-cli api ...``): journaled for audit only,
     #: never part of a transaction.
@@ -327,6 +350,18 @@ class NotCurated(ResourceError):
     """Raised by Tier-0/1 resources where curated behavior is required."""
 
 
+class MaterializationBlocked(ResourceError):
+    """A declared reference cannot be turned into a safe, complete write.
+
+    The pre-write blocker D8/R12 demand: raised when the kind is not
+    declaratively capable, when its capability outruns its recorded evidence,
+    or when the materializer finds something it cannot prove it preserves —
+    an unknown field with no passthrough, a redacted or write-only value that
+    would overwrite the real one with a mask. Never a warning: the plan
+    carries it, and commit refuses the changeset while it stands.
+    """
+
+
 class OwnershipConflict(ResourceError):
     """Direct appliance-level change on a template-managed section."""
 
@@ -377,6 +412,12 @@ class Resource:
     cli_name: str = ""
     #: Extra accepted spellings for the same resource, within the same scope.
     cli_aliases: tuple[str, ...] = ()
+    #: What a YAML declaration may do to this kind (spec 003, T8). The default
+    #: answers the capability question for every kind — with "nothing" — and a
+    #: kind claiming more must override :meth:`materialize_declared` and hold
+    #: ledger evidence at the write-supported floor; the registry coverage
+    #: test enforces both.
+    declarative: DeclarativeCapability = DeclarativeCapability.UNSUPPORTED
 
     # -- mandatory plugin surface -------------------------------------------
 
@@ -402,6 +443,30 @@ class Resource:
             entries=structural_diff(current, desired),
             desired=desired,
             current=current,
+        )
+
+    def materialize_declared(
+        self, ref: Ref, spec: Mapping[str, Any], current: CanonicalState
+    ) -> CanonicalState:
+        """A complete desired state from current state plus a declaration (D7).
+
+        "Complete" is the contract: the result must carry every field the
+        server would otherwise default or erase — including fields the model
+        does not know about, which is why the base cannot do this generically
+        and refuses instead (D8). An override must either prove preservation
+        (a normalize() that passes unknown fields through, merged over
+        current) or raise :class:`MaterializationBlocked` for the reference.
+
+        Takes no ``ctx`` deliberately: materialization is a pure function of
+        the declaration and the already-fetched state, so drift, dry-run and
+        apply cannot diverge by fetching at different moments.
+        """
+        raise MaterializationBlocked(
+            f"{self.kind} is not declaratively writable: a declaration is typed "
+            f"partial intent, and this resource has not proved it can build a "
+            f"complete write from one without erasing undeclared fields (D7/D8). "
+            f"Stage the change with `set`/`load` instead, or see "
+            f"specs/003-declarative-apply for what promotion requires."
         )
 
     def verify(self, ctx: Ctx, ref: Ref, desired: CanonicalState) -> bool:

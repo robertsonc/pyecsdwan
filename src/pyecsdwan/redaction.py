@@ -157,3 +157,30 @@ def redact_query(path: str) -> str:
     ]
     rebuilt = "&".join(f"{key}={val}" for key, val in kept)
     return f"{base}?{rebuilt}"
+
+
+def find_markers(value: Any, _path: str = "") -> list[str]:
+    """Dotted paths of every redaction or sealed marker inside a tree.
+
+    For preflight (spec 003 R12): a declaration holding one of these was
+    built from a redacted export or a sealed store, and writing it would
+    replace the real secret with the mask. Checked on *input* trees; the
+    output-side markers this module writes are supposed to be there.
+    """
+    from pyecsdwan import vault
+
+    if isinstance(value, str):
+        return [_path or "(root)"] if value.startswith(REDACTED_PREFIX) else []
+    if isinstance(value, dict):
+        if vault.is_sealed(value):
+            return [_path or "(root)"]
+        out: list[str] = []
+        for key, val in value.items():
+            out.extend(find_markers(val, f"{_path}.{key}" if _path else str(key)))
+        return out
+    if isinstance(value, list):
+        out = []
+        for index, item in enumerate(value):
+            out.extend(find_markers(item, f"{_path}.{index}" if _path else str(index)))
+        return out
+    return []

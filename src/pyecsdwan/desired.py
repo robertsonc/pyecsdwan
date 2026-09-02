@@ -71,14 +71,23 @@ mistyped path, a failed checkout, or a templating error that produced nothing,
 and the cost of being wrong is an apply that silently does nothing while
 reporting success.
 
-What this module does not decide
---------------------------------
+Materialization is per resource, and gated (T8)
+-----------------------------------------------
 
-Materialization. A declaration is typed *partial* intent (D7), and proving
-that writing it cannot erase unknown, unmodeled or write-only fields (D8) is
-per-resource work — T8. Until then items are staged in ``replace`` mode
-exactly as before, and ``absent`` is parsed but refused, because no resource
-has yet declared evidence-backed deletion (D16, T11).
+A declaration is typed *partial* intent (D7). ``desired_for`` hands it to the
+resource's ``materialize_declared`` — the per-kind proof that a complete
+target can be built from current state plus the declaration without erasing
+unknown, unmodeled or write-only fields (D8) — and does so only for a kind
+whose declared capability survives the evidence gate
+(:func:`pyecsdwan.evidence.declarative_gate`). Everything else raises
+:class:`~pyecsdwan.contract.MaterializationBlocked`, which the planner turns
+into a visible, commit-refusing blocker rather than a skipped ref. A
+declaration carrying redaction or sealed markers — copied from a redacted
+export — blocks the same way, whatever the kind's capability: writing it
+would replace the real secret with the mask (R12, #106).
+
+``absent`` is still parsed but refused, because no resource has declared
+evidence-backed deletion (D16, T11).
 """
 
 from __future__ import annotations
@@ -230,6 +239,10 @@ class Declared:
     origins: dict[str, Path] = dataclasses.field(default_factory=dict)
     #: The parsed declarations, in ref order.
     declarations: tuple[Declaration, ...] = ()
+    #: The registry the declarations were resolved against. Carried so
+    #: ``desired_for`` can reach each kind's materializer; None only in
+    #: hand-built test fixtures, which then get replace semantics.
+    registry: Registry | None = None
 
     def ordered_items(self) -> list[CandidateItem]:
         """Insertion order, deterministic because :func:`_yaml_files` sorts."""
@@ -239,7 +252,45 @@ class Declared:
         return self.items.get(ref.key())
 
     def desired_for(self, item: CandidateItem, current: Any) -> Any:
-        return materialize_desired(item, current)
+        """Materialize one declaration — the T8 seam.
+
+        Raises :class:`~pyecsdwan.contract.MaterializationBlocked` for a kind
+        that cannot prove a safe write; ``build_plan`` turns that into a plan
+        blocker and drift reports the row unreadable. The checks run in
+        trust order: markers first (they poison any kind), then the evidence
+        gate, then the resource's own materializer, which may itself block.
+        """
+        from pyecsdwan import evidence, redaction
+        from pyecsdwan.contract import (
+            DeclarativeCapability,
+            MaterializationBlocked,
+            Resource,
+        )
+
+        if self.registry is None:
+            return materialize_desired(item, current)
+        markers = redaction.find_markers(item.intent)
+        if markers:
+            where = ", ".join(markers[:5])
+            raise MaterializationBlocked(
+                f"{item.ref_key}: declaration carries redacted or sealed "
+                f"content at {where} — it was copied out of a redacted "
+                f"export, and writing it would replace the real secret with "
+                f"the mask. Restore the real content (R12)."
+            )
+        resource = self.registry.get(item.ref.kind)
+        effective, reason = evidence.declarative_gate(
+            resource.kind, resource.declarative
+        )
+        if effective is DeclarativeCapability.UNSUPPORTED:
+            if reason is not None:
+                raise MaterializationBlocked(reason)
+            # The base implementation, explicitly: it always raises, with the
+            # kind's name in the message. Calling the override here instead
+            # would let a kind that declares UNSUPPORTED while overriding the
+            # materializer slip a write past its own declaration.
+            return Resource.materialize_declared(resource, item.ref, item.intent, current)
+        return resource.materialize_declared(item.ref, item.intent, current)
 
     def __len__(self) -> int:
         return len(self.items)
@@ -481,7 +532,10 @@ def load(registry: Registry, root: Path) -> Declared:
         for d in declarations
     }
     declared = Declared(
-        items=items, origins=origins, declarations=tuple(declarations)
+        items=items,
+        origins=origins,
+        declarations=tuple(declarations),
+        registry=registry,
     )
     log.debug("desired_loaded", root=str(root), count=len(items), digest=declared.digest)
     return declared

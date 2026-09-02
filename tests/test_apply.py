@@ -188,7 +188,7 @@ def test_apply_refuses_to_write_until_materialization_is_proven(
     result = _cli(world, "apply", "--from", str(tmp_path))
 
     assert result.exit_code != 0
-    assert "not enabled yet" in result.output
+    assert "cannot write yet" in result.output
     assert _live_banners(world) == before
 
 

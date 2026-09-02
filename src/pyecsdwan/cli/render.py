@@ -48,6 +48,13 @@ def render_plan(console: Console, plan: txn.Plan) -> None:
         # owns this", which is only true if UNKNOWN prints too (#20).
         if item.ownership.blocks_write:
             console.print(Text(f"  {item.ownership.label}", style="bold yellow"))
+    # Blocked references come before the collision block for the same reason
+    # it comes before the warnings: each one is a commit that will be refused,
+    # and a dry-run that hid them would report a smaller intent set than the
+    # directory declares (T8).
+    for item in plan.blocked_items:
+        console.print(Text(f"[blocked {item.ref.key()}]", style="bold red"))
+        console.print(Text(f"  {item.blocked}", style="red"))
     # Ahead of the dim warnings and in red: a collision is not advice, it is a
     # commit that will be refused, and burying it among tier notes would let an
     # operator write the whole changeset before finding out (#69).
