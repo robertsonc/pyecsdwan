@@ -1206,11 +1206,39 @@ def _rollback_locked(
     for ref in reversed(refs):
         resource = registry.get(ref.kind)
         journal.append("APPLY_START", ref=ref.key(), rollback_restore=True)
+        if ref.key() not in snapshots:
+            # The same refusal `_revert_items` makes (#110): "no snapshot
+            # recorded" and "recorded as absent" both used to arrive here as
+            # None, and None tells `rollback()` to delete — so a snapshot the
+            # source journal lost deleted a resource that was there all along.
+            detail = (
+                "no pre-change snapshot recorded in the source journal, so there "
+                "is nothing to restore from; left as-is rather than deleted"
+            )
+            journal.append("APPLY_RESULT", ref=ref.key(), ok=False, message=detail)
+            failures.append(f"{ref}: {detail}")
+            continue
+        snap = snapshots[ref.key()]
         try:
-            result = resource.rollback(ctx, ref, snapshots.get(ref.key()))
+            result = resource.rollback(ctx, ref, snap)
             ok, detail = result.ok, result.message
+            report.jobs.extend(result.jobs)
         except Exception as exc:  # noqa: BLE001 - report every restore failure rather than abort the rest of the rollback
             ok, detail = False, f"{type(exc).__name__}: {exc}"
+        if ok:
+            # Re-read and compare, as the other two restore paths do (#103).
+            # A `rollback()` that lies was believed here: CONFIRMED, "restored
+            # 1 resource(s)", fabric unchanged.
+            item = PlanItem(
+                ref=ref,
+                resource=resource,
+                delete=False,
+                current_raw=None,
+                current=None,
+                desired=None,
+                diff=Diff(ref=ref),
+            )
+            ok, detail = _confirm_restored(ctx, item, snap, detail)
         journal.append("APPLY_RESULT", ref=ref.key(), ok=ok, message=detail)
         if ok:
             report.applied.append(ref.key())

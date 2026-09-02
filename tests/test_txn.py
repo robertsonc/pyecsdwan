@@ -744,3 +744,66 @@ def test_a_rollback_takes_the_lock_in_its_own_name(world: dict[str, Any]) -> Non
     assert report.ok
     assert seen["owner_txn"] == report.txn_id
     assert report.txn_id not in seen["orphans"]
+
+
+# -- the rollback <n> path: #103 and #110's second copies ---------------------
+
+
+def test_rollback_n_verifies_the_restore(world: dict[str, Any]) -> None:
+    """#103 on the third restore path. Auto-revert and `rollback --pending`
+    re-read the resource after restoring it; `rollback <n>` believed
+    `rollback()` on its own word — CONFIRMED, "restored 1 resource(s)", and
+    the fabric still holding the change."""
+
+    class Liar(FakeResource):
+        def rollback(self, ctx: Ctx, ref: Ref, snapshot: RawState) -> ApplyResult:
+            return ApplyResult(ok=True, message="restored")  # restores nothing
+
+    world["registry"].register(Liar(world["server"], kind="liar"))
+    for value in (1, 2):
+        world["candidate"].set_path(Ref("liar", "x"), ["v"], value)
+        assert txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"]).ok
+        world["candidate"].clear()
+
+    report = txn.rollback_history_txn(world["ctx"], world["registry"], world["settings"], n=1)
+
+    assert not report.ok
+    assert report.state == TxnState.REVERT_FAILED
+    assert any("does not match its pre-change snapshot" in m for m in report.messages)
+    assert world["server"].store["liar:x"] == {"v": 2}
+
+
+def test_rollback_n_refuses_a_lost_snapshot_instead_of_deleting(world: dict[str, Any]) -> None:
+    """#110's second copy: `_revert_items` refuses a missing snapshot;
+    `rollback <n>` read it with `.get()`, and None means "did not exist
+    before, remove it"."""
+    world["server"].store["alpha:one"] = {"v": "live and precious"}
+    source = TxnJournal.create(world["settings"].origin, [Ref("alpha", "one")])
+    source.append("APPLY_START", ref="alpha:one")
+    source.append("APPLY_RESULT", ref="alpha:one", ok=True)
+    source.set_state(TxnState.CONFIRMED)
+
+    report = txn.rollback_history_txn(world["ctx"], world["registry"], world["settings"], n=1)
+
+    assert not report.ok
+    assert report.state == TxnState.REVERT_FAILED
+    assert world["server"].store["alpha:one"] == {"v": "live and precious"}
+    assert any("nothing to restore from" in m for m in report.messages)
+
+
+def test_rollback_n_still_deletes_what_a_commit_created(world: dict[str, Any]) -> None:
+    """Guards the guard: a snapshot *recorded* as absent is not a lost one.
+    Rolling back the commit that created a resource removes it, and the
+    report says the deletion could not be independently confirmed rather
+    than claiming it read an absence."""
+    world["candidate"].set_path(Ref("alpha", "new"), ["v"], 1)
+    assert txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"]).ok
+    world["candidate"].clear()
+
+    report = txn.rollback_history_txn(world["ctx"], world["registry"], world["settings"], n=1)
+
+    assert report.ok
+    assert "alpha:new" not in world["server"].store
+    events = TxnJournal.open(list_txns()[0].dir).events()
+    results = [e for e in events if e["event"] == "APPLY_RESULT"]
+    assert results and "not independently confirmed" in results[0]["message"]
