@@ -173,9 +173,19 @@ class TxnJournal:
     # -- construction --------------------------------------------------------
 
     @classmethod
-    def create(cls, orch_origin: str, items: list[Ref], root: Path | None = None) -> TxnJournal:
+    def create(
+        cls,
+        orch_origin: str,
+        items: list[Ref],
+        root: Path | None = None,
+        txn_id: str | None = None,
+    ) -> TxnJournal:
+        """Start a journal. ``txn_id`` lets the caller name the transaction
+        *before* it exists on disk: ``commit`` takes the commit lock in that
+        name, so the lock's owner record can say which transaction a live
+        process is driving (#100)."""
         root = root if root is not None else config.journal_root()
-        txn_id = new_txn_id()
+        txn_id = txn_id or new_txn_id()
         txn_dir = root / txn_id
         txn_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
         _fsync_dir(root)  # make the new txn dir itself durable before we fill it
@@ -492,6 +502,14 @@ class TxnJournal:
         _fsync_dir(self.dir)
         return decision
 
+    def claimed_decision(self) -> str | None:
+        """The confirm-vs-revert decision already claimed for this transaction,
+        or ``None`` when nobody has claimed one yet."""
+        try:
+            return self.decision_claim.read_text().strip() or None
+        except OSError:
+            return None
+
     @property
     def watchdog_pid_file(self) -> Path:
         return self.dir / "watchdog.pid"
@@ -716,6 +734,41 @@ def _deadline_passed(txn: TxnJournal, grace_s: float) -> bool:
     return _dt.datetime.now(tz=_dt.timezone.utc) > deadline + _dt.timedelta(seconds=grace_s)
 
 
+def recovery_blocker(
+    txn: TxnJournal, *, self_pid: int | None = None, grace_s: float = 120
+) -> str | None:
+    """Why a restore of ``txn`` must stand down *now*, or ``None`` if it may go.
+
+    The orphan scan decides from outside the commit lock, and everything it
+    learned is stale by the time recovery holds the lock (#100): the commit it
+    queued behind may have finished into a confirm window, and a confirm may
+    have landed. So recovery asks again, from what is on disk now, once the
+    lock is its own. :func:`_driven_now` cannot answer here — the owner record
+    it would read is the caller's — but under the lock only two things can
+    still be driving a transaction: a confirm that has been decided (marker
+    or claim), and a live watchdog. The watchdog is another process unless the
+    caller *is* the watchdog, which passes its own pid.
+
+    A deadline more than ``grace_s`` in the past outranks a live-looking pid,
+    as it does in the scan: that is the recycled-pid case, and the window it
+    belonged to is long over.
+    """
+    if txn.meta.state in TxnState.TERMINAL:
+        return f"it reached {txn.meta.state}"
+    if txn.confirm_marker.exists():
+        return "it has been confirmed"
+    if txn.claimed_decision() == "confirm":
+        return "a confirm has already claimed the decision for it"
+    if _deadline_passed(txn, grace_s):
+        return None
+    if txn.watchdog_alive() and txn.watchdog_pid() != self_pid:
+        return (
+            f"a live watchdog (pid {txn.watchdog_pid()}) is driving its confirm "
+            f"window — confirm it with 'ec-cli commit', or let the window expire"
+        )
+    return None
+
+
 def prune_history(keep: int, root: Path | None = None, origin: str | None = None,
                   audit_keep: int = 200) -> int:
     """Prune terminal transactions, counting rollback history and audit
@@ -725,6 +778,12 @@ def prune_history(keep: int, root: Path | None = None, origin: str | None = None
     import shutil
 
     scoped = _for_origin(list_txns(root), origin)
+    if origin is not None:
+        # An origin-scoped prune deletes only what that origin provably owns.
+        # A legacy journal is matched on a hostname, which is shared: pruned
+        # from tenant-a's history it would take tenant-b's rollback point with
+        # it (#63). They wait for adoption, or for an unscoped prune.
+        scoped = [t for t in scoped if not is_legacy(t)]
     history = [t for t in scoped if t.meta.state == TxnState.CONFIRMED]
     audit_and_dead = [
         t for t in scoped

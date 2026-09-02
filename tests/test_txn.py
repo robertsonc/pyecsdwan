@@ -563,14 +563,20 @@ def test_rollback_takes_the_commit_lock(world: dict[str, Any], lock_holder: Any)
 
 
 def test_watchdog_revert_takes_the_commit_lock(
-    world: dict[str, Any], lock_holder: Any
+    world: dict[str, Any], lock_holder: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The watchdog's revert coordinates through the same lock.
 
     It waits far longer for it than an interactive command would, but it does
     take it: a revert interleaving with a commit already in flight would
     snapshot and restore half of that commit's work.
+
+    The revert below stands in for the watchdog's and is made from *this*
+    process, so the window must have no live watchdog of its own: recovery
+    re-checks that under the lock (#100) and would — rightly — refuse to
+    restore a window another process is still driving.
     """
+    monkeypatch.setattr("pyecsdwan.watchdog.arm", lambda *a, **k: 4_000_000)
     world["candidate"].set_path(Ref("alpha", "one"), ["speed"], 10)
     report = txn.commit(
         world["ctx"], world["registry"], _plan(world), world["settings"], confirm_minutes=5
@@ -602,3 +608,139 @@ def test_revert_default_lock_wait_is_generous() -> None:
     # the unconfirmed change applied — the one outcome the confirm window
     # exists to prevent.
     assert txn.REVERT_LOCK_TIMEOUT >= 600.0
+
+
+# -- the rollback <n> path: provenance and the commit lock (#120, #100) ------
+
+
+def _confirmed_legacy(world: dict[str, Any], snapshot: dict[str, Any]) -> TxnJournal:
+    """A CONFIRMED journal as a pre-#63 build wrote it: a hostname, no origin."""
+    import json
+
+    ref = Ref("alpha", "one")
+    legacy = TxnJournal.create(world["settings"].origin, [ref])
+    legacy.record_snapshot(ref, snapshot)
+    legacy.append("APPLY_START", ref=ref.key())
+    legacy.append("APPLY_RESULT", ref=ref.key(), ok=True)
+    legacy.set_state(TxnState.CONFIRMED)
+    meta = json.loads((legacy.dir / "meta.json").read_text())
+    del meta["orch_origin"]
+    meta["format"] = 1
+    (legacy.dir / "meta.json").write_text(json.dumps(meta))
+    return TxnJournal.open(legacy.dir)
+
+
+def test_rollback_n_does_not_restore_an_unadopted_legacy_journal(world: dict[str, Any]) -> None:
+    """`confirm` and `rollback --pending` refuse a journal whose target is a
+    hostname guess; `rollback <n>` selected it by number and wrote its
+    snapshots into this fabric — the write #120 exists to prevent, through the
+    one restore path it did not cover."""
+    world["server"].store["alpha:one"] = {"v": "this tenant, live"}
+    legacy = _confirmed_legacy(world, {"v": "some other tenant"})
+
+    report = txn.rollback_history_txn(world["ctx"], world["registry"], world["settings"], n=1)
+
+    assert not report.ok
+    assert world["server"].store["alpha:one"] == {"v": "this tenant, live"}
+    assert "history depth is 0" in report.messages[0]
+    # Named, not hidden: the operator can see it in `show journal`, and the
+    # way out is adoption from the Orchestrator it actually belongs to.
+    assert any("ec-cli adopt --txn" in m for m in report.messages)
+    assert TxnJournal.open(legacy.dir).meta.state == TxnState.CONFIRMED
+
+
+def test_rollback_n_numbers_only_what_it_may_restore_and_says_so(
+    world: dict[str, Any],
+) -> None:
+    """Journals newest-first: [real 2, legacy, real 1]. `rollback 2` is real 1,
+    not the legacy journal between them — and the report says one was
+    skipped, because the numbering an operator counted in `show journal`
+    includes it and this numbering does not."""
+    world["server"].store["alpha:one"] = {"v": 0}
+    world["candidate"].set_path(Ref("alpha", "one"), ["v"], 1)
+    assert txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"]).ok
+    world["candidate"].clear()
+    _confirmed_legacy(world, {"v": "some other tenant"})
+    world["candidate"].set_path(Ref("alpha", "one"), ["v"], 2)
+    assert txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"]).ok
+    world["candidate"].clear()
+
+    report = txn.rollback_history_txn(world["ctx"], world["registry"], world["settings"], n=2)
+
+    assert report.ok
+    assert world["server"].store["alpha:one"] == {"v": 0}
+    assert any("not numbered until adopted" in m for m in report.messages)
+
+
+def test_adoption_puts_a_legacy_journal_back_in_the_rollback_history(
+    world: dict[str, Any],
+) -> None:
+    """Guards the guard: excluded until adopted, not forever."""
+    from pyecsdwan import journal as journal_mod
+
+    world["server"].store["alpha:one"] = {"v": "live"}
+    legacy = _confirmed_legacy(world, {"v": "before"})
+    journal_mod.adopt(legacy, world["settings"].origin)
+
+    report = txn.rollback_history_txn(world["ctx"], world["registry"], world["settings"], n=1)
+
+    assert report.ok
+    assert world["server"].store["alpha:one"] == {"v": "before"}
+    assert not any("not numbered" in m for m in report.messages)
+
+
+class _LockProbe(FakeResource):
+    """Records, from inside the write, who the commit lock says is driving."""
+
+    def __init__(self, server: FakeServer, origin: str, seen: dict[str, Any]) -> None:
+        super().__init__(server, kind="probe")
+        self.origin = origin
+        self.seen = seen
+
+    def _look(self) -> None:
+        from pyecsdwan.journal import orphaned_txns
+        from pyecsdwan.locking import HostLock
+
+        owner = HostLock(self.origin, "commit", timeout=0.0).read_owner()
+        self.seen["owner_txn"] = owner.txn_id if owner is not None else None
+        self.seen["orphans"] = [t.meta.txn_id for t in orphaned_txns(origin=self.origin)]
+
+    def apply(self, ctx: Ctx, diff: Diff) -> ApplyResult:
+        self._look()
+        return super().apply(ctx, diff)
+
+    def rollback(self, ctx: Ctx, ref: Ref, snapshot: RawState) -> ApplyResult:
+        self._look()
+        return super().rollback(ctx, ref, snapshot)
+
+
+def test_a_commit_takes_the_lock_in_its_own_name(world: dict[str, Any]) -> None:
+    """#100's orphan scan matches the commit lock's owner record on txn_id.
+    `commit` took the lock in no name, so the record matched nothing and a
+    commit running in another terminal read as an orphan. Asserted from
+    inside `apply`, where the commit is in flight and has no watchdog."""
+    seen: dict[str, Any] = {}
+    world["registry"].register(_LockProbe(world["server"], world["settings"].origin, seen))
+    world["candidate"].set_path(Ref("probe", "x"), ["v"], 1)
+
+    report = txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"])
+
+    assert report.ok
+    assert seen["owner_txn"] == report.txn_id
+    assert report.txn_id not in seen["orphans"]
+
+
+def test_a_rollback_takes_the_lock_in_its_own_name(world: dict[str, Any]) -> None:
+    """A `rollback <n>` in flight is an APPLYING transaction too."""
+    seen: dict[str, Any] = {}
+    world["registry"].register(_LockProbe(world["server"], world["settings"].origin, seen))
+    world["candidate"].set_path(Ref("probe", "x"), ["v"], 1)
+    assert txn.commit(world["ctx"], world["registry"], _plan(world), world["settings"]).ok
+    world["candidate"].clear()
+    seen.clear()
+
+    report = txn.rollback_history_txn(world["ctx"], world["registry"], world["settings"], n=1)
+
+    assert report.ok
+    assert seen["owner_txn"] == report.txn_id
+    assert report.txn_id not in seen["orphans"]
