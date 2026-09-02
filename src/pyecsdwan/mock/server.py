@@ -1471,6 +1471,38 @@ def _seed_regional_overlays() -> dict[str, dict[str, Any]]:
 
 
 # -- end regions (#35) seed data ----------------------------------------------
+# -- appliance extra info ------------------------------------------------------
+#   GET  /appliance/extraInfo?nePk= -> {"contact": {...}, "location": {...},
+#                                       "overlaySettings": {...}}
+#   POST /appliance/extraInfo?nePk= -> replaces the object wholesale
+# Seeded the way a preconfigured lab arrives: a city per appliance, every
+# country left at its default, contact and overlay settings untouched — the
+# exact state resources/appliance_info.py exists to correct.
+
+
+def _seed_appliance_extra_info() -> dict[str, dict[str, Any]]:
+    def info(city: str, state: str) -> dict[str, Any]:
+        return {
+            "contact": {"email": "", "name": "", "phoneNumber": ""},
+            "location": {
+                "address": "",
+                "address2": "",
+                "city": city,
+                "country": "US",
+                "state": state,
+                "zipCode": "",
+            },
+            "overlaySettings": {"ipsecUdpPort": "", "isUserDefinedIPSecUDPPort": False},
+        }
+
+    return {
+        "1.NE": info("Denver", "CO"),
+        "3.NE": info("Toronto", "ON"),
+        "5.NE": info("Austin", "TX"),
+    }
+
+
+# -- end appliance extra info seed data ---------------------------------------
 
 
 # -- acls / ipObjects / appExpress (#31) --------------------------------------
@@ -1927,6 +1959,11 @@ class MockState:
     #: {overlayId: {regionId: overlay config}}, region-scope-merged by
     #: PUT /gms/overlays/config/regions.
     regional_overlays: dict[str, dict[str, Any]] = field(default_factory=_seed_regional_overlays)
+    # -- appliance extra info --
+    #: {nePk: ApplianceExtraInfo}, replaced wholesale by POST /appliance/extraInfo.
+    appliance_extra_info: dict[str, dict[str, Any]] = field(
+        default_factory=_seed_appliance_extra_info
+    )
     # -- nat (#32) --
     #: Fabric-wide disabled inter-segment S-NAT rules, replaced wholesale by
     #: POST /vrf/config/snatMaps. The appliance-scope NAT tables (natMaps,
@@ -2998,6 +3035,34 @@ def create_app(state: MockState | None = None) -> FastAPI:
         return Response(status_code=204)
 
     # -- end priorities (#36) -------------------------------------------------
+    # -- appliance extra info -------------------------------------------------
+
+    def _known_ne_pk(ne_pk: str) -> bool:
+        return any(str(a.get("nePk")) == ne_pk for a in mock.appliances)
+
+    @api.get("/appliance/extraInfo")
+    async def get_appliance_extra_info(nePk: str) -> Any:
+        if not _known_ne_pk(nePk):
+            return JSONResponse({"error": f"no appliance {nePk!r}"}, status_code=404)
+        # An appliance nobody has saved info for answers an empty object, the
+        # shape a fresh appliance has: a fixture that omitted it would let a
+        # None-versus-{} confusion in the resource go unnoticed.
+        return mock.appliance_extra_info.get(nePk, {})
+
+    @api.post("/appliance/extraInfo")
+    async def save_appliance_extra_info(request: Request, nePk: str) -> Response:
+        if not _known_ne_pk(nePk):
+            return JSONResponse({"error": f"no appliance {nePk!r}"}, status_code=404)
+        body = await _json_body(request)
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "body must be an ApplianceExtraInfo object"}, status_code=400
+            )
+        # Replaced wholesale — the body is the new object, not a patch.
+        # Unknown fields pass through, like every other handler here.
+        mock.appliance_extra_info[nePk] = copy.deepcopy(body)
+        return Response(status_code=200)
+
     # -- regions (#35) --------------------------------------------------------
 
     def _region_record(region_id: int) -> dict[str, Any] | None:

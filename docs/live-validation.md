@@ -7,7 +7,8 @@ down so the claim means something to the next operator.
 is how carefully a resource was written and is decided in a code review. This
 covers **evidence**, which is what someone has watched it do on real gear.
 Neither substitutes for the other. A resource can be immaculately curated and
-have never touched a fabric — today, all 41 of them are.
+have never touched a fabric — three of the 42 still have not, and only three
+have been changed and rolled back on one.
 
 `ec-cli show coverage --evidence` reports where every kind stands, offline.
 
