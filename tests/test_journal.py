@@ -350,3 +350,25 @@ def test_repair_is_idempotent_across_consecutive_appends(state_home):
 
     repairs = [e for e in txn.events() if e["event"] == "JOURNAL_REPAIRED"]
     assert len(repairs) == 1
+
+
+def test_an_origin_scoped_prune_never_deletes_a_legacy_journal(state_home, sequential_txn_ids):
+    """A pre-#63 journal is matched on a hostname two tenants share. Pruned
+    from tenant-a's history it would take tenant-b's rollback point with it;
+    it waits for adoption, or for a prune that is not scoped to anyone."""
+    import json
+
+    legacy = _create()
+    legacy.set_state(TxnState.CONFIRMED)
+    meta = json.loads((legacy.dir / "meta.json").read_text())
+    del meta["orch_origin"]
+    meta["format"] = 1
+    (legacy.dir / "meta.json").write_text(json.dumps(meta))
+    for _ in range(2):
+        _create().set_state(TxnState.CONFIRMED)
+
+    assert prune_history(keep=1, origin="https://orch.example.com") == 1
+    assert legacy.dir.exists()
+
+    assert prune_history(keep=1) == 1
+    assert not legacy.dir.exists()

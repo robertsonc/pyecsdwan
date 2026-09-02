@@ -18,6 +18,7 @@ nothing: the locks are deliberately re-entrant per process, so an in-process
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import subprocess
 import sys
@@ -30,26 +31,40 @@ import pytest
 
 from pyecsdwan import txn
 from pyecsdwan.contract import Ref
-from pyecsdwan.journal import TxnJournal, TxnState, orphaned_txns
+from pyecsdwan.journal import TxnJournal, TxnState, orphaned_txns, recovery_blocker
 
 HOST = "orch.example.com"
 REF = Ref("appliance/banners", "global", appliance="BR1-EC")
 
-#: Holds the commit lock for one transaction, then optionally settles it.
+#: Holds the commit lock for one transaction the way `commit` does — taken
+#: in the transaction's name, which is what the orphan scan matches on — then
+#: optionally settles it, or finishes into a confirm window and stays alive
+#: as its watchdog.
 _HOLDER = """
-import sys, time
+import datetime as dt, os, sys, time
 from pathlib import Path
 from pyecsdwan.journal import TxnJournal, TxnState
 from pyecsdwan.locking import HostLock
 
-host, txn_id, ready, go, txn_dir, settle = sys.argv[1:7]
+host, txn_id, ready, go, txn_dir, mode = sys.argv[1:7]
 with HostLock(host, "commit", timeout=20.0, txn_id=txn_id):
     Path(ready).write_text("ready")
     deadline = time.monotonic() + 30
     while not Path(go).exists() and time.monotonic() < deadline:
         time.sleep(0.02)
-    if settle == "settle":
+    if mode == "settle":
         TxnJournal.open(Path(txn_dir)).set_state(TxnState.CONFIRMED)
+    if mode == "window":
+        # What `commit --confirm-minutes` leaves behind: unconfirmed, a
+        # deadline ahead, and a live watchdog — this process.
+        journal = TxnJournal.open(Path(txn_dir))
+        journal.set_confirm_deadline(
+            dt.datetime.now(tz=dt.timezone.utc) + dt.timedelta(minutes=10)
+        )
+        journal.write_watchdog_pid(os.getpid())
+        journal.set_state(TxnState.APPLIED_UNCONFIRMED)
+if mode == "window":
+    time.sleep(300)  # the watchdog outlives the lock; the fixture kills it
 """
 
 
@@ -57,14 +72,16 @@ with HostLock(host, "commit", timeout=20.0, txn_id=txn_id):
 def holder(state_home: Any, tmp_path: Path) -> Any:
     procs: list[subprocess.Popen[str]] = []
 
-    def _start(journal: TxnJournal, settle: bool = False) -> tuple[Path, Path]:
+    def _start(
+        journal: TxnJournal, settle: bool = False, mode: str | None = None
+    ) -> tuple[Path, Path]:
+        mode = mode or ("settle" if settle else "no")
         ready = tmp_path / f"ready-{journal.meta.txn_id}"
         go = tmp_path / f"go-{journal.meta.txn_id}"
         proc = subprocess.Popen(
             [
                 sys.executable, "-c", _HOLDER, HOST, journal.meta.txn_id,
-                str(ready), str(go), str(journal.dir),
-                "settle" if settle else "no",
+                str(ready), str(go), str(journal.dir), mode,
             ],
             env=dict(os.environ, ECSDWAN_HOME=str(state_home)),
             text=True,
@@ -220,3 +237,108 @@ def test_recovery_refuses_an_already_terminal_transaction(state_home: Any) -> No
 
     assert not report.ok
     assert any("refusing recovery" in m for m in report.messages)
+
+
+def test_recovery_refuses_a_window_that_opened_while_it_waited(
+    state_home: Any, holder: Any
+) -> None:
+    """The other half of the race, and the destructive one.
+
+    The live commit finishes not into CONFIRMED but into a confirm window:
+    unconfirmed, watchdog armed, lock released. That state is not terminal,
+    so the compare-and-set above let recovery through — and it restored
+    snapshots over a change the operator was about to confirm, with the
+    startup warning that sent them to `rollback --pending` as the only trace.
+    Recovery re-runs the orphan test under the lock now.
+    """
+    journal = _applying()
+    proc, go = holder(journal, mode="window")
+
+    result: dict[str, Any] = {}
+
+    def recover() -> None:
+        result["report"] = txn.revert_txn_dir(
+            journal.dir, reason="orphan recovery", lock_timeout=30.0
+        )
+
+    thread = threading.Thread(target=recover)
+    thread.start()
+    time.sleep(0.3)          # let the recovery reach the lock and block
+    go.write_text("go")      # holder opens the window and releases the lock
+    thread.join(timeout=40)
+    assert not thread.is_alive(), "recovery never returned"
+
+    report = result["report"]
+    assert not report.ok
+    assert report.state == TxnState.APPLIED_UNCONFIRMED
+    assert any("not orphaned" in m and str(proc.pid) in m for m in report.messages)
+    assert TxnJournal.open(journal.dir).meta.state == TxnState.APPLIED_UNCONFIRMED
+
+    # Guards the guard: with that watchdog gone the window is an orphan again.
+    proc.kill()
+    proc.wait()
+    assert recovery_blocker(TxnJournal.open(journal.dir)) is None
+
+
+# -- the under-lock orphan test itself ----------------------------------------
+
+
+def _window(deadline_offset_s: float = 600) -> TxnJournal:
+    journal = _applying(TxnState.APPLIED_UNCONFIRMED)
+    journal.set_confirm_deadline(
+        dt.datetime.now(tz=dt.timezone.utc) + dt.timedelta(seconds=deadline_offset_s)
+    )
+    return journal
+
+
+@pytest.fixture
+def bystander() -> Any:
+    """A live process that is not this one."""
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+    yield proc
+    proc.kill()
+    proc.wait()
+
+
+def test_a_live_watchdog_blocks_recovery_unless_the_caller_is_that_watchdog(
+    state_home: Any, bystander: Any
+) -> None:
+    journal = _window()
+    journal.write_watchdog_pid(bystander.pid)
+
+    blocker = recovery_blocker(journal)
+    assert blocker is not None and str(bystander.pid) in blocker
+    # The watchdog's own revert at the deadline is the one caller let through.
+    assert recovery_blocker(journal, self_pid=bystander.pid) is None
+
+
+def test_a_long_expired_deadline_outranks_a_live_looking_pid(
+    state_home: Any, bystander: Any
+) -> None:
+    """The recycled-pid rule, the same one the scan applies."""
+    journal = _window(deadline_offset_s=-600)
+    journal.write_watchdog_pid(bystander.pid)
+
+    assert recovery_blocker(journal) is None
+
+
+def test_a_decided_confirm_blocks_recovery(state_home: Any) -> None:
+    marked = _window()
+    marked.write_confirm_marker()
+    assert "confirmed" in (recovery_blocker(marked) or "")
+
+    claimed = _window()
+    assert claimed.try_claim("confirm") == "confirm"
+    assert "claimed" in (recovery_blocker(claimed) or "")
+
+
+def test_a_dead_watchdog_leaves_recovery_free(state_home: Any) -> None:
+    """Guards the guard: a rule that protected every window would leave real
+    orphans stranded forever."""
+    journal = _window()
+    dead = subprocess.Popen([sys.executable, "-c", ""])
+    dead.wait()
+    journal.write_watchdog_pid(dead.pid)
+    assert journal.try_claim("revert") == "revert"
+
+    assert recovery_blocker(journal) is None

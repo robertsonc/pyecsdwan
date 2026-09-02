@@ -300,20 +300,160 @@ def test_cli_update_then_diff_is_in_sync(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# URL fetch (respx-mocked; still no live Orchestrator)
+# URL fetch (respx-mocked; still no live Orchestrator), and where the API key
+# may go (#99)
+
+ORCH = "https://orch.example.com"
+DOC = {"openapi": "3.0.0", "paths": {}}
+
+
+def _ok(url):
+    return respx.get(url).mock(return_value=httpx.Response(200, json=DOC))
+
+
+def _main(*argv):
+    """The CLI in-process, so the mocked transport sees its requests."""
+    return spec_sync.main(
+        ["--diff", "--spec", "orchestrator", "--specs-dir", str(FIXTURE_SPECS_DIR), *argv]
+    )
 
 
 @respx.mock
-def test_load_spec_from_url_sends_api_key_header(monkeypatch):
+def test_a_url_source_is_fetched_unauthenticated_by_default(monkeypatch):
+    """The tool used to add the key to every URL it was pointed at, so a
+    vendor's public spec URL received the Orchestrator credential on the first
+    request — and this test's predecessor asserted that it did. The default is
+    no credential at all, however the environment is set."""
     monkeypatch.setenv("ECSDWAN_API_KEY", "test-key")
-    route = respx.get("https://orch.example.com/gms/rest/apiDocs").mock(
-        return_value=httpx.Response(200, json={"openapi": "3.0.0", "paths": {}})
-    )
-    spec = spec_sync.load_spec(
-        "https://orch.example.com/gms/rest/apiDocs", timeout=5.0, insecure=False
-    )
+    monkeypatch.setenv("ECSDWAN_ORCH_URL", ORCH)
+    route = _ok(f"{ORCH}/gms/rest/apiDocs")
+
+    spec = spec_sync.load_spec(f"{ORCH}/gms/rest/apiDocs", timeout=5.0, insecure=False)
+
     assert spec["openapi"] == "3.0.0"
+    assert "X-Auth-Token" not in route.calls.last.request.headers
+
+    rc = _main("--source", f"{ORCH}/gms/rest/apiDocs")
+    assert rc != 2
+    assert "X-Auth-Token" not in route.calls.last.request.headers
+
+
+@respx.mock
+def test_with_api_key_sends_it_to_the_configured_origin(monkeypatch):
+    monkeypatch.setenv("ECSDWAN_API_KEY", "test-key")
+    monkeypatch.setenv("ECSDWAN_ORCH_URL", ORCH)
+    route = _ok(f"{ORCH}/gms/rest/apiDocs")
+
+    rc = _main("--source", f"{ORCH}/gms/rest/apiDocs", "--with-api-key")
+
+    assert rc != 2
     assert route.calls.last.request.headers["X-Auth-Token"] == "test-key"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "https://vendor.example.net/openapi.json",  # another host
+        "http://orch.example.com/gms/rest/apiDocs",  # the same host, over http
+        # another port is another Orchestrator (#63)
+        "https://orch.example.com:8443/gms/rest/apiDocs",
+        "https://attacker.example.net@orch.example.com/gms/rest/apiDocs",  # userinfo
+    ],
+)
+@respx.mock
+def test_with_api_key_refuses_anything_but_the_configured_origin(monkeypatch, capsys, source):
+    """Refused before any request is made — not sent and then regretted."""
+    monkeypatch.setenv("ECSDWAN_API_KEY", "test-key")
+    monkeypatch.setenv("ECSDWAN_ORCH_URL", ORCH)
+    anywhere = respx.get(url__regex=r".*").mock(return_value=httpx.Response(200, json=DOC))
+
+    rc = _main("--source", source, "--with-api-key")
+
+    assert rc == 2
+    assert not anywhere.called
+    err = capsys.readouterr().err
+    assert "refusing" in err
+    assert "test-key" not in err
+
+
+@respx.mock
+def test_with_api_key_never_goes_over_http_even_to_the_configured_orchestrator(
+    monkeypatch, capsys
+):
+    """An http:// Orchestrator is a legitimate target for the CLI (#120 keeps
+    it distinct from https://), but a key over plaintext is a key for whoever
+    is on the path. The origin match alone would let this one through."""
+    monkeypatch.setenv("ECSDWAN_API_KEY", "test-key")
+    monkeypatch.setenv("ECSDWAN_ORCH_URL", "http://orch.example.com")
+    route = _ok("http://orch.example.com/gms/rest/apiDocs")
+
+    rc = _main("--source", "http://orch.example.com/gms/rest/apiDocs", "--with-api-key")
+
+    assert rc == 2
+    assert not route.called
+    err = capsys.readouterr().err
+    assert "over http" in err
+    assert "test-key" not in err
+
+
+def test_with_api_key_needs_to_know_which_orchestrator_the_key_belongs_to(monkeypatch, capsys):
+    monkeypatch.setenv("ECSDWAN_API_KEY", "test-key")
+    monkeypatch.delenv("ECSDWAN_ORCH_URL", raising=False)
+
+    assert _main("--source", f"{ORCH}/gms/rest/apiDocs", "--with-api-key") == 2
+    assert "ECSDWAN_ORCH_URL" in capsys.readouterr().err
+
+
+def test_the_origin_match_folds_case_and_the_default_port(monkeypatch):
+    monkeypatch.setenv("ECSDWAN_API_KEY", "test-key")
+    monkeypatch.setenv("ECSDWAN_ORCH_URL", "orch.example.com")  # scheme-less, as the CLI allows
+
+    key = spec_sync.authenticated_key("https://ORCH.example.com:443/gms/rest/apiDocs")
+    assert key == "test-key"
+
+
+@respx.mock
+def test_a_same_origin_redirect_is_followed_and_keeps_the_key():
+    respx.get(f"{ORCH}/apiDocs").mock(
+        return_value=httpx.Response(302, headers={"location": "/gms/rest/apiDocs"})
+    )
+    final = _ok(f"{ORCH}/gms/rest/apiDocs")
+
+    spec = spec_sync.load_spec(f"{ORCH}/apiDocs", timeout=5.0, insecure=False, api_key="test-key")
+
+    assert spec == DOC
+    assert final.calls.last.request.headers["X-Auth-Token"] == "test-key"
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://vendor.example.net/openapi.json",  # cross-origin
+        "http://orch.example.com/gms/rest/apiDocs",  # https -> http downgrade
+        "https://orch.example.com:8443/apiDocs",  # another port
+    ],
+)
+@respx.mock
+def test_a_redirect_off_the_origin_is_refused_and_receives_nothing(location):
+    """httpx drops Authorization across origins and keeps a custom header, so
+    following this redirect would have carried the token wherever it pointed."""
+    respx.get(f"{ORCH}/apiDocs").mock(
+        return_value=httpx.Response(302, headers={"location": location})
+    )
+    elsewhere = respx.get(location).mock(return_value=httpx.Response(200, json=DOC))
+
+    with pytest.raises(spec_sync.SpecSyncError, match="refusing to follow") as caught:
+        spec_sync.load_spec(f"{ORCH}/apiDocs", timeout=5.0, insecure=False, api_key="test-key")
+
+    assert not elsewhere.called
+    assert "test-key" not in str(caught.value)
+
+
+@respx.mock
+def test_a_redirect_loop_ends():
+    respx.get(f"{ORCH}/loop").mock(return_value=httpx.Response(302, headers={"location": "/loop"}))
+    with pytest.raises(spec_sync.SpecSyncError, match="too many redirects"):
+        spec_sync.load_spec(f"{ORCH}/loop", timeout=5.0, insecure=False)
 
 
 @respx.mock
