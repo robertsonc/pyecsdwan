@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from pyecsdwan import config
+from pyecsdwan import journal as _journal
 from pyecsdwan import watchdog as _watchdog
 from pyecsdwan.candidate import CandidateItem, CandidateStore, IntentSource, materialize_desired
 from pyecsdwan.contract import (
@@ -61,6 +62,7 @@ from pyecsdwan.journal import (
     is_legacy,
     orphaned_txns,
     prune_history,
+    recovery_blocker,
     targets,
 )
 from pyecsdwan.locking import DEFAULT_TIMEOUT, HostLock
@@ -341,10 +343,18 @@ def commit(
 
     _guard(changed, settings, confirm_minutes, force, override_template, allow_untransactional)
 
+    # Named before the lock is taken, so the lock's owner record carries the
+    # id. The orphan scan tells a commit that is *running* from one whose
+    # driver died by matching that record's txn_id (#100); a lock taken in no
+    # name matched nothing, so every live commit read as an orphan, and a
+    # recovery queued behind it restored the window it had just opened.
+    txn_id = _journal.new_txn_id()
     # Held across snapshot, apply, verify and any auto-revert: a second commit
     # that interleaved with this one could snapshot state this commit is
     # midway through writing, and then "restore" it later.
-    with HostLock(settings.origin, "commit", root=lock_root, timeout=lock_timeout):
+    with HostLock(
+        settings.origin, "commit", root=lock_root, timeout=lock_timeout, txn_id=txn_id
+    ):
         return _commit_locked(
             ctx,
             changed,
@@ -353,6 +363,7 @@ def commit(
             journal_root,
             rebase,
             override_template,
+            txn_id,
         )
 
 
@@ -505,9 +516,12 @@ def _commit_locked(
     journal_root: Path | None,
     rebase: bool,
     override_template: bool,
+    txn_id: str | None = None,
 ) -> CommitReport:
     _guard_no_pending_confirm(settings, journal_root)
-    journal = TxnJournal.create(settings.origin, [i.ref for i in changed], root=journal_root)
+    journal = TxnJournal.create(
+        settings.origin, [i.ref for i in changed], root=journal_root, txn_id=txn_id
+    )
     report = CommitReport(ok=False, txn_id=journal.meta.txn_id)
 
     # Snapshot-before-write: re-fetch every resource at commit time so the
@@ -910,7 +924,9 @@ def confirm_pending(
     marker, stop the watchdog. Scoped to ``settings.origin`` so a confirm against
     one Orchestrator can never finalize an unconfirmed change on another."""
 
-    with HostLock(settings.origin, "commit", root=lock_root, timeout=lock_timeout):
+    with HostLock(
+        settings.origin, "commit", root=lock_root, timeout=lock_timeout, txn_id=txn_id
+    ):
         return _confirm_locked(settings, journal_root, txn_id)
 
 
@@ -1052,6 +1068,23 @@ def revert_txn_dir(
                     f"transaction"
                 ],
             )
+        # Terminal is not the only way a transaction stops being recoverable
+        # while recovery waited. The commit it queued behind can finish into a
+        # confirm window — APPLIED_UNCONFIRMED, watchdog armed, lock released
+        # — and a scan that listed it as an orphan *before* that commit even
+        # started would now restore over a window an operator is about to
+        # confirm. Asked again here, from disk, with the lock held (#100).
+        blocker = recovery_blocker(fresh, self_pid=os.getpid())
+        if blocker is not None:
+            return CommitReport(
+                ok=False,
+                txn_id=fresh.meta.txn_id,
+                state=fresh.meta.state,
+                messages=[
+                    f"refusing recovery: transaction {fresh.meta.txn_id} is not "
+                    f"orphaned — {blocker}"
+                ],
+            )
         # `fresh`, not the pre-lock `journal`. No test can tell them apart
         # today — the callee reads `applied_refs()` and `snapshots()` from
         # disk and touches `.meta` only for the host, which cannot change —
@@ -1150,9 +1183,15 @@ def rollback_history_txn(
     transaction's pre-change snapshots, journaled as a new transaction.
 
     Under the same commit lock as everything else that writes to the fabric —
-    a rollback racing a commit would snapshot and restore half of it."""
-    with HostLock(settings.origin, "commit", root=lock_root, timeout=lock_timeout):
-        return _rollback_locked(ctx, registry, settings, n, journal_root)
+    a rollback racing a commit would snapshot and restore half of it. Taken in
+    the name of the rollback transaction for the same reason ``commit`` does:
+    a rollback in flight is an APPLYING transaction another terminal's orphan
+    scan would otherwise offer for recovery (#100)."""
+    txn_id = _journal.new_txn_id()
+    with HostLock(
+        settings.origin, "commit", root=lock_root, timeout=lock_timeout, txn_id=txn_id
+    ):
+        return _rollback_locked(ctx, registry, settings, n, journal_root, txn_id)
 
 
 def _rollback_locked(
@@ -1161,13 +1200,28 @@ def _rollback_locked(
     settings: config.Settings,
     n: int,
     journal_root: Path | None,
+    txn_id: str | None = None,
 ) -> CommitReport:
-    history = committed_history(journal_root, origin=settings.origin)
+    # `committed_history` lists by `targets()`: the broad, hostname-level match
+    # for showing an operator what might be theirs. Restoring is a write into
+    # this fabric and takes the exact match, as `confirm` and `rollback
+    # --pending` already do — an unadopted pre-#63 journal on a shared
+    # hostname is *listed* here and authorizes nothing, and this path used to
+    # select it by number and write its snapshots into whichever tenant asked.
+    listed = committed_history(journal_root, origin=settings.origin)
+    history = [t for t in listed if authorizes(t, settings.origin)]
+    unproven = [t for t in listed if is_legacy(t)]
+    excluded = (
+        f"{len(unproven)} confirmed transaction(s) written before this build recorded "
+        f"targets are listed but not numbered until adopted: run "
+        f"'ec-cli adopt --txn <id>' connected to the Orchestrator they belong to"
+    )
     if n < 1 or n > len(history):
+        note = f"no such rollback point {n}; history depth is {len(history)}"
         return CommitReport(
             ok=False,
             state="NONE",
-            messages=[f"no such rollback point {n}; history depth is {len(history)}"],
+            messages=[note, excluded] if unproven else [note],
         )
     source = history[n - 1]
     applied = source.applied_refs()
@@ -1180,9 +1234,13 @@ def _rollback_locked(
     snapshots = source.snapshots()
 
     refs = [Ref.from_key(k) for k in applied]
-    journal = TxnJournal.create(settings.origin, refs, root=journal_root)
+    journal = TxnJournal.create(settings.origin, refs, root=journal_root, txn_id=txn_id)
     journal.append("ROLLBACK_OF", source_txn=source.meta.txn_id, n=n)
     report = CommitReport(ok=False, txn_id=journal.meta.txn_id)
+    if unproven:
+        # Said on success too: the numbering an operator counted in
+        # `show journal` includes these, and the numbering here does not.
+        report.messages.append(excluded)
 
     # Snapshot current state first, so this rollback is itself revertible.
     for ref in refs:
@@ -1194,11 +1252,39 @@ def _rollback_locked(
     for ref in reversed(refs):
         resource = registry.get(ref.kind)
         journal.append("APPLY_START", ref=ref.key(), rollback_restore=True)
+        if ref.key() not in snapshots:
+            # The same refusal `_revert_items` makes (#110): "no snapshot
+            # recorded" and "recorded as absent" both used to arrive here as
+            # None, and None tells `rollback()` to delete — so a snapshot the
+            # source journal lost deleted a resource that was there all along.
+            detail = (
+                "no pre-change snapshot recorded in the source journal, so there "
+                "is nothing to restore from; left as-is rather than deleted"
+            )
+            journal.append("APPLY_RESULT", ref=ref.key(), ok=False, message=detail)
+            failures.append(f"{ref}: {detail}")
+            continue
+        snap = snapshots[ref.key()]
         try:
-            result = resource.rollback(ctx, ref, snapshots.get(ref.key()))
+            result = resource.rollback(ctx, ref, snap)
             ok, detail = result.ok, result.message
+            report.jobs.extend(result.jobs)
         except Exception as exc:  # noqa: BLE001 - report every restore failure rather than abort the rest of the rollback
             ok, detail = False, f"{type(exc).__name__}: {exc}"
+        if ok:
+            # Re-read and compare, as the other two restore paths do (#103).
+            # A `rollback()` that lies was believed here: CONFIRMED, "restored
+            # 1 resource(s)", fabric unchanged.
+            item = PlanItem(
+                ref=ref,
+                resource=resource,
+                delete=False,
+                current_raw=None,
+                current=None,
+                desired=None,
+                diff=Diff(ref=ref),
+            )
+            ok, detail = _confirm_restored(ctx, item, snap, detail)
         journal.append("APPLY_RESULT", ref=ref.key(), ok=ok, message=detail)
         if ok:
             report.applied.append(ref.key())
